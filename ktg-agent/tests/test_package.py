@@ -1,9 +1,11 @@
 import importlib
 import socket
 
+import pytest
 
-def test_package_import_does_not_attempt_network(monkeypatch):
-    def fail_on_network(*args, **kwargs):
+
+def test_package_import_does_not_attempt_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_on_network(*args: object, **kwargs: object) -> None:
         raise AssertionError("importing ktg_agent attempted a network connection")
 
     monkeypatch.setattr(socket, "create_connection", fail_on_network)
