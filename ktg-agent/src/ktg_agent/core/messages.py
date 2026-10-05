@@ -28,6 +28,7 @@ class StopReason(StrEnum):
     LENGTH = "length"
     ERROR = "error"
     CANCELLED = "cancelled"
+    LIMIT = "limit"
 
 
 def _required_text(value: object, label: str) -> str:

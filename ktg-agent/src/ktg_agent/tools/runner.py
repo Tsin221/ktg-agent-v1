@@ -10,8 +10,10 @@ from jsonschema import Draft202012Validator
 
 from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.tools.registry import (
+    ExecutionMode,
     ToolContext,
     ToolDefinition,
+    ToolEffect,
     ToolRegistry,
     ToolResult,
     ToolStatus,
@@ -48,6 +50,20 @@ class ToolRunner:
         self._registry = registry
         self._before_hooks = tuple(before_hooks)
         self._after_hooks = tuple(after_hooks)
+
+    def can_run_batch_in_parallel(self, calls: Sequence[ToolCall]) -> bool:
+        """Only independent, explicitly parallel reads may overlap."""
+        if not calls:
+            return False
+        try:
+            tools = tuple(self._registry.get(call.name) for call in calls)
+        except KeyError:
+            return False
+        return all(
+            tool.effect is ToolEffect.READ
+            and tool.execution_mode is ExecutionMode.PARALLEL
+            for tool in tools
+        )
 
     async def run(self, call: ToolCall, context: ToolContext) -> ToolResult:
         if context.tool_call_id != call.id:

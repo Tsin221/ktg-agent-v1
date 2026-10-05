@@ -94,7 +94,11 @@ class FinalResponse:
 
     def __post_init__(self) -> None:
         if self.message is None:
-            if self.stop_reason not in (StopReason.ERROR, StopReason.CANCELLED):
+            if self.stop_reason not in (
+                StopReason.ERROR,
+                StopReason.CANCELLED,
+                StopReason.LIMIT,
+            ):
                 raise MessageValidationError(
                     f"{self.stop_reason.value} response requires an assistant message"
                 )

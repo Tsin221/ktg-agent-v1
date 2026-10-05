@@ -53,6 +53,8 @@ uv run --locked pytest
 
 `ktg_agent.tools` 提供 `ToolDefinition`、`ToolRegistry` 与 `ToolRunner`。模型只能请求注册表中显式注册的工具；Runner 按固定顺序完成查找、严格参数校验、前置钩子、异步执行、输出校验和后置钩子。未注册工具、非法或额外参数以及被策略拒绝的调用都不会进入工具 `execute`。
 
+`AgentLoop` 通过 `RunLimits` 限制模型轮数、工具调用数、总运行时间和并行读取数。只有整批工具均为 `read + parallel` 时才会限量并行；批次中存在写工具或顺序工具时整批按调用顺序串行。并行工具的结束事件按实际完成顺序发布，写回模型上下文的工具结果仍严格保持调用顺序。预算耗尽时返回 `StopReason.LIMIT`，并在 `AgentRunResult.limit_reason` 与 `agent_end.limit_reason` 中给出具体限制名。
+
 工具返回 `ToolResult`：`content` 是给模型的必要摘要，`details` 是给 UI 的结构化数据。转换成 `ToolResultMessage` 后，既有的模型上下文投影会自动移除 `details`，避免结构化详情未经选择直接进入下一轮模型输入。
 
 运行严格类型检查：

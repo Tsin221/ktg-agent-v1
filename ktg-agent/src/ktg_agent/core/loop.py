@@ -1,9 +1,11 @@
-"""Minimal sequential model/tool loop with ordered lifecycle events."""
+"""Budgeted model/tool loop with safe batch scheduling and ordered events."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from time import monotonic
 
 from ktg_agent.core.events import (
     AgentEvent,
@@ -29,12 +31,45 @@ from ktg_agent.providers.base import (
     ProviderRequest,
     ResponseCompleted,
     TextDelta,
+    Usage,
 )
-from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
+from ktg_agent.tools import (
+    ToolContext,
+    ToolRegistry,
+    ToolResult,
+    ToolRunner,
+    ToolStatus,
+)
 
 
 class AgentLoopError(RuntimeError):
     """Raised when a provider violates the streaming response contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunLimits:
+    """Hard boundaries applied before starting model and tool work."""
+
+    max_model_turns: int = 32
+    max_tool_calls: int = 128
+    max_run_seconds: float = 300.0
+    max_parallel_reads: int = 4
+
+    def __post_init__(self) -> None:
+        integer_limits = {
+            "max_model_turns": self.max_model_turns,
+            "max_tool_calls": self.max_tool_calls,
+            "max_parallel_reads": self.max_parallel_reads,
+        }
+        for name, value in integer_limits.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if (
+            not isinstance(self.max_run_seconds, int | float)
+            or isinstance(self.max_run_seconds, bool)
+            or self.max_run_seconds <= 0
+        ):
+            raise ValueError("max_run_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +79,7 @@ class AgentRunResult:
     messages: tuple[Message, ...]
     final_response: FinalResponse
     events: tuple[AgentEvent, ...]
+    limit_reason: str | None = None
 
     @property
     def stop_reason(self) -> StopReason:
@@ -65,12 +101,16 @@ class AgentLoop:
         tool_runner: ToolRunner,
         model_config: ModelConfig,
         event_sink: EventSink | None = None,
+        limits: RunLimits | None = None,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         self._provider = provider
         self._tool_registry = tool_registry
         self._tool_runner = tool_runner
         self._model_config = model_config
         self._event_sink = event_sink
+        self._limits = limits or RunLimits()
+        self._clock = clock
 
     async def run(
         self,
@@ -85,15 +125,31 @@ class AgentLoop:
         if not history:
             raise ValueError("agent run requires at least one message")
 
+        started_at = self._clock()
         publisher = EventPublisher(run_id, self._event_sink)
         await publisher.emit(
             AgentEventType.AGENT_START,
             {"message_count": len(history)},
         )
         agent_status = "failed"
+        turn = 0
+        tool_calls_started = 0
         try:
-            turn = 0
             while True:
+                limit_reason = self._next_model_limit(
+                    started_at=started_at,
+                    completed_turns=turn,
+                    tool_calls=tool_calls_started,
+                )
+                if limit_reason is not None:
+                    return await self._limited_result(
+                        publisher=publisher,
+                        history=history,
+                        reason=limit_reason,
+                        turns=turn,
+                        tool_calls=tool_calls_started,
+                    )
+
                 turn += 1
                 response = await self._run_model_turn(
                     publisher=publisher,
@@ -113,79 +169,44 @@ class AgentLoop:
                         for block in response.message.content
                         if isinstance(block, ToolCall)
                     )
-                    for call in calls:
-                        await publisher.emit(
-                            AgentEventType.TOOL_EXECUTION_START,
-                            {
-                                "turn": turn,
-                                "tool_call_id": call.id,
-                                "tool_name": call.name,
-                            },
+                    time_exhausted = (
+                        self._clock() - started_at
+                        >= self._limits.max_run_seconds
+                    )
+                    remaining = self._limits.max_tool_calls - tool_calls_started
+                    runnable_calls = () if time_exhausted else calls[:remaining]
+                    skipped_calls = calls[len(runnable_calls) :]
+                    tool_calls_started += len(runnable_calls)
+                    results = await self._run_tool_batch(
+                        publisher=publisher,
+                        run_id=run_id,
+                        turn=turn,
+                        calls=runnable_calls,
+                        identity=identity,
+                        cancellation=cancellation,
+                        ktg_client=ktg_client,
+                    )
+                    for call, result in zip(runnable_calls, results, strict=True):
+                        await self._append_tool_message(
+                            publisher=publisher,
+                            history=history,
+                            run_id=run_id,
+                            turn=turn,
+                            call=call,
+                            result=result,
                         )
-                        progress = ToolProgressPublisher(
-                            publisher,
-                            tool_call_id=call.id,
-                            tool_name=call.name,
-                        )
-                        try:
-                            result = await self._tool_runner.run(
-                                call,
-                                ToolContext(
-                                    run_id=run_id,
-                                    tool_call_id=call.id,
-                                    identity=identity,
-                                    cancellation=cancellation,
-                                    progress_publisher=progress,
-                                    ktg_client=ktg_client,
-                                ),
-                            )
-                        except BaseException as exc:
-                            await publisher.emit(
-                                AgentEventType.TOOL_EXECUTION_END,
-                                {
-                                    "turn": turn,
-                                    "tool_call_id": call.id,
-                                    "tool_name": call.name,
-                                    "status": "failed",
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                            await publisher.emit(
-                                AgentEventType.TURN_END,
-                                {"turn": turn, "status": "failed"},
-                            )
-                            raise
-                        end_payload: JsonObject = {
-                            "turn": turn,
-                            "tool_call_id": call.id,
-                            "tool_name": call.name,
-                            "status": result.status.value,
-                        }
-                        if result.error_code is not None:
-                            end_payload["error_code"] = result.error_code
-                        await publisher.emit(
-                            AgentEventType.TOOL_EXECUTION_END,
-                            end_payload,
-                        )
-                        tool_message = result.to_message(call.id)
-                        history.append(tool_message)
-                        tool_message_id = f"{run_id}:tool-result:{call.id}"
-                        await publisher.emit(
-                            AgentEventType.MESSAGE_START,
-                            {
-                                "turn": turn,
-                                "message_id": tool_message_id,
-                                "role": "tool",
-                                "tool_call_id": call.id,
-                            },
-                        )
-                        await publisher.emit(
-                            AgentEventType.MESSAGE_END,
-                            {
-                                "turn": turn,
-                                "message_id": tool_message_id,
-                                "message": message_to_dict(tool_message),
-                            },
+                    for call in skipped_calls:
+                        await self._append_tool_message(
+                            publisher=publisher,
+                            history=history,
+                            run_id=run_id,
+                            turn=turn,
+                            call=call,
+                            result=ToolResult(
+                                content="Tool call was not executed because the run budget was exhausted.",
+                                status=ToolStatus.FAILED,
+                                error_code="RUN_LIMIT_REACHED",
+                            ),
                         )
 
                     await publisher.emit(
@@ -195,6 +216,18 @@ class AgentLoop:
                             "stop_reason": response.stop_reason.value,
                         },
                     )
+                    if skipped_calls:
+                        return await self._limited_result(
+                            publisher=publisher,
+                            history=history,
+                            reason=(
+                                "max_run_seconds"
+                                if time_exhausted
+                                else "max_tool_calls"
+                            ),
+                            turns=turn,
+                            tool_calls=tool_calls_started,
+                        )
                     continue
 
                 await publisher.emit(
@@ -228,6 +261,152 @@ class AgentLoop:
                 },
             )
             raise
+
+    def _next_model_limit(
+        self, *, started_at: float, completed_turns: int, tool_calls: int
+    ) -> str | None:
+        if self._clock() - started_at >= self._limits.max_run_seconds:
+            return "max_run_seconds"
+        if completed_turns >= self._limits.max_model_turns:
+            return "max_model_turns"
+        if tool_calls >= self._limits.max_tool_calls:
+            return "max_tool_calls"
+        return None
+
+    async def _run_tool_batch(
+        self,
+        *,
+        publisher: EventPublisher,
+        run_id: str,
+        turn: int,
+        calls: tuple[ToolCall, ...],
+        identity: object | None,
+        cancellation: CancellationSignal | None,
+        ktg_client: object | None,
+    ) -> tuple[ToolResult, ...]:
+        async def execute(call: ToolCall) -> ToolResult:
+            await publisher.emit(
+                AgentEventType.TOOL_EXECUTION_START,
+                {
+                    "turn": turn,
+                    "tool_call_id": call.id,
+                    "tool_name": call.name,
+                },
+            )
+            progress = ToolProgressPublisher(
+                publisher,
+                tool_call_id=call.id,
+                tool_name=call.name,
+            )
+            try:
+                result = await self._tool_runner.run(
+                    call,
+                    ToolContext(
+                        run_id=run_id,
+                        tool_call_id=call.id,
+                        identity=identity,
+                        cancellation=cancellation,
+                        progress_publisher=progress,
+                        ktg_client=ktg_client,
+                    ),
+                )
+            except BaseException as exc:
+                await publisher.emit(
+                    AgentEventType.TOOL_EXECUTION_END,
+                    {
+                        "turn": turn,
+                        "tool_call_id": call.id,
+                        "tool_name": call.name,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+            end_payload: JsonObject = {
+                "turn": turn,
+                "tool_call_id": call.id,
+                "tool_name": call.name,
+                "status": result.status.value,
+            }
+            if result.error_code is not None:
+                end_payload["error_code"] = result.error_code
+            await publisher.emit(AgentEventType.TOOL_EXECUTION_END, end_payload)
+            return result
+
+        if not calls:
+            return ()
+        if not self._tool_runner.can_run_batch_in_parallel(calls):
+            return tuple([await execute(call) for call in calls])
+
+        semaphore = asyncio.Semaphore(self._limits.max_parallel_reads)
+
+        async def limited_execute(call: ToolCall) -> ToolResult:
+            async with semaphore:
+                return await execute(call)
+
+        return tuple(await asyncio.gather(*(limited_execute(call) for call in calls)))
+
+    @staticmethod
+    async def _append_tool_message(
+        *,
+        publisher: EventPublisher,
+        history: list[Message],
+        run_id: str,
+        turn: int,
+        call: ToolCall,
+        result: ToolResult,
+    ) -> None:
+        tool_message = result.to_message(call.id)
+        history.append(tool_message)
+        tool_message_id = f"{run_id}:tool-result:{call.id}"
+        await publisher.emit(
+            AgentEventType.MESSAGE_START,
+            {
+                "turn": turn,
+                "message_id": tool_message_id,
+                "role": "tool",
+                "tool_call_id": call.id,
+            },
+        )
+        await publisher.emit(
+            AgentEventType.MESSAGE_END,
+            {
+                "turn": turn,
+                "message_id": tool_message_id,
+                "message": message_to_dict(tool_message),
+            },
+        )
+
+    @staticmethod
+    async def _limited_result(
+        *,
+        publisher: EventPublisher,
+        history: list[Message],
+        reason: str,
+        turns: int,
+        tool_calls: int,
+    ) -> AgentRunResult:
+        response = FinalResponse(
+            message=None,
+            stop_reason=StopReason.LIMIT,
+            usage=Usage(input_tokens=0, output_tokens=0),
+        )
+        await AgentLoop._emit_agent_end_once(
+            publisher,
+            {
+                "status": "limited",
+                "stop_reason": StopReason.LIMIT.value,
+                "limit_reason": reason,
+                "turns": turns,
+                "tool_calls": tool_calls,
+            },
+        )
+        return AgentRunResult(
+            messages=tuple(history),
+            final_response=response,
+            events=publisher.events,
+            limit_reason=reason,
+        )
 
     async def _run_model_turn(
         self,

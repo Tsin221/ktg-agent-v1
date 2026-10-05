@@ -145,4 +145,5 @@ def test_stop_reasons_distinguish_truncation_error_and_cancellation() -> None:
         "length",
         "error",
         "cancelled",
+        "limit",
     }
