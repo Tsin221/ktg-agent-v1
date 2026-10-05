@@ -20,6 +20,7 @@ class AgentEventType(StrEnum):
     TOOL_EXECUTION_START = "tool_execution_start"
     TOOL_EXECUTION_UPDATE = "tool_execution_update"
     TOOL_EXECUTION_END = "tool_execution_end"
+    INPUT_QUEUED = "input_queued"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,10 @@ class EventPublisher:
     @property
     def events(self) -> tuple[AgentEvent, ...]:
         return tuple(self._events)
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
 
     async def emit(self, event_type: AgentEventType, payload: JsonObject) -> AgentEvent:
         event = AgentEvent(

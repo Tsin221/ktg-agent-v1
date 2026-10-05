@@ -23,6 +23,7 @@ from ktg_agent.core.messages import (
     message_to_dict,
     project_model_messages,
 )
+from ktg_agent.core.queues import InputQueue
 from ktg_agent.providers.base import (
     CancellationSignal,
     FinalResponse,
@@ -112,6 +113,10 @@ class AgentLoop:
         self._limits = limits or RunLimits()
         self._clock = clock
 
+    @property
+    def event_sink(self) -> EventSink | None:
+        return self._event_sink
+
     async def run(
         self,
         *,
@@ -120,13 +125,18 @@ class AgentLoop:
         identity: object | None = None,
         cancellation: CancellationSignal | None = None,
         ktg_client: object | None = None,
+        input_queue: InputQueue | None = None,
+        publisher: EventPublisher | None = None,
     ) -> AgentRunResult:
         history = list(messages)
         if not history:
             raise ValueError("agent run requires at least one message")
 
         started_at = self._clock()
-        publisher = EventPublisher(run_id, self._event_sink)
+        if publisher is None:
+            publisher = EventPublisher(run_id, self._event_sink)
+        elif publisher.run_id != run_id:
+            raise ValueError("event publisher run id does not match the agent run")
         await publisher.emit(
             AgentEventType.AGENT_START,
             {"message_count": len(history)},
@@ -136,6 +146,13 @@ class AgentLoop:
         tool_calls_started = 0
         try:
             while True:
+                if cancellation is not None and cancellation.is_cancelled:
+                    return await self._cancelled_result(
+                        publisher=publisher,
+                        history=history,
+                        turns=turn,
+                        tool_calls=tool_calls_started,
+                    )
                 limit_reason = self._next_model_limit(
                     started_at=started_at,
                     completed_turns=turn,
@@ -176,8 +193,7 @@ class AgentLoop:
                     remaining = self._limits.max_tool_calls - tool_calls_started
                     runnable_calls = () if time_exhausted else calls[:remaining]
                     skipped_calls = calls[len(runnable_calls) :]
-                    tool_calls_started += len(runnable_calls)
-                    results = await self._run_tool_batch(
+                    results, batch_started = await self._run_tool_batch(
                         publisher=publisher,
                         run_id=run_id,
                         turn=turn,
@@ -186,6 +202,7 @@ class AgentLoop:
                         cancellation=cancellation,
                         ktg_client=ktg_client,
                     )
+                    tool_calls_started += batch_started
                     for call, result in zip(runnable_calls, results, strict=True):
                         await self._append_tool_message(
                             publisher=publisher,
@@ -228,6 +245,17 @@ class AgentLoop:
                             turns=turn,
                             tool_calls=tool_calls_started,
                         )
+                    if cancellation is not None and cancellation.is_cancelled:
+                        return await self._cancelled_result(
+                            publisher=publisher,
+                            history=history,
+                            turns=turn,
+                            tool_calls=tool_calls_started,
+                        )
+                    if input_queue is not None:
+                        steering = input_queue.drain_steering()
+                        if steering:
+                            history.extend(steering)
                     continue
 
                 await publisher.emit(
@@ -237,6 +265,26 @@ class AgentLoop:
                         "stop_reason": response.stop_reason.value,
                     },
                 )
+                if cancellation is not None and cancellation.is_cancelled:
+                    return await self._cancelled_result(
+                        publisher=publisher,
+                        history=history,
+                        turns=turn,
+                        tool_calls=tool_calls_started,
+                    )
+                if input_queue is not None:
+                    steering = input_queue.drain_steering()
+                    if steering:
+                        history.extend(steering)
+                        continue
+                    if response.stop_reason in {
+                        StopReason.COMPLETED,
+                        StopReason.LENGTH,
+                    }:
+                        follow_ups = input_queue.drain_follow_ups()
+                        if follow_ups:
+                            history.extend(follow_ups)
+                            continue
                 agent_status = self._agent_status(response.stop_reason)
                 await self._emit_agent_end_once(
                     publisher,
@@ -283,8 +331,12 @@ class AgentLoop:
         identity: object | None,
         cancellation: CancellationSignal | None,
         ktg_client: object | None,
-    ) -> tuple[ToolResult, ...]:
+    ) -> tuple[tuple[ToolResult, ...], int]:
+        started_count = 0
+
         async def execute(call: ToolCall) -> ToolResult:
+            nonlocal started_count
+            started_count += 1
             await publisher.emit(
                 AgentEventType.TOOL_EXECUTION_START,
                 {
@@ -334,17 +386,36 @@ class AgentLoop:
             return result
 
         if not calls:
-            return ()
+            return (), 0
         if not self._tool_runner.can_run_batch_in_parallel(calls):
-            return tuple([await execute(call) for call in calls])
+            sequential_results: list[ToolResult] = []
+            for call in calls:
+                if cancellation is not None and cancellation.is_cancelled:
+                    sequential_results.append(self._cancelled_tool_result())
+                else:
+                    sequential_results.append(await execute(call))
+            return tuple(sequential_results), started_count
 
         semaphore = asyncio.Semaphore(self._limits.max_parallel_reads)
 
         async def limited_execute(call: ToolCall) -> ToolResult:
             async with semaphore:
+                if cancellation is not None and cancellation.is_cancelled:
+                    return self._cancelled_tool_result()
                 return await execute(call)
 
-        return tuple(await asyncio.gather(*(limited_execute(call) for call in calls)))
+        parallel_results = tuple(
+            await asyncio.gather(*(limited_execute(call) for call in calls))
+        )
+        return parallel_results, started_count
+
+    @staticmethod
+    def _cancelled_tool_result() -> ToolResult:
+        return ToolResult(
+            content="Tool call was not started because the run was cancelled.",
+            status=ToolStatus.FAILED,
+            error_code="RUN_CANCELLED",
+        )
 
     @staticmethod
     async def _append_tool_message(
@@ -375,6 +446,34 @@ class AgentLoop:
                 "message_id": tool_message_id,
                 "message": message_to_dict(tool_message),
             },
+        )
+
+    @staticmethod
+    async def _cancelled_result(
+        *,
+        publisher: EventPublisher,
+        history: list[Message],
+        turns: int,
+        tool_calls: int,
+    ) -> AgentRunResult:
+        response = FinalResponse(
+            message=None,
+            stop_reason=StopReason.CANCELLED,
+            usage=Usage(input_tokens=0, output_tokens=0),
+        )
+        await AgentLoop._emit_agent_end_once(
+            publisher,
+            {
+                "status": "cancelled",
+                "stop_reason": StopReason.CANCELLED.value,
+                "turns": turns,
+                "tool_calls": tool_calls,
+            },
+        )
+        return AgentRunResult(
+            messages=tuple(history),
+            final_response=response,
+            events=publisher.events,
         )
 
     @staticmethod
