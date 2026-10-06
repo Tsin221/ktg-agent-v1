@@ -8,8 +8,6 @@ import os
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import cast
-
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.providers import OpenAICompatibleProvider
@@ -30,10 +28,24 @@ class Settings:
     def from_env(cls) -> "Settings":
         api_key = os.environ.get("MODEL_API_KEY", "").strip()
         model_id = os.environ.get("MODEL_ID", "").strip()
-        if not api_key:
-            raise RuntimeError("MODEL_API_KEY is required")
-        if not model_id:
-            raise RuntimeError("MODEL_ID is required")
+        if not api_key or api_key == "CHANGE_ME":
+            raise RuntimeError("MODEL_API_KEY must be configured")
+        if not model_id or model_id == "CHANGE_ME":
+            raise RuntimeError("MODEL_ID must be configured")
+        model_base_url = os.environ.get(
+            "MODEL_BASE_URL", "https://api.openai.com/v1"
+        ).strip()
+        ktg_base_url = os.environ.get(
+            "KTG_BASE_URL", "http://127.0.0.1:8080"
+        ).strip()
+        host = os.environ.get("AGENT_HOST", "127.0.0.1").strip()
+        for name, value in (
+            ("MODEL_BASE_URL", model_base_url),
+            ("KTG_BASE_URL", ktg_base_url),
+            ("AGENT_HOST", host),
+        ):
+            if not value:
+                raise RuntimeError(f"{name} must not be blank")
         raw_port = os.environ.get("AGENT_PORT", "8001")
         try:
             port = int(raw_port)
@@ -43,14 +55,10 @@ class Settings:
             raise RuntimeError("AGENT_PORT must be between 1 and 65535")
         return cls(
             model_api_key=api_key,
-            model_base_url=os.environ.get(
-                "MODEL_BASE_URL", "https://api.openai.com/v1"
-            ).strip(),
+            model_base_url=model_base_url,
             model_id=model_id,
-            ktg_base_url=os.environ.get(
-                "KTG_BASE_URL", "http://127.0.0.1:8080"
-            ).strip(),
-            host=os.environ.get("AGENT_HOST", "127.0.0.1").strip(),
+            ktg_base_url=ktg_base_url,
+            host=host,
             port=port,
         )
 
@@ -72,7 +80,6 @@ def create_service(settings: Settings) -> QueryService:
         model_config=ModelConfig(
             model=settings.model_id,
             max_output_tokens=1024,
-            temperature=0,
         ),
         ktg_client_factory=client_factory,
     )

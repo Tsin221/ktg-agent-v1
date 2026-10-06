@@ -196,6 +196,8 @@ docker compose -f docker-compose.mysql.yml stop
 
 ### 6.1 一键启动前后端（推荐）
 
+首次使用 Agent 前，必须先在根目录 `.env` 中填写真实的 `MODEL_API_KEY` 和 `MODEL_ID`。保留空值或 `CHANGE_ME` 时，一键启动会在创建任何服务窗口前明确失败。
+
 双击工作区根目录中的 `启动前后端.cmd`。脚本会：
 
 1. 检查 Docker Desktop；
@@ -203,7 +205,8 @@ docker compose -f docker-compose.mysql.yml stop
 3. 检查后端 `8080` 和前端 `81` 端口；
 4. 打开一个后端 PowerShell 窗口，自动加载 JDK 8、密码本、构建并启动后端；
 5. 打开前端 PowerShell 窗口，使用项目 Node 16 启动前端；
-6. 打开 Agent PowerShell 窗口，加载 `.env` 并启动真实模型查询服务。
+6. 打开 Agent PowerShell 窗口，加载 `.env` 并启动真实模型查询服务；
+7. 等待三个端口实际监听，并调用 Agent `/health`；只有全部通过才报告启动成功。
 
 不要关闭这三个运行窗口。停止服务时，在对应窗口按 `Ctrl+C`。
 
@@ -303,7 +306,7 @@ npm run build:prod
 ktg-mes-ui/dist/
 ```
 
-生产环境需要由 Nginx 等 Web 服务器托管 `dist`，并把 `/prod-api/` 反向代理到后端 `8080`，代理时去掉 `/prod-api` 前缀；`/ureport/` 也应代理到后端。
+生产环境需要由 Nginx 等 Web 服务器托管 `dist`，并把 `/prod-api/` 反向代理到后端 `8080`，代理时去掉 `/prod-api` 前缀；`/ureport/` 也应代理到后端。智能查询还要求把同源 `/agent-api/` 反向代理到 Agent `8001`，不要把模型 API Key 放进前端或 Nginx 配置。
 
 ## 10. 常见问题
 

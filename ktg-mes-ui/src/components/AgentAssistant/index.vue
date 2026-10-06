@@ -84,7 +84,7 @@ export default {
       currentUser: '',
       messageId: 0,
       messages: [],
-      examples: ['查询最近的产品', '查询 A-01 的库存', '查询最近的生产工单']
+      examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '查询最近的生产工单']
     }
   },
   methods: {
