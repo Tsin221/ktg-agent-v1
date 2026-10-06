@@ -202,9 +202,10 @@ docker compose -f docker-compose.mysql.yml stop
 2. 启动并等待 MySQL、Redis 健康；
 3. 检查后端 `8080` 和前端 `81` 端口；
 4. 打开一个后端 PowerShell 窗口，自动加载 JDK 8、密码本、构建并启动后端；
-5. 打开另一个前端 PowerShell 窗口，使用项目 Node 16 启动前端。
+5. 打开前端 PowerShell 窗口，使用项目 Node 16 启动前端；
+6. 打开 Agent PowerShell 窗口，加载 `.env` 并启动真实模型查询服务。
 
-不要关闭这两个运行窗口。停止服务时，在对应窗口按 `Ctrl+C`。
+不要关闭这三个运行窗口。停止服务时，在对应窗口按 `Ctrl+C`。
 
 ### 6.2 手动启动后端
 
@@ -267,8 +268,10 @@ http://localhost:81
 2. 启动 Redis
 3. 执行 `. .\use-java8.ps1` 和 `. .\use-local-secrets.ps1`
 4. 启动后端 `ktg-admin.jar` 或运行 `RuoYiApplication`
-5. 在 `ktg-mes-ui` 中执行 `npm run dev -- --port 81`
-6. 浏览器访问 `http://localhost:81`
+5. 在根目录 `.env` 配置 `MODEL_API_KEY`、`MODEL_BASE_URL` 和 `MODEL_ID`
+6. 在 `ktg-agent` 中执行 `uv run --locked python -m ktg_agent.server`
+7. 在 `ktg-mes-ui` 中执行 `npm run dev -- --port 81`
+8. 浏览器访问 `http://localhost:81`，通过公共布局右下角“智能查询”使用当前账号查询产品、库存和工单
 
 ## 9. 前后端打包
 

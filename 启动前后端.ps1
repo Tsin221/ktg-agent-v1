@@ -4,6 +4,7 @@ $workspaceRoot = $PSScriptRoot
 $composeFile = Join-Path $workspaceRoot 'docker-compose.mysql.yml'
 $backendScript = Join-Path $workspaceRoot 'scripts\start-backend.ps1'
 $frontendScript = Join-Path $workspaceRoot 'scripts\start-frontend.ps1'
+$agentScript = Join-Path $workspaceRoot 'scripts\start-agent.ps1'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Test-LocalPort {
@@ -27,7 +28,7 @@ function Test-LocalPort {
 }
 
 try {
-    foreach ($requiredFile in @($composeFile, $backendScript, $frontendScript, $windowsPowerShell)) {
+    foreach ($requiredFile in @($composeFile, $backendScript, $frontendScript, $agentScript, $windowsPowerShell)) {
         if (-not (Test-Path -LiteralPath $requiredFile)) {
             throw "Required file not found: $requiredFile"
         }
@@ -57,6 +58,9 @@ try {
     if (Test-LocalPort -Port 81) {
         throw 'Port 81 is already in use. Stop the existing frontend and try again.'
     }
+    if (Test-LocalPort -Port 8001) {
+        throw 'Port 8001 is already in use. Stop the existing Agent service and try again.'
+    }
 
     Write-Host 'Opening backend terminal...' -ForegroundColor Cyan
     Start-Process -FilePath $windowsPowerShell `
@@ -68,10 +72,16 @@ try {
         -WorkingDirectory $workspaceRoot `
         -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$frontendScript`"")
 
+    Write-Host 'Opening Agent terminal...' -ForegroundColor Cyan
+    Start-Process -FilePath $windowsPowerShell `
+        -WorkingDirectory $workspaceRoot `
+        -ArgumentList @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$agentScript`"")
+
     Write-Host ''
-    Write-Host 'Two terminals have been opened.' -ForegroundColor Green
+    Write-Host 'Three terminals have been opened.' -ForegroundColor Green
     Write-Host 'Frontend: http://localhost:81'
     Write-Host 'Backend:  http://localhost:8080'
+    Write-Host 'Agent:    http://localhost:8001'
 }
 catch {
     Write-Host ''

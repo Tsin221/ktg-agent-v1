@@ -1,6 +1,6 @@
 <template>
   <div :class="classObj" class="app-wrapper" :style="{'--current-color': theme}">
-    <div v-if="device==='mobile'&&sidebar.opened" class="drawer-bg" @click="handleClickOutside"/>
+    <div v-if="device==='mobile'&&sidebar.opened" class="drawer-bg" @click="handleClickOutside" />
     <sidebar v-if="!sidebar.hide" class="sidebar-container" />
     <div :class="{hasTagsView:needTagsView,sidebarHide:sidebar.hide}" class="main-container">
       <div :class="{'fixed-header':fixedHeader}">
@@ -12,11 +12,13 @@
         <settings />
       </right-panel>
     </div>
+    <agent-assistant />
   </div>
 </template>
 
 <script>
 import RightPanel from '@/components/RightPanel'
+import AgentAssistant from '@/components/AgentAssistant'
 import { AppMain, Navbar, Settings, Sidebar, TagsView } from './components'
 import ResizeMixin from './mixin/ResizeHandler'
 import { mapState } from 'vuex'
@@ -26,6 +28,7 @@ export default {
   name: 'Layout',
   components: {
     AppMain,
+    AgentAssistant,
     Navbar,
     RightPanel,
     Settings,
@@ -51,7 +54,7 @@ export default {
       }
     },
     variables() {
-      return variables;
+      return variables
     }
   },
   methods: {

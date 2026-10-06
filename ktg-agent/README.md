@@ -1,6 +1,6 @@
 # KTG Agent
 
-KTG Agent 的 Python 核心包。阶段 A 已实现供应商无关的消息与 Provider 协议、可编排 `FakeProvider`、受控工具注册与执行、带预算的 `AgentLoop`，以及单活动运行的有状态 `Agent`。当前包不连接真实模型、KTG、数据库或 HTTP 服务。
+KTG Agent 的 Python 核心包。除阶段 A 的离线核心外，当前已提供 OpenAI 兼容模型适配器、本地 HTTP 查询入口，以及按当前 KTG 用户身份执行的产品、库存和工单三个只读查询工具。
 
 核心接口、事件语义和阶段 B 交接项见 [`docs/core-contracts.md`](docs/core-contracts.md)。
 
@@ -60,6 +60,34 @@ uv run --locked mypy
 ```
 
 `pytest` 覆盖消息序列化与模型投影、FakeProvider 脚本、工具白名单与 schema 校验、工具调度和预算、事件顺序、取消、steer/follow-up 队列、监听器异常以及离线示例。`mypy` 对 `src` 和 `tests` 运行严格类型检查。
+
+## 真实模型与网页查询
+
+在工作区根目录 `.env` 中配置下列服务端变量，真实密钥不要写入 `.env.example` 或提交到 Git：
+
+```dotenv
+MODEL_API_KEY=...
+MODEL_BASE_URL=https://api.openai.com/v1
+MODEL_ID=...
+KTG_BASE_URL=http://127.0.0.1:8080
+AGENT_HOST=127.0.0.1
+AGENT_PORT=8001
+```
+
+加载根目录环境变量后启动查询服务：
+
+```powershell
+. ..\use-local-secrets.ps1
+uv run --locked python -m ktg_agent.server
+```
+
+服务提供 `GET /health` 和 `POST /agent-api/v1/query`。查询请求必须携带当前网页用户的 `Authorization: Bearer <KTG token>`；服务先调用 KTG `/getInfo` 验证身份，然后只允许模型使用以下三个固定只读工具：
+
+- `ktg.search_items` → `GET /mes/md/mditem/list`
+- `ktg.query_stock` → `GET /mes/wm/wmstock/list`
+- `ktg.list_workorders` → `GET /mes/pro/workorder/list`
+
+模型 API Key 只保留在 Python 服务进程中，不发送到浏览器或 KTG。模型不能指定 KTG 地址、HTTP 方法或任意接口路径。
 
 ## 项目结构
 

@@ -41,6 +41,10 @@ module.exports = {
           ['^' + process.env.VUE_APP_BASE_API]: ''
         }
       },
+      '/agent-api': {
+        target: 'http://127.0.0.1:8001',
+        changeOrigin: false
+      },
       '/ureport': {
         target: 'http://localhost:8080',
         ws:false,
