@@ -1,72 +1,84 @@
 # KTG Agent
 
-KTG Agent 的 Python 核心包。当前版本只提供可安装、可导入的最小项目骨架；导入包不会连接网络、模型服务或 KTG。
+KTG Agent 的 Python 核心包。阶段 A 已实现供应商无关的消息与 Provider 协议、可编排 `FakeProvider`、受控工具注册与执行、带预算的 `AgentLoop`，以及单活动运行的有状态 `Agent`。当前包不连接真实模型、KTG、数据库或 HTTP 服务。
+
+核心接口、事件语义和阶段 B 交接项见 [`docs/core-contracts.md`](docs/core-contracts.md)。
 
 ## 环境要求
 
-- Python 3.12（当前验证版本 3.12.6）
+- Python 3.12（本阶段验证版本：3.12.6）
 - uv 0.11.21
 
-运行时使用 jsonschema 4.25.1 校验工具输入和结构化输出。开发依赖通过 `uv.lock` 固定，其中测试入口使用 pytest 9.0.3、类型检查使用 mypy 1.18.2；构建后端固定为 hatchling 1.27.0。Node.js 和 Java 环境不是此 Python 包的依赖。
+运行时依赖为 jsonschema 4.25.1。`uv.lock` 同时固定 pytest 9.0.3、mypy 1.18.2、types-jsonschema 4.26.0.20260518 和 hatchling 1.27.0。Node.js、Java、KTG 服务和网络访问都不是阶段 A 验证的依赖。
 
-## 安装
+## 从干净环境开始
 
-进入本目录后，使用锁文件创建隔离环境并安装项目：
+克隆仓库后进入 `ktg-agent` 目录。以下命令创建本地 `.venv`，并严格使用锁文件安装项目和开发依赖：
 
 ```powershell
 uv sync --locked
 ```
 
-该命令会创建 `.venv`，安装当前项目及固定版本的开发依赖。若只需要运行包、不需要测试工具：
+只安装运行时依赖时使用：
 
 ```powershell
 uv sync --locked --no-dev
 ```
 
-## 验证导入
+验证包可导入：
 
 ```powershell
 uv run --locked python -c "import ktg_agent; print(ktg_agent.__version__)"
 ```
 
+预期输出为 `0.1.0`。
+
+## 离线示例
+
+运行 FakeProvider、假查询工具和 AgentLoop 的完整两轮闭环：
+
+```powershell
+uv run --locked python examples/fake_agent.py
+```
+
 预期输出：
 
 ```text
-0.1.0
+final: 仓库 WH-A 的可用库存为 8。
+provider_requests: 2
+tool_calls: 1
+events: agent_start -> turn_start -> message_start -> message_end -> tool_execution_start -> tool_execution_end -> message_start -> message_end -> turn_end -> turn_start -> message_start -> message_update -> message_end -> turn_end -> agent_end
 ```
 
-## 运行测试
+脚本完全由内存中的固定输入驱动，不读取环境变量，也不发起网络请求。`FakeProvider` 的每个 `ScriptedTurn` 必须以一个 `ResponseCompleted` 或 `ProviderError` 结束；每次 Provider 调用消费一轮，并可通过 `provider.requests` 检查 Agent 实际发送的上下文。
+
+## 验证命令
 
 ```powershell
 uv run --locked pytest
-```
-
-测试覆盖包导入、消息转换与投影、工具调用关联、Provider 事件流、工具白名单与 schema 校验、执行钩子、异常归一化及终止边界；包导入过程不会尝试建立网络连接。
-
-## 核心消息与 Provider 协议
-
-`ktg_agent.core.messages` 定义四类消息：`SystemMessage`、`UserMessage`、`AssistantMessage` 和 `ToolResultMessage`。消息内容由 `TextBlock` 与完整 `ToolCall` 组成；工具结果通过 `tool_call_id` 对应调用。`project_model_messages` 会过滤 UI 专用文本和工具结果详情，并校验调用 ID 的唯一性、顺序和完整性。
-
-`ktg_agent.providers.base` 定义供应商无关的 `Provider` 流接口。输入包含模型消息、工具 schema、模型配置与可选取消信号；输出事件为 `TextDelta`、`ToolCallCompleted` 和最终的 `ResponseCompleted`。`StopReason` 明确区分正常结束、工具调用、长度截断、错误和取消。
-
-## 工具注册与执行
-
-`ktg_agent.tools` 提供 `ToolDefinition`、`ToolRegistry` 与 `ToolRunner`。模型只能请求注册表中显式注册的工具；Runner 按固定顺序完成查找、严格参数校验、前置钩子、异步执行、输出校验和后置钩子。未注册工具、非法或额外参数以及被策略拒绝的调用都不会进入工具 `execute`。
-
-`AgentLoop` 通过 `RunLimits` 限制模型轮数、工具调用数、总运行时间和并行读取数。只有整批工具均为 `read + parallel` 时才会限量并行；批次中存在写工具或顺序工具时整批按调用顺序串行。并行工具的结束事件按实际完成顺序发布，写回模型上下文的工具结果仍严格保持调用顺序。预算耗尽时返回 `StopReason.LIMIT`，并在 `AgentRunResult.limit_reason` 与 `agent_end.limit_reason` 中给出具体限制名。
-
-工具返回 `ToolResult`：`content` 是给模型的必要摘要，`details` 是给 UI 的结构化数据。转换成 `ToolResultMessage` 后，既有的模型上下文投影会自动移除 `details`，避免结构化详情未经选择直接进入下一轮模型输入。
-
-运行严格类型检查：
-
-```powershell
 uv run --locked mypy
 ```
 
-## 最小示例
+`pytest` 覆盖消息序列化与模型投影、FakeProvider 脚本、工具白名单与 schema 校验、工具调度和预算、事件顺序、取消、steer/follow-up 队列、监听器异常以及离线示例。`mypy` 对 `src` 和 `tests` 运行严格类型检查。
 
-```python
-import ktg_agent
+## 项目结构
 
-print(ktg_agent.__version__)
+```text
+src/ktg_agent/
+  core/       消息、生命周期事件、AgentLoop、Agent 和输入队列
+  providers/  Provider 协议与 FakeProvider
+  tools/      工具定义、白名单注册表和受控执行器
+examples/     无网络可执行示例
+tests/        单元与回归测试
+docs/         核心契约和阶段交接说明
 ```
+
+## 阶段 A 边界
+
+- `AgentLoop` 只处理模型/工具循环，不负责会话持久化、身份验证或 HTTP。
+- `Agent` 保证单实例同一时刻只有一个活动 run；并发普通 `prompt` 返回 `RUN_BUSY`。
+- `abort()` 只阻止尚未开始的后续动作，不回滚已经执行的工具或外部操作。
+- 只有完整且最终停止原因为 `tool_call` 的工具调用会执行；截断输出不会执行流中出现的调用。
+- 阶段 A 的 `agent_end` 是低层循环结束事件，`Agent` 随后在 `prompt` 的 `finally` 中转为 idle。未来阶段 B 的 `run_settled` 必须等最终状态、消息、事件和必要操作记录持久化后再由 SessionService 发布，三者不能互相替代。
+
+阶段 B 尚需实现会话存储与幂等 admission、服务端身份上下文、HTTP/SSE 与事件回放，以及外部写入结果未知时的持久化和核验流程。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
