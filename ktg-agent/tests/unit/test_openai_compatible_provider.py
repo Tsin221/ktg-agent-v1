@@ -2,9 +2,45 @@ import asyncio
 import json
 from collections.abc import Mapping
 
+import pytest
+
 from ktg_agent.core.messages import SystemMessage, TextBlock, ToolCall, UserMessage
 from ktg_agent.providers.base import ModelConfig, ProviderRequest, ToolSchema
+from ktg_agent.providers.base import ProviderError
 from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
+
+
+def test_provider_rejects_tool_names_outside_openai_pattern() -> None:
+    async def scenario() -> None:
+        async def transport(
+            _url: str,
+            _headers: Mapping[str, str],
+            _body: dict[str, object],
+            _timeout_seconds: float,
+        ) -> dict[str, object]:
+            raise AssertionError("invalid tool names must fail before transport")
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key",
+            base_url="https://models.example/v1",
+            transport=transport,
+        )
+        request = ProviderRequest(
+            messages=(UserMessage((TextBlock("查询"),)),),
+            tools=(
+                ToolSchema(
+                    name="ktg.query_stock",
+                    description="Query stock",
+                    input_schema={"type": "object", "properties": {}},
+                ),
+            ),
+            config=ModelConfig(model="test-model", max_output_tokens=32),
+        )
+
+        with pytest.raises(ProviderError, match="tool name"):
+            _ = [event async for event in provider.stream(request)]
+
+    asyncio.run(scenario())
 
 
 def test_provider_converts_tool_call_response() -> None:
@@ -35,7 +71,7 @@ async def _provider_converts_tool_call_response() -> None:
                                 "id": "call-1",
                                 "type": "function",
                                 "function": {
-                                    "name": "ktg.query_stock",
+                                    "name": "ktg_query_stock",
                                     "arguments": json.dumps({"item_code": "A-01"}),
                                 },
                             }
@@ -58,7 +94,7 @@ async def _provider_converts_tool_call_response() -> None:
         ),
         tools=(
             ToolSchema(
-                name="ktg.query_stock",
+                name="ktg_query_stock",
                 description="Query stock",
                 input_schema={
                     "type": "object",
@@ -76,7 +112,7 @@ async def _provider_converts_tool_call_response() -> None:
     assert completed.stop_reason.value == "tool_call"
     assert completed.message is not None
     assert completed.message.content == (
-        ToolCall(id="call-1", name="ktg.query_stock", arguments={"item_code": "A-01"}),
+        ToolCall(id="call-1", name="ktg_query_stock", arguments={"item_code": "A-01"}),
     )
     assert captured["url"] == "https://models.example/v1/chat/completions"
     assert captured["headers"] == {
@@ -93,7 +129,7 @@ async def _provider_converts_tool_call_response() -> None:
             {
                 "type": "function",
                 "function": {
-                    "name": "ktg.query_stock",
+                    "name": "ktg_query_stock",
                     "description": "Query stock",
                     "parameters": {
                         "type": "object",

@@ -27,7 +27,7 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
     }
     return (
         _tool(
-            name="ktg.search_items",
+            name="ktg_search_items",
             label="查询产品",
             description="按产品或物料编码、名称查询 KTG 产品资料。至少提供一个筛选条件。",
             properties={
@@ -38,7 +38,7 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
             execute=_search_items,
         ),
         _tool(
-            name="ktg.query_stock",
+            name="ktg_query_stock",
             label="查询库存",
             description="按物料编码查询当前用户有权查看的分仓库存。",
             properties={
@@ -50,7 +50,7 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
             required=("item_code",),
         ),
         _tool(
-            name="ktg.list_workorders",
+            name="ktg_list_workorders",
             label="查询工单",
             description="按工单编号、产品编码或状态查询当前用户有权查看的生产工单。",
             properties={

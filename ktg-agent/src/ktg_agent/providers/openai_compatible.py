@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
@@ -145,6 +146,12 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _request_payload(request: ProviderRequest) -> dict[str, object]:
+        for tool in request.tools:
+            if re.fullmatch(r"[A-Za-z0-9_-]+", tool.name) is None:
+                raise ProviderError(
+                    "MODEL_INVALID_TOOL_NAME",
+                    f"OpenAI-compatible tool name is invalid: {tool.name!r}.",
+                )
         payload: dict[str, object] = {
             "model": request.config.model,
             "messages": [

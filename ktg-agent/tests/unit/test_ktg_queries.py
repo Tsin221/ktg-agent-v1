@@ -1,9 +1,15 @@
 import asyncio
+import re
 from collections.abc import Mapping
 
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.ktg.queries import build_query_tools
 from ktg_agent.tools import ToolContext
+
+
+def test_query_tool_names_are_openai_compatible() -> None:
+    for tool in build_query_tools():
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", tool.name)
 
 
 def test_client_validates_current_user_and_forwards_bearer_token() -> None:
@@ -109,13 +115,13 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
         ktg_client=client,
     )
 
-    item_result = await tools["ktg.search_items"].execute(
+    item_result = await tools["ktg_search_items"].execute(
         context, {"item_name": "产品 A", "page": 1, "page_size": 10}
     )
-    stock_result = await tools["ktg.query_stock"].execute(
+    stock_result = await tools["ktg_query_stock"].execute(
         context, {"item_code": "A-01", "page": 1, "page_size": 10}
     )
-    order_result = await tools["ktg.list_workorders"].execute(
+    order_result = await tools["ktg_list_workorders"].execute(
         context, {"product_code": "A-01", "page": 1, "page_size": 10}
     )
 

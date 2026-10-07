@@ -47,7 +47,7 @@ async def _query_service_scenario() -> None:
                             (
                                 ToolCall(
                                     id="call-stock",
-                                    name="ktg.query_stock",
+                                    name="ktg_query_stock",
                                     arguments={"item_code": "A-01"},
                                 ),
                             )

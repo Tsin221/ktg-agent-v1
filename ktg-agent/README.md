@@ -85,9 +85,9 @@ uv run --locked python -m ktg_agent.server
 
 服务提供 `GET /health` 和 `POST /agent-api/v1/query`。查询请求必须携带当前网页用户的 `Authorization: Bearer <KTG token>`；服务先调用 KTG `/getInfo` 验证身份，然后只允许模型使用以下三个固定只读工具：
 
-- `ktg.search_items` → `GET /mes/md/mditem/list`
-- `ktg.query_stock` → `GET /mes/wm/wmstock/list`
-- `ktg.list_workorders` → `GET /mes/pro/workorder/list`
+- `ktg_search_items` → `GET /mes/md/mditem/list`
+- `ktg_query_stock` → `GET /mes/wm/wmstock/list`
+- `ktg_list_workorders` → `GET /mes/pro/workorder/list`
 
 模型 API Key 只保留在 Python 服务进程中，不发送到浏览器或 KTG。模型不能指定 KTG 地址、HTTP 方法或任意接口路径。
 
