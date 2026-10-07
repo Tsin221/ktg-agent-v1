@@ -55,6 +55,16 @@ public class WmBarcodeController extends BaseController
     }
 
     /**
+     * 按业务对象获取条码信息
+     */
+    @GetMapping("/getBarcodeUrl")
+    public AjaxResult getBarcodeUrl(WmBarcode wmBarcode)
+    {
+        List<WmBarcode> list = wmBarcodeService.selectWmBarcodeList(wmBarcode);
+        return AjaxResult.success(list.isEmpty() ? null : list.get(0));
+    }
+
+    /**
      * 获取条码清单详细信息
      */
     @PreAuthorize("@ss.hasPermi('mes:wm:barcode:query')")
