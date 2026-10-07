@@ -193,14 +193,17 @@ class AgentLoop:
                     remaining = self._limits.max_tool_calls - tool_calls_started
                     runnable_calls = () if time_exhausted else calls[:remaining]
                     skipped_calls = calls[len(runnable_calls) :]
-                    results, batch_started = await self._run_tool_batch(
-                        publisher=publisher,
-                        run_id=run_id,
-                        turn=turn,
-                        calls=runnable_calls,
-                        identity=identity,
-                        cancellation=cancellation,
-                        ktg_client=ktg_client,
+                    results, batch_started, batch_time_exhausted = (
+                        await self._run_tool_batch(
+                            publisher=publisher,
+                            run_id=run_id,
+                            turn=turn,
+                            calls=runnable_calls,
+                            started_at=started_at,
+                            identity=identity,
+                            cancellation=cancellation,
+                            ktg_client=ktg_client,
+                        )
                     )
                     tool_calls_started += batch_started
                     for call, result in zip(runnable_calls, results, strict=True):
@@ -219,11 +222,7 @@ class AgentLoop:
                             run_id=run_id,
                             turn=turn,
                             call=call,
-                            result=ToolResult(
-                                content="Tool call was not executed because the run budget was exhausted.",
-                                status=ToolStatus.FAILED,
-                                error_code="RUN_LIMIT_REACHED",
-                            ),
+                            result=self._limited_tool_result(),
                         )
 
                     await publisher.emit(
@@ -233,13 +232,13 @@ class AgentLoop:
                             "stop_reason": response.stop_reason.value,
                         },
                     )
-                    if skipped_calls:
+                    if skipped_calls or batch_time_exhausted:
                         return await self._limited_result(
                             publisher=publisher,
                             history=history,
                             reason=(
                                 "max_run_seconds"
-                                if time_exhausted
+                                if time_exhausted or batch_time_exhausted
                                 else "max_tool_calls"
                             ),
                             turns=turn,
@@ -328,11 +327,16 @@ class AgentLoop:
         run_id: str,
         turn: int,
         calls: tuple[ToolCall, ...],
+        started_at: float,
         identity: object | None,
         cancellation: CancellationSignal | None,
         ktg_client: object | None,
-    ) -> tuple[tuple[ToolResult, ...], int]:
+    ) -> tuple[tuple[ToolResult, ...], int, bool]:
         started_count = 0
+        time_limit_reached = False
+
+        def run_time_exhausted() -> bool:
+            return self._clock() - started_at >= self._limits.max_run_seconds
 
         async def execute(call: ToolCall) -> ToolResult:
             nonlocal started_count
@@ -386,28 +390,35 @@ class AgentLoop:
             return result
 
         if not calls:
-            return (), 0
+            return (), 0, False
         if not self._tool_runner.can_run_batch_in_parallel(calls):
             sequential_results: list[ToolResult] = []
             for call in calls:
                 if cancellation is not None and cancellation.is_cancelled:
                     sequential_results.append(self._cancelled_tool_result())
+                elif run_time_exhausted():
+                    time_limit_reached = True
+                    sequential_results.append(self._limited_tool_result())
                 else:
                     sequential_results.append(await execute(call))
-            return tuple(sequential_results), started_count
+            return tuple(sequential_results), started_count, time_limit_reached
 
         semaphore = asyncio.Semaphore(self._limits.max_parallel_reads)
 
         async def limited_execute(call: ToolCall) -> ToolResult:
+            nonlocal time_limit_reached
             async with semaphore:
                 if cancellation is not None and cancellation.is_cancelled:
                     return self._cancelled_tool_result()
+                if run_time_exhausted():
+                    time_limit_reached = True
+                    return self._limited_tool_result()
                 return await execute(call)
 
         parallel_results = tuple(
             await asyncio.gather(*(limited_execute(call) for call in calls))
         )
-        return parallel_results, started_count
+        return parallel_results, started_count, time_limit_reached
 
     @staticmethod
     def _cancelled_tool_result() -> ToolResult:
@@ -415,6 +426,14 @@ class AgentLoop:
             content="Tool call was not started because the run was cancelled.",
             status=ToolStatus.FAILED,
             error_code="RUN_CANCELLED",
+        )
+
+    @staticmethod
+    def _limited_tool_result() -> ToolResult:
+        return ToolResult(
+            content="Tool call was not executed because the run budget was exhausted.",
+            status=ToolStatus.FAILED,
+            error_code="RUN_LIMIT_REACHED",
         )
 
     @staticmethod

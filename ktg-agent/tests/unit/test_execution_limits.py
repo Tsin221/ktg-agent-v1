@@ -385,3 +385,92 @@ def test_total_time_limit_reached_during_model_turn_starts_no_tools() -> None:
     assert AgentEventType.TOOL_EXECUTION_START not in {
         event.type for event in result.events
     }
+
+
+def test_total_time_limit_stops_later_tools_in_a_sequential_batch() -> None:
+    now = [0.0]
+    started: list[str] = []
+
+    async def tool(
+        context: ToolContext, arguments: Mapping[str, Any]
+    ) -> ToolResult:
+        started.append(context.tool_call_id)
+        if context.tool_call_id == "call-1":
+            now[0] = 2.0
+        return ToolResult(content="ok")
+
+    calls = (
+        ToolCall("call-1", "write", {"value": 1}),
+        ToolCall("call-2", "write", {"value": 2}),
+    )
+    provider = FakeProvider(
+        [
+            ScriptedTurn(
+                actions=(ResponseCompleted(response(*calls, reason=StopReason.TOOL_CALL)),)
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        execute(
+            make_loop(
+                provider,
+                (definition("write", tool, effect=ToolEffect.WRITE),),
+                limits=RunLimits(max_run_seconds=1),
+                clock=lambda: now[0],
+            )
+        )
+    )
+
+    assert started == ["call-1"]
+    assert result.limit_reason == "max_run_seconds"
+    assert [
+        event.payload["tool_call_id"]
+        for event in result.events
+        if event.type is AgentEventType.TOOL_EXECUTION_START
+    ] == ["call-1"]
+
+
+def test_total_time_limit_stops_parallel_tools_waiting_for_a_slot() -> None:
+    now = [0.0]
+    started: list[str] = []
+
+    async def tool(
+        context: ToolContext, arguments: Mapping[str, Any]
+    ) -> ToolResult:
+        started.append(context.tool_call_id)
+        if context.tool_call_id == "call-1":
+            await asyncio.sleep(0)
+            now[0] = 2.0
+        return ToolResult(content="ok")
+
+    calls = (
+        ToolCall("call-1", "read", {"value": 1}),
+        ToolCall("call-2", "read", {"value": 2}),
+    )
+    provider = FakeProvider(
+        [
+            ScriptedTurn(
+                actions=(ResponseCompleted(response(*calls, reason=StopReason.TOOL_CALL)),)
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        execute(
+            make_loop(
+                provider,
+                (definition("read", tool),),
+                limits=RunLimits(max_run_seconds=1, max_parallel_reads=1),
+                clock=lambda: now[0],
+            )
+        )
+    )
+
+    assert started == ["call-1"]
+    assert result.limit_reason == "max_run_seconds"
+    assert [
+        event.payload["tool_call_id"]
+        for event in result.events
+        if event.type is AgentEventType.TOOL_EXECUTION_START
+    ] == ["call-1"]
