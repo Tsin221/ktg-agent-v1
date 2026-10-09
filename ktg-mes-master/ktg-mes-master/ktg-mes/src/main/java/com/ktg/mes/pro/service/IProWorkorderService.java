@@ -39,6 +39,9 @@ public interface IProWorkorderService
      */
     public int insertProWorkorder(ProWorkorder proWorkorder);
 
+    /** 原子创建草稿工单及其 BOM，返回数据库生成的工单 ID。 */
+    public Long createDraftWorkorder(ProWorkorder proWorkorder);
+
     /**
      * 修改生产工单
      * 
@@ -47,7 +50,7 @@ public interface IProWorkorderService
      */
     public int updateProWorkorder(ProWorkorder proWorkorder);
 
-    /** 完整校验并更新草稿字段，不允许修改状态、进度或创建审计字段。 */
+    /** 原子校验并更新草稿；仅产品或数量变化时重建 BOM。 */
     public int updateDraftWorkorder(ProWorkorder proWorkorder);
 
     /**

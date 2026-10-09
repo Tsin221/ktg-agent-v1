@@ -9,8 +9,6 @@ import javax.validation.Valid;
 import cn.hutool.core.collection.CollUtil;
 import com.ktg.common.constant.UserConstants;
 import com.ktg.common.core.page.TableDataInfo;
-import com.ktg.common.utils.StringUtils;
-import com.ktg.mes.md.domain.MdItem;
 import com.ktg.mes.md.domain.MdProductBom;
 import com.ktg.mes.md.service.IMdProductBomService;
 import com.ktg.mes.pro.domain.ProWorkorderBom;
@@ -106,17 +104,8 @@ public class ProWorkorderController extends BaseController
     public AjaxResult add(@Valid @RequestBody ProWorkorderDraftRequest request)
     {
         ProWorkorder proWorkorder = request.toWorkorder();
-        if(UserConstants.NOT_UNIQUE.equals(proWorkorderService.checkWorkorderCodeUnique(proWorkorder))){
-            return AjaxResult.error("生产工单编号已存在！");
-        }
-
         proWorkorder.setCreateBy(getUsername());
-        proWorkorderService.insertProWorkorder(proWorkorder);
-
-        Long workorderId = proWorkorder.getWorkorderId();
-        generateBomLine(workorderId);
-
-        return AjaxResult.success(workorderId);
+        return AjaxResult.success(proWorkorderService.createDraftWorkorder(proWorkorder));
     }
 
     /**
@@ -128,27 +117,8 @@ public class ProWorkorderController extends BaseController
     public AjaxResult edit(@Valid @RequestBody ProWorkorderDraftRequest request)
     {
         ProWorkorder proWorkorder = request.toWorkorder();
-        ProWorkorder workorder = proWorkorderService.selectProWorkorderByWorkorderId(proWorkorder.getWorkorderId());
-        if(StringUtils.isNull(workorder)){
-            return AjaxResult.error("生产工单不存在！");
-        }
-        if(!UserConstants.ORDER_STATUS_PREPARE.equals(workorder.getStatus())){
-            return AjaxResult.error("只能编辑草稿状态生产工单！");
-        }
-        if(UserConstants.NOT_UNIQUE.equals(proWorkorderService.checkWorkorderCodeUnique(proWorkorder))){
-            return AjaxResult.error("生产工单编号已存在！");
-        }
         proWorkorder.setUpdateBy(getUsername());
-        int ret = proWorkorderService.updateDraftWorkorder(proWorkorder);
-        //如果是产品和数量发生变化则需要重新生成BOM组成
-        if(ret >0){
-            if(workorder.getProductId().longValue() != proWorkorder.getProductId().longValue() ||
-                    workorder.getQuantity().compareTo(proWorkorder.getQuantity())!=0){
-                removeBomLine(proWorkorder.getWorkorderId());
-                generateBomLine(proWorkorder.getWorkorderId());
-            }
-        }
-        return toAjax(ret);
+        return toAjax(proWorkorderService.updateDraftWorkorder(proWorkorder));
     }
 
     /**
@@ -168,38 +138,6 @@ public class ProWorkorderController extends BaseController
             removeBomLine(id);
         }
         return toAjax(proWorkorderService.deleteProWorkorderByWorkorderIds(workorderIds));
-    }
-
-    /**
-     * 根据生产工单中的产品生成BOM物料行
-     * @param workorderId
-     */
-    private void generateBomLine(Long workorderId){
-        //先根据ID找到对应的产品
-        ProWorkorder workorder = proWorkorderService.selectProWorkorderByWorkorderId(workorderId);
-
-        //根据产品找到BOM组成
-        MdProductBom param = new MdProductBom();
-        param.setItemId(workorder.getProductId());
-        List<MdProductBom> boms = mdProductBomService.selectMdProductBomList(param);
-
-        //生成BOM数据
-        BigDecimal orderQuantitiy = workorder.getQuantity();
-        ProWorkorderBom workorderBom = new ProWorkorderBom();
-        if(CollUtil.isNotEmpty(boms)){
-            for (MdProductBom bom:boms
-                 ) {
-                workorderBom.setWorkorderId(workorderId);
-                workorderBom.setItemId(bom.getBomItemId());
-                workorderBom.setItemCode(bom.getBomItemCode());
-                workorderBom.setItemName(bom.getBomItemName());
-                workorderBom.setItemSpc(bom.getBomItemSpec());
-                workorderBom.setItemOrProduct(bom.getItemOrProduct());
-                workorderBom.setUnitOfMeasure(bom.getUnitOfMeasure());
-                workorderBom.setQuantity(orderQuantitiy.multiply(bom.getQuantity()));
-                proWorkorderBomService.insertProWorkorderBom(workorderBom);
-            }
-        }
     }
 
     /**

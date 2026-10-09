@@ -3,13 +3,16 @@ package com.ktg.mes.pro.service.impl;
 import com.ktg.common.core.domain.AjaxResult;
 import com.ktg.common.exception.ServiceException;
 import com.ktg.mes.md.domain.MdItem;
-import com.ktg.mes.md.service.IMdItemService;
+import com.ktg.mes.md.domain.MdProductBom;
+import com.ktg.mes.md.mapper.MdProductBomMapper;
 import com.ktg.mes.pro.controller.vo.ProRouteHomeVO;
 import com.ktg.mes.pro.controller.vo.ProWorkorderHomeVO;
 import com.ktg.mes.pro.domain.ProFeedback;
 import com.ktg.mes.pro.domain.ProRouteProcess;
 import com.ktg.mes.pro.domain.ProRouteProduct;
 import com.ktg.mes.pro.domain.ProWorkorder;
+import com.ktg.mes.pro.domain.ProWorkorderBom;
+import com.ktg.mes.pro.mapper.ProWorkorderBomMapper;
 import com.ktg.mes.pro.mapper.ProWorkorderMapper;
 import com.ktg.mes.pro.service.IProFeedbackService;
 import com.ktg.mes.pro.service.IProRouteProcessService;
@@ -18,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
@@ -27,9 +31,11 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
 
 @ExtendWith(MockitoExtension.class)
 class ProWorkorderServiceImplTest {
@@ -43,10 +49,89 @@ class ProWorkorderServiceImplTest {
     @Mock
     private IProFeedbackService proFeedbackService;
     @Mock
-    private IMdItemService mdItemService;
+    private com.ktg.mes.md.service.IMdItemService mdItemService;
+    @Mock
+    private MdProductBomMapper mdProductBomMapper;
+    @Mock
+    private ProWorkorderBomMapper proWorkorderBomMapper;
 
     @InjectMocks
     private ProWorkorderServiceImpl service;
+
+    @Test
+    void createDraftReturnsGeneratedIdAndBuildsIndependentBomRows()
+    {
+        ProWorkorder workorder = draft(10L, "5");
+        when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
+        when(proWorkorderMapper.checkWorkorderCodeUnique(workorder)).thenReturn(null);
+        doAnswer(invocation -> {
+            workorder.setWorkorderId(77L);
+            return 1;
+        }).when(proWorkorderMapper).insertProWorkorder(workorder);
+
+        MdProductBom first = bom(101L, "M-101", "2");
+        MdProductBom second = bom(102L, "M-102", "3");
+        when(mdProductBomMapper.selectMdProductBomList(any()))
+                .thenReturn(java.util.Arrays.asList(first, second));
+        when(proWorkorderBomMapper.insertProWorkorderBom(any())).thenReturn(1);
+
+        Long createdId = service.createDraftWorkorder(workorder);
+
+        assertEquals(77L, createdId);
+        ArgumentCaptor<ProWorkorderBom> rows = ArgumentCaptor.forClass(ProWorkorderBom.class);
+        verify(proWorkorderBomMapper, org.mockito.Mockito.times(2)).insertProWorkorderBom(rows.capture());
+        assertEquals(2, rows.getAllValues().size());
+        assertEquals(101L, rows.getAllValues().get(0).getItemId());
+        assertEquals(new BigDecimal("10"), rows.getAllValues().get(0).getQuantity());
+        assertEquals(102L, rows.getAllValues().get(1).getItemId());
+        assertEquals(new BigDecimal("15"), rows.getAllValues().get(1).getQuantity());
+        org.junit.jupiter.api.Assertions.assertNotSame(rows.getAllValues().get(0), rows.getAllValues().get(1));
+    }
+
+    @Test
+    void updateDraftDoesNotRebuildBomWhenProductAndQuantityAreUnchanged()
+    {
+        ProWorkorder existing = draft(10L, "5.0");
+        existing.setWorkorderId(7L);
+        existing.setStatus("PREPARE");
+        ProWorkorder update = draft(10L, "5.00");
+        update.setWorkorderId(7L);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
+        when(proWorkorderMapper.checkWorkorderCodeUnique(update)).thenReturn(existing);
+        when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
+        when(proWorkorderMapper.updateProWorkorder(update)).thenReturn(1);
+
+        int result = service.updateDraftWorkorder(update);
+
+        assertEquals(1, result);
+        verify(proWorkorderBomMapper, never()).deleteProWorkorderBomByWorkorderId(any());
+        verify(proWorkorderBomMapper, never()).insertProWorkorderBom(any());
+    }
+
+    @Test
+    void updateDraftRebuildsBomWhenQuantityChanges()
+    {
+        ProWorkorder existing = draft(10L, "5");
+        existing.setWorkorderId(7L);
+        existing.setStatus("PREPARE");
+        ProWorkorder update = draft(10L, "8");
+        update.setWorkorderId(7L);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
+        when(proWorkorderMapper.checkWorkorderCodeUnique(update)).thenReturn(existing);
+        when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
+        when(proWorkorderMapper.updateProWorkorder(update)).thenReturn(1);
+        when(mdProductBomMapper.selectMdProductBomList(any()))
+                .thenReturn(Collections.singletonList(bom(101L, "M-101", "2")));
+        when(proWorkorderBomMapper.insertProWorkorderBom(any())).thenReturn(1);
+
+        int result = service.updateDraftWorkorder(update);
+
+        assertEquals(1, result);
+        verify(proWorkorderBomMapper).deleteProWorkorderBomByWorkorderId(7L);
+        verify(proWorkorderBomMapper).insertProWorkorderBom(argThat(row ->
+                Long.valueOf(7L).equals(row.getWorkorderId())
+                        && new BigDecimal("16").compareTo(row.getQuantity()) == 0));
+    }
 
     @Test
     void insertCreatesPrepareDraftAndDefaultsMissingWorkorderTypeToSelf()
@@ -102,12 +187,20 @@ class ProWorkorderServiceImplTest {
         ProWorkorder workorder = new ProWorkorder();
         workorder.setWorkorderId(7L);
         workorder.setProductId(10L);
+        workorder.setQuantity(BigDecimal.ONE);
         workorder.setParentId(9L);
         ProWorkorder parent = new ProWorkorder();
         parent.setWorkorderId(9L);
         parent.setAncestors("0,7");
+        ProWorkorder existing = new ProWorkorder();
+        existing.setWorkorderId(7L);
+        existing.setProductId(10L);
+        existing.setQuantity(BigDecimal.ONE);
+        existing.setStatus("PREPARE");
         when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
+        when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
         when(proWorkorderMapper.selectProWorkorderByWorkorderId(9L)).thenReturn(parent);
+        when(proWorkorderMapper.checkWorkorderCodeUnique(workorder)).thenReturn(existing);
 
         ServiceException error = assertThrows(ServiceException.class,
                 () -> service.updateDraftWorkorder(workorder));
@@ -124,6 +217,29 @@ class ProWorkorderServiceImplTest {
         item.setUnitOfMeasure(unit);
         item.setSpecification("规格");
         return item;
+    }
+
+    private ProWorkorder draft(Long productId, String quantity)
+    {
+        ProWorkorder workorder = new ProWorkorder();
+        workorder.setWorkorderCode("WO-001");
+        workorder.setProductId(productId);
+        workorder.setQuantity(new BigDecimal(quantity));
+        workorder.setParentId(0L);
+        return workorder;
+    }
+
+    private MdProductBom bom(Long itemId, String itemCode, String quantity)
+    {
+        MdProductBom bom = new MdProductBom();
+        bom.setBomItemId(itemId);
+        bom.setBomItemCode(itemCode);
+        bom.setBomItemName("物料" + itemId);
+        bom.setBomItemSpec("规格" + itemId);
+        bom.setItemOrProduct("ITEM");
+        bom.setUnitOfMeasure("件");
+        bom.setQuantity(new BigDecimal(quantity));
+        return bom;
     }
 
     @Test

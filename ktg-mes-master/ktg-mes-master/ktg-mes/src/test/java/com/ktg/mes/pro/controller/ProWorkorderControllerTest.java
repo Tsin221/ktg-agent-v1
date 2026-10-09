@@ -2,6 +2,7 @@ package com.ktg.mes.pro.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ktg.common.core.domain.AjaxResult;
+import com.ktg.common.exception.ServiceException;
 import com.ktg.framework.web.exception.GlobalExceptionHandler;
 import com.ktg.mes.pro.controller.dto.ProWorkorderDraftRequest;
 import com.ktg.mes.pro.domain.ProWorkorder;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -22,6 +24,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doReturn;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -34,6 +37,7 @@ class ProWorkorderControllerTest {
     @Mock
     private IProWorkorderService proWorkorderService;
 
+    @Spy
     @InjectMocks
     private ProWorkorderController controller;
 
@@ -63,20 +67,38 @@ class ProWorkorderControllerTest {
     }
 
     @Test
+    void addReturnsTheCreatedIdFromTheTransactionalService() throws Exception
+    {
+        doReturn("tester").when(controller).getUsername();
+        when(proWorkorderService.createDraftWorkorder(argThat(workorder ->
+                "WO-001".equals(workorder.getWorkorderCode())
+                        && "tester".equals(workorder.getCreateBy())))).thenReturn(77L);
+
+        mockMvc.perform(post("/mes/pro/workorder")
+                        .contentType("application/json")
+                        .content(validDraftJson()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data").value(77));
+    }
+
+    @Test
     void editRejectsNonDraftWorkorderInsteadOfUsingGenericUpdateAsAStatusAction() throws Exception {
-        ProWorkorder stored = new ProWorkorder();
-        stored.setWorkorderId(7L);
-        stored.setStatus("CONFIRMED");
-        when(proWorkorderService.selectProWorkorderByWorkorderId(7L)).thenReturn(stored);
+        doReturn("tester").when(controller).getUsername();
+        when(proWorkorderService.updateDraftWorkorder(argThat(workorder ->
+                Long.valueOf(7L).equals(workorder.getWorkorderId()))))
+                .thenThrow(new ServiceException("只能编辑草稿状态生产工单！", 409));
 
         mockMvc.perform(put("/mes/pro/workorder")
                         .contentType("application/json")
                         .content(validDraftJson().replace("{", "{\"workorderId\":7,\"status\":\"FINISHED\",")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(500))
+                .andExpect(jsonPath("$.code").value(409))
                 .andExpect(jsonPath("$.msg").value("只能编辑草稿状态生产工单！"));
 
-        verify(proWorkorderService, never()).updateDraftWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService).updateDraftWorkorder(argThat(workorder ->
+                Long.valueOf(7L).equals(workorder.getWorkorderId())
+                        && "tester".equals(workorder.getUpdateBy())));
     }
 
     @Test
@@ -88,7 +110,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("workorderType: 工单类型必须是 SELF、OUTSOURCE 或 PURCHASE"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     @Test
@@ -100,7 +122,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("productId: 产品不能为空"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     @Test
@@ -112,7 +134,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("quantity: 生产数量必须大于0"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     @Test
@@ -126,7 +148,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("workorderCode: 工单编号长度不能超过64个字符"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     @Test
@@ -138,7 +160,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("requestDate: 需求日期格式必须为yyyy-MM-dd"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     @Test
@@ -162,14 +184,20 @@ class ProWorkorderControllerTest {
 
     @Test
     void editRejectsUnknownWorkorderBeforeWriting() throws Exception {
+        doReturn("tester").when(controller).getUsername();
+        when(proWorkorderService.updateDraftWorkorder(argThat(workorder ->
+                Long.valueOf(404L).equals(workorder.getWorkorderId()))))
+                .thenThrow(new ServiceException("生产工单不存在！", 404));
+
         mockMvc.perform(put("/mes/pro/workorder")
                         .contentType("application/json")
                         .content(validDraftJson().replace("{", "{\"workorderId\":404,")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(500))
+                .andExpect(jsonPath("$.code").value(404))
                 .andExpect(jsonPath("$.msg").value("生产工单不存在！"));
 
-        verify(proWorkorderService, never()).updateDraftWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService).updateDraftWorkorder(argThat(workorder ->
+                Long.valueOf(404L).equals(workorder.getWorkorderId())));
     }
 
     @Test
@@ -192,7 +220,7 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500))
                 .andExpect(jsonPath("$.msg").value("requestDate: 需求日期不是有效日期"));
 
-        verify(proWorkorderService, never()).insertProWorkorder(argThat(workorder -> true));
+        verify(proWorkorderService, never()).createDraftWorkorder(argThat(workorder -> true));
     }
 
     private String validDraftJson() {

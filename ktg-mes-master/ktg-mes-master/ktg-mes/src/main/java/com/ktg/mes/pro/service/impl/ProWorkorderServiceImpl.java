@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import com.ktg.common.constant.UserConstants;
+import com.ktg.common.constant.HttpStatus;
 import com.ktg.common.core.domain.AjaxResult;
 import com.ktg.common.exception.ServiceException;
 import com.ktg.common.utils.DateUtils;
@@ -21,9 +22,15 @@ import com.ktg.mes.pro.domain.ProRouteProduct;
 import com.ktg.mes.pro.service.IProFeedbackService;
 import com.ktg.mes.pro.service.IProRouteProcessService;
 import com.ktg.mes.pro.service.IProRouteProductService;
+import com.ktg.mes.md.domain.MdProductBom;
+import com.ktg.mes.md.mapper.MdProductBomMapper;
+import com.ktg.mes.pro.domain.ProWorkorderBom;
+import com.ktg.mes.pro.mapper.ProWorkorderBomMapper;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import com.ktg.mes.md.domain.MdItem;
 import com.ktg.mes.md.service.IMdItemService;
 import com.ktg.mes.pro.mapper.ProWorkorderMapper;
@@ -55,6 +62,12 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
 
     @Autowired
     private IMdItemService mdItemService;
+
+    @Autowired
+    private MdProductBomMapper mdProductBomMapper;
+
+    @Autowired
+    private ProWorkorderBomMapper proWorkorderBomMapper;
 
     /**
      * 查询生产工单
@@ -110,6 +123,27 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
         return proWorkorderMapper.insertProWorkorder(proWorkorder);
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long createDraftWorkorder(ProWorkorder proWorkorder)
+    {
+        ensureWorkorderCodeUnique(proWorkorder);
+        try
+        {
+            int inserted = insertProWorkorder(proWorkorder);
+            if (inserted != 1 || proWorkorder.getWorkorderId() == null)
+            {
+                throw new ServiceException("生产工单创建失败");
+            }
+            generateBomLines(proWorkorder);
+            return proWorkorder.getWorkorderId();
+        }
+        catch (DuplicateKeyException e)
+        {
+            throw duplicateWorkorderCode();
+        }
+    }
+
     /**
      * 修改生产工单
      * 
@@ -124,11 +158,82 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public int updateDraftWorkorder(ProWorkorder proWorkorder)
     {
+        ProWorkorder existing = proWorkorderMapper.selectProWorkorderByWorkorderId(proWorkorder.getWorkorderId());
+        if (StringUtils.isNull(existing))
+        {
+            throw new ServiceException("生产工单不存在！", HttpStatus.NOT_FOUND);
+        }
+        if (!UserConstants.ORDER_STATUS_PREPARE.equals(existing.getStatus()))
+        {
+            throw new ServiceException("只能编辑草稿状态生产工单！", HttpStatus.CONFLICT);
+        }
+        ensureWorkorderCodeUnique(proWorkorder);
+
+        boolean rebuildBom = !Objects.equals(existing.getProductId(), proWorkorder.getProductId())
+                || existing.getQuantity().compareTo(proWorkorder.getQuantity()) != 0;
         normalizeDraft(proWorkorder);
         proWorkorder.setUpdateTime(DateUtils.getNowDate());
-        return proWorkorderMapper.updateProWorkorder(proWorkorder);
+        try
+        {
+            int updated = proWorkorderMapper.updateProWorkorder(proWorkorder);
+            if (updated != 1)
+            {
+                throw new ServiceException("生产工单更新失败");
+            }
+            if (rebuildBom)
+            {
+                proWorkorderBomMapper.deleteProWorkorderBomByWorkorderId(proWorkorder.getWorkorderId());
+                generateBomLines(proWorkorder);
+            }
+            return updated;
+        }
+        catch (DuplicateKeyException e)
+        {
+            throw duplicateWorkorderCode();
+        }
+    }
+
+    private void ensureWorkorderCodeUnique(ProWorkorder proWorkorder)
+    {
+        if (UserConstants.NOT_UNIQUE.equals(checkWorkorderCodeUnique(proWorkorder)))
+        {
+            throw duplicateWorkorderCode();
+        }
+    }
+
+    private ServiceException duplicateWorkorderCode()
+    {
+        return new ServiceException("生产工单编号已存在！", HttpStatus.CONFLICT);
+    }
+
+    private void generateBomLines(ProWorkorder workorder)
+    {
+        MdProductBom query = new MdProductBom();
+        query.setItemId(workorder.getProductId());
+        List<MdProductBom> boms = mdProductBomMapper.selectMdProductBomList(query);
+        if (boms == null)
+        {
+            return;
+        }
+        for (MdProductBom bom : boms)
+        {
+            ProWorkorderBom row = new ProWorkorderBom();
+            row.setWorkorderId(workorder.getWorkorderId());
+            row.setItemId(bom.getBomItemId());
+            row.setItemCode(bom.getBomItemCode());
+            row.setItemName(bom.getBomItemName());
+            row.setItemSpc(bom.getBomItemSpec());
+            row.setItemOrProduct(bom.getItemOrProduct());
+            row.setUnitOfMeasure(bom.getUnitOfMeasure());
+            row.setQuantity(workorder.getQuantity().multiply(bom.getQuantity()));
+            if (proWorkorderBomMapper.insertProWorkorderBom(row) != 1)
+            {
+                throw new ServiceException("生产工单 BOM 生成失败");
+            }
+        }
     }
 
     private void normalizeDraft(ProWorkorder workorder)
