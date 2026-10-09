@@ -582,6 +582,7 @@ export default {
         requestDate: null,
         parentId: null,
         status: "PREPARE",
+        version: null,
         remark: null,
         createBy: null,
         createTime: null,
@@ -677,6 +678,7 @@ export default {
           if (this.form.workorderId != null) {
             updateWorkorder(this.form).then(response => {
               this.$modal.msgSuccess("修改成功");
+              this.form.version += 1;
               //this.open = false;
               this.$refs["bomlist"].getList();
               this.getList();
@@ -686,6 +688,7 @@ export default {
               this.$modal.msgSuccess("新增成功");
               //this.open = false;
               this.form.workorderId = response.data;
+              this.form.version = 0;
               this.getList();
             });
           }

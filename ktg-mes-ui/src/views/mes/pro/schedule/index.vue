@@ -265,7 +265,6 @@
       </el-card>
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" @click="submitForm" v-if="form.status =='PREPARE' && optType !='view' ">确 定</el-button>
-        <el-button type="success" @click="handleFinish" v-if="form.status =='PREPARE' && optType !='view'  && form.workorderId !=null">完成</el-button>
         <el-button @click="cancel">关 闭</el-button>
       </div>
     </el-dialog>
@@ -431,6 +430,7 @@ export default {
         requestDate: null,
         parentId: null,
         status: "PREPARE",
+        version: null,
         remark: null,
         createBy: null,
         createTime: null,
@@ -528,6 +528,7 @@ export default {
           if (this.form.workorderId != null) {
             updateWorkorder(this.form).then(response => {
               this.$modal.msgSuccess("修改成功");
+              this.form.version += 1;
               //this.open = false;
               this.$refs["bomlist"].getList();
               this.getList();
@@ -537,6 +538,7 @@ export default {
               this.$modal.msgSuccess("新增成功");
               //this.open = false;
               this.form.workorderId = response.data;
+              this.form.version = 0;
               this.getList();
             });
           }
@@ -563,13 +565,6 @@ export default {
       this.download('mes/pro/workorder/export', {
         ...this.queryParams
       }, `workorder_${new Date().getTime()}.xlsx`)
-    },
-    handleFinish(){
-      let that = this;
-      this.$modal.confirm('是否完成工单编制？【完成后将不能更改】').then(function(){
-        that.form.status = 'CONFIRMED';
-        that.submitForm();
-      });
     },
     //物料选择弹出框
     onItemSelected(obj){

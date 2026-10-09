@@ -68,6 +68,7 @@ class ProWorkorderTransactionIntegrationTest
     {
         bomMapper.resetFailure();
         workorderMapper.resetInsertBarrier();
+        workorderMapper.resetUpdateBarrier();
         jdbc.update("delete from pro_workorder_bom");
         jdbc.update("delete from pro_workorder");
         jdbc.update("delete from md_product_bom");
@@ -100,6 +101,7 @@ class ProWorkorderTransactionIntegrationTest
         bomMapper.failOnInsert(2);
         ProWorkorder update = draft("WO-EDIT", "8");
         update.setWorkorderId(id);
+        update.setVersion(0L);
         update.setWorkorderName("新名称");
 
         assertThrows(ServiceException.class, () -> service.updateDraftWorkorder(update));
@@ -124,6 +126,7 @@ class ProWorkorderTransactionIntegrationTest
                 "select line_id from pro_workorder_bom where workorder_id=?", Long.class, id);
         ProWorkorder update = draft("WO-NO-REBUILD", "5.00");
         update.setWorkorderId(id);
+        update.setVersion(0L);
         update.setWorkorderName("只改名称");
 
         assertEquals(1, service.updateDraftWorkorder(update));
@@ -162,6 +165,105 @@ class ProWorkorderTransactionIntegrationTest
         {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void nonDraftEditLeavesWorkorderAndBomUnchanged()
+    {
+        Long id = insertExisting("WO-CONFIRMED", "5", "原名称");
+        jdbc.update("update pro_workorder set status='CONFIRMED' where workorder_id=?", id);
+        List<BigDecimal> originalBom = jdbc.queryForList(
+                "select quantity from pro_workorder_bom where workorder_id=? order by item_id", BigDecimal.class, id);
+        ProWorkorder update = draft("WO-CONFIRMED", "8");
+        update.setWorkorderId(id);
+        update.setVersion(0L);
+        update.setStatus("PREPARE");
+        update.setWorkorderName("伪造编辑");
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.updateDraftWorkorder(update));
+
+        assertEquals(Integer.valueOf(409), error.getCode());
+        assertEquals("原名称", jdbc.queryForObject(
+                "select workorder_name from pro_workorder where workorder_id=?", String.class, id));
+        assertEquals("CONFIRMED", jdbc.queryForObject(
+                "select status from pro_workorder where workorder_id=?", String.class, id));
+        assertEquals(0L, jdbc.queryForObject(
+                "select version from pro_workorder where workorder_id=?", Long.class, id));
+        assertEquals(originalBom, jdbc.queryForList(
+                "select quantity from pro_workorder_bom where workorder_id=? order by item_id", BigDecimal.class, id));
+    }
+
+    @Test
+    void concurrentDraftEditsAllowOneWinnerAndKeepMatchingBom() throws Exception
+    {
+        Long id = insertExisting("WO-VERSION", "5", "原名称");
+        ProWorkorder firstUpdate = draft("WO-VERSION", "8");
+        firstUpdate.setWorkorderId(id);
+        firstUpdate.setVersion(0L);
+        firstUpdate.setWorkorderName("客户端一");
+        ProWorkorder secondUpdate = draft("WO-VERSION", "9");
+        secondUpdate.setWorkorderId(id);
+        secondUpdate.setVersion(0L);
+        secondUpdate.setWorkorderName("客户端二");
+        workorderMapper.barrierBeforeNextTwoDraftUpdates();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try
+        {
+            Future<Object> first = executor.submit(() -> updateOrReturnError(firstUpdate));
+            Future<Object> second = executor.submit(() -> updateOrReturnError(secondUpdate));
+            Object firstResult = first.get(10, TimeUnit.SECONDS);
+            Object secondResult = second.get(10, TimeUnit.SECONDS);
+
+            int successes = (Integer.valueOf(1).equals(firstResult) ? 1 : 0)
+                    + (Integer.valueOf(1).equals(secondResult) ? 1 : 0);
+            int conflicts = (isEditConflict(firstResult) ? 1 : 0) + (isEditConflict(secondResult) ? 1 : 0);
+            assertEquals(1, successes);
+            assertEquals(1, conflicts);
+            assertEquals(1L, jdbc.queryForObject(
+                    "select version from pro_workorder where workorder_id=?", Long.class, id));
+            String winningName = jdbc.queryForObject(
+                    "select workorder_name from pro_workorder where workorder_id=?", String.class, id);
+            BigDecimal winningQuantity = jdbc.queryForObject(
+                    "select quantity from pro_workorder where workorder_id=?", BigDecimal.class, id);
+            if ("客户端一".equals(winningName))
+            {
+                assertEquals(0, new BigDecimal("8").compareTo(winningQuantity));
+            }
+            else
+            {
+                assertEquals("客户端二", winningName);
+                assertEquals(0, new BigDecimal("9").compareTo(winningQuantity));
+            }
+            List<BigDecimal> bomQuantities = jdbc.queryForList(
+                    "select quantity from pro_workorder_bom where workorder_id=? order by item_id", BigDecimal.class, id);
+            assertEquals(2, bomQuantities.size());
+            assertEquals(0, winningQuantity.multiply(new BigDecimal("2")).compareTo(bomQuantities.get(0)));
+            assertEquals(0, winningQuantity.multiply(new BigDecimal("3")).compareTo(bomQuantities.get(1)));
+        }
+        finally
+        {
+            executor.shutdownNow();
+        }
+    }
+
+    private Object updateOrReturnError(ProWorkorder update)
+    {
+        try
+        {
+            return service.updateDraftWorkorder(update);
+        }
+        catch (ServiceException e)
+        {
+            return e;
+        }
+    }
+
+    private boolean isEditConflict(Object result)
+    {
+        return result instanceof ServiceException
+                && Integer.valueOf(409).equals(((ServiceException) result).getCode())
+                && ((ServiceException) result).getMessage().contains("当前版本：1");
     }
 
     private Object createOrReturnError(String code)
@@ -259,6 +361,7 @@ class ProWorkorderTransactionIntegrationTest
     {
         private final JdbcTemplate jdbc;
         private volatile CountDownLatch insertBarrier;
+        private volatile CountDownLatch updateBarrier;
         private final RowMapper<ProWorkorder> rowMapper = (rs, rowNum) -> {
             ProWorkorder value = new ProWorkorder();
             value.setWorkorderId(rs.getLong("workorder_id"));
@@ -269,6 +372,7 @@ class ProWorkorderTransactionIntegrationTest
             value.setParentId(rs.getLong("parent_id"));
             value.setAncestors(rs.getString("ancestors"));
             value.setStatus(rs.getString("status"));
+            value.setVersion(rs.getLong("version"));
             return value;
         };
 
@@ -276,11 +380,21 @@ class ProWorkorderTransactionIntegrationTest
 
         void barrierBeforeNextTwoInserts() { insertBarrier = new CountDownLatch(2); }
         void resetInsertBarrier() { insertBarrier = null; }
+        void barrierBeforeNextTwoDraftUpdates() { updateBarrier = new CountDownLatch(2); }
+        void resetUpdateBarrier() { updateBarrier = null; }
 
         @Override
         public ProWorkorder selectProWorkorderByWorkorderId(Long id)
         {
             List<ProWorkorder> rows = jdbc.query("select * from pro_workorder where workorder_id=?", rowMapper, id);
+            return rows.isEmpty() ? null : rows.get(0);
+        }
+
+        @Override
+        public ProWorkorder selectProWorkorderByWorkorderIdForUpdate(Long id)
+        {
+            List<ProWorkorder> rows = jdbc.query(
+                    "select * from pro_workorder where workorder_id=? for update", rowMapper, id);
             return rows.isEmpty() ? null : rows.get(0);
         }
 
@@ -312,7 +426,7 @@ class ProWorkorderTransactionIntegrationTest
             KeyHolder keys = new GeneratedKeyHolder();
             int rows = jdbc.update(connection -> {
                 PreparedStatement statement = connection.prepareStatement(
-                        "insert into pro_workorder(workorder_code,workorder_name,workorder_type,order_source,product_id,product_code,product_name,product_spc,unit_of_measure,quantity,parent_id,ancestors,status,create_by,create_time) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "insert into pro_workorder(workorder_code,workorder_name,workorder_type,order_source,product_id,product_code,product_name,product_spc,unit_of_measure,quantity,parent_id,ancestors,status,version,create_by,create_time) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         Statement.RETURN_GENERATED_KEYS);
                 statement.setString(1, value.getWorkorderCode());
                 statement.setString(2, value.getWorkorderName());
@@ -327,8 +441,9 @@ class ProWorkorderTransactionIntegrationTest
                 statement.setLong(11, value.getParentId());
                 statement.setString(12, value.getAncestors());
                 statement.setString(13, value.getStatus());
-                statement.setString(14, value.getCreateBy());
-                statement.setTimestamp(15, new java.sql.Timestamp(value.getCreateTime().getTime()));
+                statement.setLong(14, value.getVersion());
+                statement.setString(15, value.getCreateBy());
+                statement.setTimestamp(16, new java.sql.Timestamp(value.getCreateTime().getTime()));
                 return statement;
             }, keys);
             value.setWorkorderId(keys.getKey().longValue());
@@ -343,6 +458,30 @@ class ProWorkorderTransactionIntegrationTest
                     value.getProductName(), value.getProductSpc(), value.getUnitOfMeasure(), value.getQuantity(),
                     value.getParentId(), value.getAncestors(), value.getRemark(), value.getUpdateBy(),
                     value.getUpdateTime(), value.getWorkorderId());
+        }
+
+        @Override
+        public int updateDraftWorkorder(ProWorkorder value)
+        {
+            CountDownLatch barrier = updateBarrier;
+            if (barrier != null)
+            {
+                barrier.countDown();
+                try
+                {
+                    if (!barrier.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("并发测试未就绪");
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+            return jdbc.update("update pro_workorder set workorder_code=?,workorder_name=?,product_id=?,product_code=?,product_name=?,product_spc=?,unit_of_measure=?,quantity=?,parent_id=?,ancestors=?,remark=?,update_by=?,update_time=?,version=version+1 where workorder_id=? and status='PREPARE' and version=?",
+                    value.getWorkorderCode(), value.getWorkorderName(), value.getProductId(), value.getProductCode(),
+                    value.getProductName(), value.getProductSpc(), value.getUnitOfMeasure(), value.getQuantity(),
+                    value.getParentId(), value.getAncestors(), value.getRemark(), value.getUpdateBy(),
+                    value.getUpdateTime(), value.getWorkorderId(), value.getVersion());
         }
 
         @Override public List<ProWorkorder> selectProWorkorderList(ProWorkorder value) { return Collections.emptyList(); }

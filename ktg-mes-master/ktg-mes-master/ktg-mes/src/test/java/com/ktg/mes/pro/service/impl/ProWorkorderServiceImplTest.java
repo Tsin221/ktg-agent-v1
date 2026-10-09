@@ -94,12 +94,14 @@ class ProWorkorderServiceImplTest {
         ProWorkorder existing = draft(10L, "5.0");
         existing.setWorkorderId(7L);
         existing.setStatus("PREPARE");
+        existing.setVersion(0L);
         ProWorkorder update = draft(10L, "5.00");
         update.setWorkorderId(7L);
+        update.setVersion(0L);
         when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
         when(proWorkorderMapper.checkWorkorderCodeUnique(update)).thenReturn(existing);
         when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
-        when(proWorkorderMapper.updateProWorkorder(update)).thenReturn(1);
+        when(proWorkorderMapper.updateDraftWorkorder(update)).thenReturn(1);
 
         int result = service.updateDraftWorkorder(update);
 
@@ -114,12 +116,14 @@ class ProWorkorderServiceImplTest {
         ProWorkorder existing = draft(10L, "5");
         existing.setWorkorderId(7L);
         existing.setStatus("PREPARE");
+        existing.setVersion(0L);
         ProWorkorder update = draft(10L, "8");
         update.setWorkorderId(7L);
+        update.setVersion(0L);
         when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
         when(proWorkorderMapper.checkWorkorderCodeUnique(update)).thenReturn(existing);
         when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
-        when(proWorkorderMapper.updateProWorkorder(update)).thenReturn(1);
+        when(proWorkorderMapper.updateDraftWorkorder(update)).thenReturn(1);
         when(mdProductBomMapper.selectMdProductBomList(any()))
                 .thenReturn(Collections.singletonList(bom(101L, "M-101", "2")));
         when(proWorkorderBomMapper.insertProWorkorderBom(any())).thenReturn(1);
@@ -148,6 +152,7 @@ class ProWorkorderServiceImplTest {
         assertEquals(1, result);
         assertEquals("PREPARE", workorder.getStatus());
         assertEquals("SELF", workorder.getWorkorderType());
+        assertEquals(0L, workorder.getVersion());
         assertEquals("P-10", workorder.getProductCode());
         assertEquals("产品十", workorder.getProductName());
         assertEquals("件", workorder.getUnitOfMeasure());
@@ -197,6 +202,8 @@ class ProWorkorderServiceImplTest {
         existing.setProductId(10L);
         existing.setQuantity(BigDecimal.ONE);
         existing.setStatus("PREPARE");
+        existing.setVersion(0L);
+        workorder.setVersion(0L);
         when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
         when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
         when(proWorkorderMapper.selectProWorkorderByWorkorderId(9L)).thenReturn(parent);
@@ -206,7 +213,49 @@ class ProWorkorderServiceImplTest {
                 () -> service.updateDraftWorkorder(workorder));
 
         assertEquals("parentId: 父工单不能形成循环引用", error.getMessage());
-        verify(proWorkorderMapper, never()).updateProWorkorder(any());
+        verify(proWorkorderMapper, never()).updateDraftWorkorder(any());
+    }
+
+    @Test
+    void updateDraftRejectsMissingVersionBeforeWriting()
+    {
+        ProWorkorder update = draft(10L, "5");
+        update.setWorkorderId(7L);
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.updateDraftWorkorder(update));
+
+        assertEquals(Integer.valueOf(409), error.getCode());
+        assertEquals("version: 编辑版本不能为空，请重新加载工单", error.getMessage());
+        verify(proWorkorderMapper, never()).updateDraftWorkorder(any());
+    }
+
+    @Test
+    void updateDraftReturnsCurrentStateWhenConditionalUpdateLosesRace()
+    {
+        ProWorkorder existing = draft(10L, "5");
+        existing.setWorkorderId(7L);
+        existing.setStatus("PREPARE");
+        existing.setVersion(0L);
+        ProWorkorder current = draft(10L, "6");
+        current.setWorkorderId(7L);
+        current.setStatus("PREPARE");
+        current.setVersion(1L);
+        ProWorkorder update = draft(10L, "8");
+        update.setWorkorderId(7L);
+        update.setVersion(0L);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderId(7L)).thenReturn(existing);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(7L)).thenReturn(current);
+        when(proWorkorderMapper.checkWorkorderCodeUnique(update)).thenReturn(existing);
+        when(mdItemService.selectMdItemById(10L)).thenReturn(product(10L, "P-10", "产品十", "件"));
+        when(proWorkorderMapper.updateDraftWorkorder(update)).thenReturn(0);
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.updateDraftWorkorder(update));
+
+        assertEquals(Integer.valueOf(409), error.getCode());
+        assertEquals("生产工单已被其他客户端修改，请重新加载！当前状态：PREPARE，当前版本：1", error.getMessage());
+        verify(proWorkorderBomMapper, never()).deleteProWorkorderBomByWorkorderId(any());
     }
 
     private MdItem product(Long id, String code, String name, String unit) {

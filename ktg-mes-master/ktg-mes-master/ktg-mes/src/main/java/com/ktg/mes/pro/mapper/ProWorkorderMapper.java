@@ -19,6 +19,9 @@ public interface ProWorkorderMapper
      */
     public ProWorkorder selectProWorkorderByWorkorderId(Long workorderId);
 
+    /** 锁定并读取数据库最新值，用于条件更新失败后的冲突响应。 */
+    public ProWorkorder selectProWorkorderByWorkorderIdForUpdate(Long workorderId);
+
     /**
      * 查询生产工单列表
      * 
@@ -44,6 +47,9 @@ public interface ProWorkorderMapper
      * @return 结果
      */
     public int updateProWorkorder(ProWorkorder proWorkorder);
+
+    /** 仅在仍为草稿且版本未变化时更新，并递增版本号。 */
+    public int updateDraftWorkorder(ProWorkorder proWorkorder);
 
     /**
      * 删除生产工单

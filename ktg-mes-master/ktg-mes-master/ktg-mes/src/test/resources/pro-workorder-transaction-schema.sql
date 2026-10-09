@@ -38,6 +38,7 @@ create table pro_workorder (
     parent_id bigint,
     ancestors varchar(255),
     status varchar(64),
+    version bigint not null default 0,
     remark varchar(500),
     create_by varchar(64),
     create_time timestamp,

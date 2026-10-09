@@ -25,6 +25,9 @@ public class ProWorkorderDraftRequest
     @PositiveOrZero(message = "workorderId: 工单ID不能为负数")
     private Long workorderId;
 
+    @PositiveOrZero(message = "version: 版本号不能为负数")
+    private Long version;
+
     @NotBlank(message = "workorderCode: 工单编号不能为空")
     @Size(max = 64, message = "workorderCode: 工单编号长度不能超过64个字符")
     private String workorderCode;
@@ -79,6 +82,7 @@ public class ProWorkorderDraftRequest
     {
         ProWorkorder workorder = new ProWorkorder();
         workorder.setWorkorderId(workorderId);
+        workorder.setVersion(version);
         workorder.setWorkorderCode(workorderCode);
         workorder.setWorkorderName(workorderName);
         workorder.setWorkorderType(workorderType);
@@ -112,6 +116,8 @@ public class ProWorkorderDraftRequest
 
     public Long getWorkorderId() { return workorderId; }
     public void setWorkorderId(Long workorderId) { this.workorderId = workorderId; }
+    public Long getVersion() { return version; }
+    public void setVersion(Long version) { this.version = version; }
     public String getWorkorderCode() { return workorderCode; }
     public void setWorkorderCode(String workorderCode) { this.workorderCode = workorderCode; }
     public String getWorkorderName() { return workorderName; }

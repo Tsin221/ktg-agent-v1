@@ -28,6 +28,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="parentId"    column="parent_id"    />
         <result property="ancestors"    column="ancestors"    />
         <result property="status"    column="status"    />
+        <result property="version"    column="version"    />
         <result property="remark"    column="remark"    />
         <result property="attr1"    column="attr1"    />
         <result property="attr2"    column="attr2"    />
@@ -40,7 +41,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectProWorkorderVo">
-        select workorder_id, workorder_code, workorder_name, workorder_type, order_source, source_code, product_id, product_code, product_name, product_spc, unit_of_measure, batch_code, quantity, quantity_produced, quantity_changed, quantity_scheduled, client_id, client_code, client_name, request_date, parent_id, ancestors, status, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from pro_workorder
+        select workorder_id, workorder_code, workorder_name, workorder_type, order_source, source_code, product_id, product_code, product_name, product_spc, unit_of_measure, batch_code, quantity, quantity_produced, quantity_changed, quantity_scheduled, client_id, client_code, client_name, request_date, parent_id, ancestors, status, version, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from pro_workorder
     </sql>
 
     <select id="selectProWorkorderList" parameterType="ProWorkorder" resultMap="ProWorkorderResult">
@@ -76,6 +77,12 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where workorder_id = #{workorderId}
     </select>
 
+    <select id="selectProWorkorderByWorkorderIdForUpdate" parameterType="Long" resultMap="ProWorkorderResult">
+        <include refid="selectProWorkorderVo"/>
+        where workorder_id = #{workorderId}
+        for update
+    </select>
+
     <select id="checkWorkorderCodeUnique" parameterType="ProWorkorder" resultMap="ProWorkorderResult">
         <include refid="selectProWorkorderVo"/>
         where workorder_code = #{workorderCode} limit 1
@@ -106,6 +113,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="parentId != null">parent_id,</if>
             <if test="ancestors != null and ancestors != ''">ancestors,</if>
             <if test="status != null">status,</if>
+            <if test="version != null">version,</if>
             <if test="remark != null">remark,</if>
             <if test="attr1 != null">attr1,</if>
             <if test="attr2 != null">attr2,</if>
@@ -139,6 +147,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="parentId != null">#{parentId},</if>
             <if test="ancestors != null and ancestors != ''">#{ancestors},</if>
             <if test="status != null">#{status},</if>
+            <if test="version != null">#{version},</if>
             <if test="remark != null">#{remark},</if>
             <if test="attr1 != null">#{attr1},</if>
             <if test="attr2 != null">#{attr2},</if>
@@ -181,6 +190,41 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="updateTime != null">update_time = #{updateTime},</if>
         </trim>
         where workorder_id = #{workorderId}
+    </update>
+
+    <update id="updateDraftWorkorder" parameterType="ProWorkorder">
+        update pro_workorder
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="workorderCode != null and workorderCode != ''">workorder_code = #{workorderCode},</if>
+            <if test="workorderName != null and workorderName != ''">workorder_name = #{workorderName},</if>
+            <if test="workorderType != null and workorderType != ''">workorder_type = #{workorderType},</if>
+            <if test="orderSource != null and orderSource != ''">order_source = #{orderSource},</if>
+            <if test="sourceCode != null">source_code = #{sourceCode},</if>
+            <if test="productId != null">product_id = #{productId},</if>
+            <if test="productCode != null and productCode != ''">product_code = #{productCode},</if>
+            <if test="productName != null and productName != ''">product_name = #{productName},</if>
+            <if test="productSpc != null">product_spc = #{productSpc},</if>
+            <if test="unitOfMeasure != null and unitOfMeasure != ''">unit_of_measure = #{unitOfMeasure},</if>
+            <if test="batchCode != null and batchCode != ''">batch_code = #{batchCode},</if>
+            <if test="quantity != null">quantity = #{quantity},</if>
+            <if test="clientId != null">client_id = #{clientId},</if>
+            <if test="clientCode != null">client_code = #{clientCode},</if>
+            <if test="clientName != null">client_name = #{clientName},</if>
+            <if test="requestDate != null">request_date = #{requestDate},</if>
+            <if test="parentId != null">parent_id = #{parentId},</if>
+            <if test="ancestors != null and ancestors != ''">ancestors = #{ancestors},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="attr1 != null">attr1 = #{attr1},</if>
+            <if test="attr2 != null">attr2 = #{attr2},</if>
+            <if test="attr3 != null">attr3 = #{attr3},</if>
+            <if test="attr4 != null">attr4 = #{attr4},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+            version = version + 1,
+        </trim>
+        where workorder_id = #{workorderId}
+          and status = 'PREPARE'
+          and version = #{version}
     </update>
 
     <delete id="deleteProWorkorderByWorkorderId" parameterType="Long">

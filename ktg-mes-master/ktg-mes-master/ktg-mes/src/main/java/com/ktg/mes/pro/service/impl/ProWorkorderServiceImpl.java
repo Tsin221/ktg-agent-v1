@@ -115,6 +115,7 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     {
         normalizeDraft(proWorkorder);
         proWorkorder.setStatus(UserConstants.ORDER_STATUS_PREPARE);
+        proWorkorder.setVersion(0L);
         if (StringUtils.isEmpty(proWorkorder.getWorkorderType()))
         {
             proWorkorder.setWorkorderType(DEFAULT_WORKORDER_TYPE);
@@ -161,6 +162,10 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     @Transactional(rollbackFor = Exception.class)
     public int updateDraftWorkorder(ProWorkorder proWorkorder)
     {
+        if (proWorkorder.getVersion() == null)
+        {
+            throw new ServiceException("version: 编辑版本不能为空，请重新加载工单", HttpStatus.CONFLICT);
+        }
         ProWorkorder existing = proWorkorderMapper.selectProWorkorderByWorkorderId(proWorkorder.getWorkorderId());
         if (StringUtils.isNull(existing))
         {
@@ -168,7 +173,11 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
         }
         if (!UserConstants.ORDER_STATUS_PREPARE.equals(existing.getStatus()))
         {
-            throw new ServiceException("只能编辑草稿状态生产工单！", HttpStatus.CONFLICT);
+            throw draftConflict(proWorkorder.getWorkorderId());
+        }
+        if (!Objects.equals(existing.getVersion(), proWorkorder.getVersion()))
+        {
+            throw draftConflict(proWorkorder.getWorkorderId());
         }
         ensureWorkorderCodeUnique(proWorkorder);
 
@@ -178,11 +187,12 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
         proWorkorder.setUpdateTime(DateUtils.getNowDate());
         try
         {
-            int updated = proWorkorderMapper.updateProWorkorder(proWorkorder);
+            int updated = proWorkorderMapper.updateDraftWorkorder(proWorkorder);
             if (updated != 1)
             {
-                throw new ServiceException("生产工单更新失败");
+                throw draftConflict(proWorkorder.getWorkorderId());
             }
+            proWorkorder.setVersion(proWorkorder.getVersion() + 1L);
             if (rebuildBom)
             {
                 proWorkorderBomMapper.deleteProWorkorderBomByWorkorderId(proWorkorder.getWorkorderId());
@@ -207,6 +217,17 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     private ServiceException duplicateWorkorderCode()
     {
         return new ServiceException("生产工单编号已存在！", HttpStatus.CONFLICT);
+    }
+
+    private ServiceException draftConflict(Long workorderId)
+    {
+        ProWorkorder current = proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(workorderId);
+        if (StringUtils.isNull(current))
+        {
+            return new ServiceException("生产工单不存在！", HttpStatus.NOT_FOUND);
+        }
+        return new ServiceException("生产工单已被其他客户端修改，请重新加载！当前状态："
+                + current.getStatus() + "，当前版本：" + current.getVersion(), HttpStatus.CONFLICT);
     }
 
     private void generateBomLines(ProWorkorder workorder)

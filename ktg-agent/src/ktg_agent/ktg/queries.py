@@ -254,6 +254,7 @@ def _workorder_row(row: Mapping[object, object]) -> JsonObject:
         "quantityProduced",
         "requestDate",
         "status",
+        "version",
     )
 
 

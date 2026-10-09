@@ -91,13 +91,14 @@ class ProWorkorderControllerTest {
 
         mockMvc.perform(put("/mes/pro/workorder")
                         .contentType("application/json")
-                        .content(validDraftJson().replace("{", "{\"workorderId\":7,\"status\":\"FINISHED\",")))
+                        .content(validDraftJson().replace("{", "{\"workorderId\":7,\"version\":3,\"status\":\"FINISHED\",")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(409))
                 .andExpect(jsonPath("$.msg").value("只能编辑草稿状态生产工单！"));
 
         verify(proWorkorderService).updateDraftWorkorder(argThat(workorder ->
                 Long.valueOf(7L).equals(workorder.getWorkorderId())
+                        && Long.valueOf(3L).equals(workorder.getVersion())
                         && "tester".equals(workorder.getUpdateBy())));
     }
 
@@ -180,6 +181,19 @@ class ProWorkorderControllerTest {
         org.junit.jupiter.api.Assertions.assertNull(workorder.getProductCode());
         org.junit.jupiter.api.Assertions.assertNull(workorder.getProductName());
         org.junit.jupiter.api.Assertions.assertNull(workorder.getUnitOfMeasure());
+    }
+
+    @Test
+    void draftRequestCarriesVersionButStillIgnoresForgedStatus() throws Exception
+    {
+        ProWorkorderDraftRequest request = new ObjectMapper().readValue(
+                validDraftJson().replace("{", "{\"workorderId\":7,\"version\":3,\"status\":\"FINISHED\","),
+                ProWorkorderDraftRequest.class);
+
+        ProWorkorder workorder = request.toWorkorder();
+
+        org.junit.jupiter.api.Assertions.assertEquals(3L, workorder.getVersion());
+        org.junit.jupiter.api.Assertions.assertNull(workorder.getStatus());
     }
 
     @Test

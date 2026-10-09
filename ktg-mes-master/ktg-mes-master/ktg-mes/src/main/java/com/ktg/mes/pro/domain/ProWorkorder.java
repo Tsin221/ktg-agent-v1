@@ -102,6 +102,9 @@ public class ProWorkorder extends TreeEntity
     @Excel(name = "单据状态")
     private String status;
 
+    /** 草稿乐观锁版本 */
+    private Long version;
+
     /** 预留字段1 */
     private String attr1;
 
@@ -302,6 +305,15 @@ public class ProWorkorder extends TreeEntity
     {
         return status;
     }
+    public void setVersion(Long version)
+    {
+        this.version = version;
+    }
+
+    public Long getVersion()
+    {
+        return version;
+    }
     public void setAttr1(String attr1) 
     {
         this.attr1 = attr1;
@@ -364,6 +376,7 @@ public class ProWorkorder extends TreeEntity
                 ", clientName='" + clientName + '\'' +
                 ", requestDate=" + requestDate +
                 ", status='" + status + '\'' +
+                ", version=" + version +
                 ", attr1='" + attr1 + '\'' +
                 ", attr2='" + attr2 + '\'' +
                 ", attr3=" + attr3 +

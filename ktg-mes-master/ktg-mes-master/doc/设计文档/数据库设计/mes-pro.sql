@@ -26,6 +26,7 @@ create table pro_workorder (
   parent_id                   bigint(20)      default 0 not null         comment '父工单',
   ancestors                   varchar(500)    not null                   comment '所有父节点ID',
   status                      varchar(64)     default 'PREPARE'          comment '单据状态',
+  version                     bigint         not null default 0         comment '草稿乐观锁版本',
   remark                      varchar(500)    default ''                 comment '备注',
   attr1                       varchar(64)     default null               comment '预留字段1',
   attr2                       varchar(255)    default null               comment '预留字段2',

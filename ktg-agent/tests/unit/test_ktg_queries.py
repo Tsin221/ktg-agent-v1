@@ -99,6 +99,7 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
                     "productCode": "A-01",
                     "quantity": 10,
                     "status": "PREPARE",
+                    "version": 3,
                 }
             ],
         }
@@ -142,6 +143,7 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
     assert isinstance(order_rows, list)
     assert isinstance(order_rows[0], dict)
     assert order_rows[0]["workorderType"] == "SELF"
+    assert order_rows[0]["version"] == 3
     assert requests == [
         (
             "http://127.0.0.1:8080/mes/md/mditem/list",
