@@ -3,12 +3,12 @@
 .env.local
 .env.*.local
 本地系统密码.txt
-mysql/
-redis/
-logs/
-.runtime/
-upload/
-.git-backups/
+/mysql/
+/redis/
+/logs/
+/.runtime/
+/upload/
+/.git-backups/
 
 # Private keys
 *.pem
