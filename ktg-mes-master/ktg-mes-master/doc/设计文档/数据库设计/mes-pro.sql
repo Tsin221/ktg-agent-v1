@@ -6,6 +6,7 @@ create table pro_workorder (
   workorder_id                bigint(20)      not null auto_increment    comment '工单ID',
   workorder_code              varchar(64)     not null                   comment '工单编码',
   workorder_name              varchar(255)    not null                   comment '工单名称',
+  workorder_type              varchar(64)     default 'SELF' not null    comment '工单类型',
   order_source                varchar(64)     not null                   comment '来源类型',
   source_code                 varchar(64)                                comment '来源单据',
   product_id                  bigint(20)      not null                   comment '产品ID',
@@ -34,7 +35,8 @@ create table pro_workorder (
   create_time 	              datetime                                   comment '创建时间',
   update_by                   varchar(64)     default ''                 comment '更新者',
   update_time                 datetime                                   comment '更新时间',
-  primary key (workorder_id)
+  primary key (workorder_id),
+  unique key uk_pro_workorder_code (workorder_code)
 ) engine=innodb auto_increment=200 comment = '生产工单表';
 
 

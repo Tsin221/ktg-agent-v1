@@ -47,6 +47,9 @@ public interface IProWorkorderService
      */
     public int updateProWorkorder(ProWorkorder proWorkorder);
 
+    /** 完整校验并更新草稿字段，不允许修改状态、进度或创建审计字段。 */
+    public int updateDraftWorkorder(ProWorkorder proWorkorder);
+
     /**
      * 批量删除生产工单
      * 

@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import javax.servlet.http.HttpServletResponse;
+import javax.validation.Valid;
 
 import cn.hutool.core.collection.CollUtil;
 import com.ktg.common.constant.UserConstants;
@@ -13,6 +14,7 @@ import com.ktg.mes.md.domain.MdItem;
 import com.ktg.mes.md.domain.MdProductBom;
 import com.ktg.mes.md.service.IMdProductBomService;
 import com.ktg.mes.pro.domain.ProWorkorderBom;
+import com.ktg.mes.pro.controller.dto.ProWorkorderDraftRequest;
 import com.ktg.mes.pro.service.IProWorkorderBomService;
 import io.minio.messages.Item;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -101,15 +103,14 @@ public class ProWorkorderController extends BaseController
     @PreAuthorize("@ss.hasPermi('mes:pro:workorder:add')")
     @Log(title = "生产工单", businessType = BusinessType.INSERT)
     @PostMapping
-    public AjaxResult add(@RequestBody ProWorkorder proWorkorder)
+    public AjaxResult add(@Valid @RequestBody ProWorkorderDraftRequest request)
     {
+        ProWorkorder proWorkorder = request.toWorkorder();
         if(UserConstants.NOT_UNIQUE.equals(proWorkorderService.checkWorkorderCodeUnique(proWorkorder))){
             return AjaxResult.error("生产工单编号已存在！");
         }
 
-        if(proWorkorder.getParentId()==null || proWorkorder.getParentId()==0){
-            proWorkorder.setAncestors("0");
-        }
+        proWorkorder.setCreateBy(getUsername());
         proWorkorderService.insertProWorkorder(proWorkorder);
 
         Long workorderId = proWorkorder.getWorkorderId();
@@ -124,10 +125,21 @@ public class ProWorkorderController extends BaseController
     @PreAuthorize("@ss.hasPermi('mes:pro:workorder:edit')")
     @Log(title = "生产工单", businessType = BusinessType.UPDATE)
     @PutMapping
-    public AjaxResult edit(@RequestBody ProWorkorder proWorkorder)
+    public AjaxResult edit(@Valid @RequestBody ProWorkorderDraftRequest request)
     {
+        ProWorkorder proWorkorder = request.toWorkorder();
         ProWorkorder workorder = proWorkorderService.selectProWorkorderByWorkorderId(proWorkorder.getWorkorderId());
-        int ret =proWorkorderService.updateProWorkorder(proWorkorder);
+        if(StringUtils.isNull(workorder)){
+            return AjaxResult.error("生产工单不存在！");
+        }
+        if(!UserConstants.ORDER_STATUS_PREPARE.equals(workorder.getStatus())){
+            return AjaxResult.error("只能编辑草稿状态生产工单！");
+        }
+        if(UserConstants.NOT_UNIQUE.equals(proWorkorderService.checkWorkorderCodeUnique(proWorkorder))){
+            return AjaxResult.error("生产工单编号已存在！");
+        }
+        proWorkorder.setUpdateBy(getUsername());
+        int ret = proWorkorderService.updateDraftWorkorder(proWorkorder);
         //如果是产品和数量发生变化则需要重新生成BOM组成
         if(ret >0){
             if(workorder.getProductId().longValue() != proWorkorder.getProductId().longValue() ||

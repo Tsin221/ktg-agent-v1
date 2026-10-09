@@ -95,6 +95,7 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
                     "workorderId": 9,
                     "workorderCode": "WO-001",
                     "workorderName": "产品 A 工单",
+                    "workorderType": "SELF",
                     "productCode": "A-01",
                     "quantity": 10,
                     "status": "PREPARE",
@@ -122,7 +123,13 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
         context, {"item_code": "A-01", "page": 1, "page_size": 10}
     )
     order_result = await tools["ktg_list_workorders"].execute(
-        context, {"product_code": "A-01", "page": 1, "page_size": 10}
+        context,
+        {
+            "product_code": "A-01",
+            "workorder_type": "SELF",
+            "page": 1,
+            "page_size": 10,
+        },
     )
 
     assert item_result.details is not None
@@ -131,6 +138,10 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
     assert stock_result.details["kind"] == "stock"
     assert order_result.details is not None
     assert order_result.details["kind"] == "workorders"
+    order_rows = order_result.details["rows"]
+    assert isinstance(order_rows, list)
+    assert isinstance(order_rows[0], dict)
+    assert order_rows[0]["workorderType"] == "SELF"
     assert requests == [
         (
             "http://127.0.0.1:8080/mes/md/mditem/list",
@@ -142,7 +153,12 @@ async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
         ),
         (
             "http://127.0.0.1:8080/mes/pro/workorder/list",
-            {"productCode": "A-01", "pageNum": 1, "pageSize": 10},
+            {
+                "productCode": "A-01",
+                "workorderType": "SELF",
+                "pageNum": 1,
+                "pageSize": 10,
+            },
         ),
     ]
 

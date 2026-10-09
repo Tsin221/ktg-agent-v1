@@ -137,7 +137,7 @@
       <el-table-column label="产品编号" width="120" align="center" prop="productCode" />
       <el-table-column label="产品名称" width="200" align="center" prop="productName" :show-overflow-tooltip="true"/>
       <el-table-column label="规格型号" align="center" prop="productSpc" :show-overflow-tooltip="true"/>
-      <el-table-column label="单位" align="center" prop="unitName" />
+      <el-table-column label="单位" align="center" prop="unitOfMeasure" />
       <el-table-column label="工单数量" align="center" prop="quantity" />
       <el-table-column label="已生产数量" align="center" width="100px" prop="quantityProduced" />
       <el-table-column label="客户编码" align="center" prop="clientCode" />
@@ -170,22 +170,6 @@
             @click="handleAdd(scope.row)"
             v-hasPermi="['mes:pro:workorder:update']"
           >新增</el-button>
-          <el-button
-            size="mini"
-            type="text"
-            icon="el-icon-circle-check"
-            v-if="scope.row.status =='CONFIRMED'"
-            @click="handleFinish(scope.row)"
-            v-hasPermi="['mes:pro:workorder:update']"
-          >完成</el-button>
-          <el-button
-            size="mini"
-            type="text"
-            icon="el-icon-circle-close"
-            v-if="scope.row.status =='CONFIRMED'"
-            @click="handleCancel(scope.row)"
-            v-hasPermi="['mes:pro:workorder:update']"
-          >取消</el-button>
           <el-button
             size="mini"
             type="text"
@@ -305,8 +289,8 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="单位" prop="unitName">
-              <el-input v-model="form.unitName" placeholder="请选择产品" disabled/>
+            <el-form-item label="单位" prop="unitOfMeasure">
+              <el-input v-model="form.unitOfMeasure" placeholder="请选择产品" disabled/>
             </el-form-item>
           </el-col>
         </el-row>
@@ -384,7 +368,6 @@
       </el-tabs>
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" @click="submitForm" v-if="form.status =='PREPARE' && optType !='view' ">保 存</el-button>
-        <el-button type="success" @click="handleConfirm" v-if="form.status =='PREPARE' && optType !='view'  && form.workorderId !=null">确 认</el-button>
         <el-button @click="cancel">关 闭</el-button>
       </div>
     </el-dialog>
@@ -392,7 +375,7 @@
 </template>
 
 <script>
-import { listWorkorder, getWorkorder, delWorkorder, addWorkorder, updateWorkorder ,dofinish ,doCancel} from "@/api/mes/pro/workorder";
+import { listWorkorder, getWorkorder, delWorkorder, addWorkorder, updateWorkorder } from "@/api/mes/pro/workorder";
 import Workorderbom from "./bom/bom.vue";
 import WorkorderItemList from "./items/item.vue";
 import ItemSelect  from "@/components/itemSelect/single.vue";
@@ -446,6 +429,7 @@ export default {
         pageSize: 10,
         workorderCode: null,
         workorderName: null,
+        workorderType: null,
         orderSource: null,
         sourceCode: null,
         productId: null,
@@ -732,31 +716,6 @@ export default {
       this.download('mes/pro/workorder/export', {
         ...this.queryParams
       }, `workorder_${new Date().getTime()}.xlsx`)
-    },
-    handleConfirm(){
-      let that = this;
-      this.$modal.confirm('是确认完成工单编制？【确认后将不能更改】').then(function(){
-        that.form.status = 'CONFIRMED';
-        that.submitForm();
-      });
-    },
-    handleFinish(row){
-      const workorderIds = row.workorderId || this.ids;
-      this.$modal.confirm('确认完成工单？一旦完成，此工单将无法继续报工').then(function() {
-        return dofinish(workorderIds) //完成工单
-      }).then(() => {
-        this.getList();
-        this.$modal.msgSuccess("更改成功");
-      }).catch(() => {});
-    },
-    handleCancel(row){
-      const workorderIds = row.workorderId || this.ids;
-      this.$modal.confirm('确认取消工单？一旦完成，此工单将无法继续报工').then(function() {
-        return doCancel(workorderIds) //取消工单
-      }).then(() => {
-        this.getList();
-        this.$modal.msgSuccess("更改成功");
-      }).catch(() => {});
     },
     //物料选择弹出框
     onItemSelected(obj){

@@ -52,10 +52,14 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
         _tool(
             name="ktg_list_workorders",
             label="查询工单",
-            description="按工单编号、产品编码或状态查询当前用户有权查看的生产工单。",
+            description="按工单编号、产品编码、工单类型或状态查询当前用户有权查看的生产工单。",
             properties={
                 "workorder_code": {"type": "string", "minLength": 1},
                 "product_code": {"type": "string", "minLength": 1},
+                "workorder_type": {
+                    "type": "string",
+                    "enum": ["SELF", "OUTSOURCE", "PURCHASE"],
+                },
                 "status": {"type": "string", "minLength": 1},
                 **common_properties,
             },
@@ -134,6 +138,7 @@ async def _list_workorders(
     params = _page_params(arguments)
     _copy_text(arguments, params, "workorder_code", "workorderCode")
     _copy_text(arguments, params, "product_code", "productCode")
+    _copy_text(arguments, params, "workorder_type", "workorderType")
     _copy_text(arguments, params, "status", "status")
     return await _query(
         context, "/mes/pro/workorder/list", params, "workorders", _workorder_row
@@ -241,6 +246,7 @@ def _workorder_row(row: Mapping[object, object]) -> JsonObject:
         "workorderId",
         "workorderCode",
         "workorderName",
+        "workorderType",
         "productCode",
         "productName",
         "unitOfMeasure",

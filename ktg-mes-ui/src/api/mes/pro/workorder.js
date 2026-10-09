@@ -17,7 +17,7 @@ export function getWorkorder(workorderId) {
   })
 }
 
-//查询生产工单，并携带每个生产工单下生产任务的情况
+// 契约占位：当前后端尚未实现，排产页面在对应后端能力交付前不可依赖此调用。
 export function listWithTaskJson(query) {
   return request({
     url: '/mes/pro/workorder/listWithTaskJson',

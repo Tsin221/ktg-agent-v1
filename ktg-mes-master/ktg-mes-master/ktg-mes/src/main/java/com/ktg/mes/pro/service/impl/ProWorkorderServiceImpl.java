@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
 
 import com.ktg.common.constant.UserConstants;
 import com.ktg.common.core.domain.AjaxResult;
+import com.ktg.common.exception.ServiceException;
 import com.ktg.common.utils.DateUtils;
 import com.ktg.common.utils.StringUtils;
 import com.ktg.mes.pro.controller.vo.ProRouteHomeVO;
@@ -23,6 +24,8 @@ import com.ktg.mes.pro.service.IProRouteProductService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
+import com.ktg.mes.md.domain.MdItem;
+import com.ktg.mes.md.service.IMdItemService;
 import com.ktg.mes.pro.mapper.ProWorkorderMapper;
 import com.ktg.mes.pro.domain.ProWorkorder;
 import com.ktg.mes.pro.service.IProWorkorderService;
@@ -36,6 +39,8 @@ import com.ktg.mes.pro.service.IProWorkorderService;
 @Service
 public class ProWorkorderServiceImpl implements IProWorkorderService 
 {
+    private static final String DEFAULT_WORKORDER_TYPE = "SELF";
+
     @Autowired
     private ProWorkorderMapper proWorkorderMapper;
 
@@ -47,6 +52,9 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
 
     @Autowired
     private IProFeedbackService proFeedbackService;
+
+    @Autowired
+    private IMdItemService mdItemService;
 
     /**
      * 查询生产工单
@@ -92,13 +100,12 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     @Override
     public int insertProWorkorder(ProWorkorder proWorkorder)
     {
-        if(proWorkorder.getParentId()!= null){
-            ProWorkorder parent = proWorkorderMapper.selectProWorkorderByWorkorderId(proWorkorder.getParentId());
-            if(StringUtils.isNotNull(parent)){
-                proWorkorder.setAncestors(parent.getAncestors()+","+parent.getParentId());
-            }
+        normalizeDraft(proWorkorder);
+        proWorkorder.setStatus(UserConstants.ORDER_STATUS_PREPARE);
+        if (StringUtils.isEmpty(proWorkorder.getWorkorderType()))
+        {
+            proWorkorder.setWorkorderType(DEFAULT_WORKORDER_TYPE);
         }
-
         proWorkorder.setCreateTime(DateUtils.getNowDate());
         return proWorkorderMapper.insertProWorkorder(proWorkorder);
     }
@@ -114,6 +121,62 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
     {
         proWorkorder.setUpdateTime(DateUtils.getNowDate());
         return proWorkorderMapper.updateProWorkorder(proWorkorder);
+    }
+
+    @Override
+    public int updateDraftWorkorder(ProWorkorder proWorkorder)
+    {
+        normalizeDraft(proWorkorder);
+        proWorkorder.setUpdateTime(DateUtils.getNowDate());
+        return proWorkorderMapper.updateProWorkorder(proWorkorder);
+    }
+
+    private void normalizeDraft(ProWorkorder workorder)
+    {
+        MdItem product = mdItemService.selectMdItemById(workorder.getProductId());
+        if (StringUtils.isNull(product))
+        {
+            throw new ServiceException("productId: 产品不存在");
+        }
+        workorder.setProductCode(product.getItemCode());
+        workorder.setProductName(product.getItemName());
+        workorder.setProductSpc(product.getSpecification());
+        workorder.setUnitOfMeasure(product.getUnitOfMeasure());
+
+        Long parentId = workorder.getParentId();
+        if (parentId == null || parentId == 0L)
+        {
+            workorder.setParentId(0L);
+            workorder.setAncestors("0");
+            return;
+        }
+
+        ProWorkorder parent = proWorkorderMapper.selectProWorkorderByWorkorderId(parentId);
+        if (StringUtils.isNull(parent))
+        {
+            throw new ServiceException("parentId: 父工单不存在");
+        }
+        if (parentId.equals(workorder.getWorkorderId()) || containsAncestor(parent.getAncestors(), workorder.getWorkorderId()))
+        {
+            throw new ServiceException("parentId: 父工单不能形成循环引用");
+        }
+        workorder.setAncestors(parent.getAncestors() + "," + parent.getWorkorderId());
+    }
+
+    private boolean containsAncestor(String ancestors, Long workorderId)
+    {
+        if (StringUtils.isEmpty(ancestors) || workorderId == null)
+        {
+            return false;
+        }
+        for (String ancestor : ancestors.split(","))
+        {
+            if (String.valueOf(workorderId).equals(ancestor))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

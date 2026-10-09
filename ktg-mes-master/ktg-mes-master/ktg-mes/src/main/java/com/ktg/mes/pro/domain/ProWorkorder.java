@@ -29,6 +29,10 @@ public class ProWorkorder extends TreeEntity
     @Excel(name = "工单名称")
     private String workorderName;
 
+    /** 工单类型：SELF 自制、OUTSOURCE 外协、PURCHASE 外购 */
+    @Excel(name = "工单类型")
+    private String workorderType;
+
     /** 来源类型 */
     @Excel(name = "来源类型")
     private String orderSource;
@@ -136,6 +140,15 @@ public class ProWorkorder extends TreeEntity
     public String getWorkorderName() 
     {
         return workorderName;
+    }
+    public void setWorkorderType(String workorderType)
+    {
+        this.workorderType = workorderType;
+    }
+
+    public String getWorkorderType()
+    {
+        return workorderType;
     }
     public void setOrderSource(String orderSource) 
     {
@@ -333,6 +346,7 @@ public class ProWorkorder extends TreeEntity
                 "workorderId=" + workorderId +
                 ", workorderCode='" + workorderCode + '\'' +
                 ", workorderName='" + workorderName + '\'' +
+                ", workorderType='" + workorderType + '\'' +
                 ", orderSource='" + orderSource + '\'' +
                 ", sourceCode='" + sourceCode + '\'' +
                 ", productId=" + productId +
