@@ -78,6 +78,15 @@ def test_usage_rejects_negative_token_counts(input_tokens: int, output_tokens: i
         Usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
+def test_model_config_rejects_nan_temperature() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        ModelConfig(
+            model="test-model",
+            max_output_tokens=256,
+            temperature=float("nan"),
+        )
+
+
 def test_text_delta_allows_whitespace_from_provider_stream() -> None:
     assert TextDelta(" ").text == " "
 

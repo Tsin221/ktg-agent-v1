@@ -116,7 +116,11 @@ class OpenAICompatibleProvider:
     ) -> dict[str, object]:
         request = Request(
             url,
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(
+                body,
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8"),
             headers=dict(headers),
             method="POST",
         )
@@ -198,7 +202,11 @@ class OpenAICompatibleProvider:
                 "type": "function",
                 "function": {
                     "name": block.name,
-                    "arguments": json.dumps(block.arguments, ensure_ascii=False),
+                    "arguments": json.dumps(
+                        block.arguments,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
                 },
             }
             for block in message.content

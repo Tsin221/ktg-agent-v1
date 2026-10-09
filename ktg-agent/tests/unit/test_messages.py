@@ -89,6 +89,30 @@ def test_tool_call_rejects_missing_id(tool_call_id: str) -> None:
         ToolCall(tool_call_id, "ktg.query_stock", {})
 
 
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=("nan", "positive-infinity", "negative-infinity"),
+)
+def test_tool_call_rejects_nested_non_finite_json_numbers(value: float) -> None:
+    with pytest.raises(MessageValidationError, match="finite JSON numbers"):
+        ToolCall(
+            "call-1",
+            "ktg.query_stock",
+            {"filters": [{"quantity": value}]},
+        )
+
+
+def test_tool_call_accepts_finite_json_numbers() -> None:
+    call = ToolCall(
+        "call-1",
+        "ktg.query_stock",
+        {"minimum": -1.5, "maximum": 0.0},
+    )
+
+    assert call.arguments == {"minimum": -1.5, "maximum": 0.0}
+
+
 def test_projection_rejects_duplicate_tool_call_id() -> None:
     messages = (
         AssistantMessage(

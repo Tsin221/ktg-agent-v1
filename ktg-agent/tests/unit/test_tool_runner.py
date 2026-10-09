@@ -9,6 +9,7 @@ import pytest
 from ktg_agent.core.messages import (
     AssistantMessage,
     JsonObject,
+    MessageValidationError,
     ToolCall,
     ToolResultMessage,
     project_model_messages,
@@ -234,6 +235,16 @@ def test_tool_exception_becomes_error_result_and_preserves_call_id() -> None:
     assert message.tool_call_id == "call-7"
     assert message.is_error is True
     assert execute.calls == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=("nan", "positive-infinity", "negative-infinity"),
+)
+def test_tool_result_rejects_non_finite_details(value: float) -> None:
+    with pytest.raises(MessageValidationError, match="finite JSON numbers"):
+        ToolResult(content="invalid", details={"quantity": value})
 
 
 def test_invalid_structured_output_is_normalized() -> None:

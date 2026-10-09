@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TypeAlias, cast
@@ -38,7 +39,13 @@ def _required_text(value: object, label: str) -> str:
 
 
 def _json_value(value: object, label: str) -> JsonValue:
-    if value is None or isinstance(value, bool | int | float | str):
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise MessageValidationError(
+                f"{label} must contain only finite JSON numbers"
+            )
         return value
     if isinstance(value, list):
         return [_json_value(item, label) for item in value]
