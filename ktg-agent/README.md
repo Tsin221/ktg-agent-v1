@@ -61,6 +61,8 @@ uv run --locked mypy
 
 `pytest` 覆盖消息序列化与模型投影、FakeProvider 脚本、工具白名单与 schema 校验、工具调度和预算、事件顺序、取消、steer/follow-up 队列、监听器异常以及离线示例。`mypy` 对 `src` 和 `tests` 运行严格类型检查。
 
+2026-10-09 在新建的独立目录和虚拟环境中使用锁文件离线复验：包版本为 `0.1.0`，示例产生 2 次 Provider 请求和 1 次工具调用，测试结果为 `92 passed`，类型检查结果为 `Success: no issues found in 33 source files`。
+
 ## 真实模型与网页查询
 
 下面的代码与启动入口已经具备，但单元测试和 `/health` 只能证明本地链路可启动，不能证明外部模型或当前用户下的三个业务接口已经实际查询成功。只有配置真实模型、网页登录，并从悬浮窗分别完成产品、库存和工单查询后，才算端到端验收通过。
@@ -96,8 +98,11 @@ uv run --locked python -m ktg_agent.server
 ```text
 src/ktg_agent/
   core/       消息、生命周期事件、AgentLoop、Agent 和输入队列
-  providers/  Provider 协议与 FakeProvider
+  providers/  Provider 协议、FakeProvider 和 OpenAI 兼容适配器
   tools/      工具定义、白名单注册表和受控执行器
+  ktg/        带身份验证的 KTG 客户端和三个固定只读查询工具
+  service.py  无状态查询服务，负责身份验证与 Agent 组装
+  server.py   本地 health/query HTTP 入口和环境配置
 examples/     无网络可执行示例
 tests/        单元与回归测试
 docs/         核心契约和阶段交接说明
@@ -111,4 +116,4 @@ docs/         核心契约和阶段交接说明
 - 只有完整且最终停止原因为 `tool_call` 的工具调用会执行；截断输出不会执行流中出现的调用。
 - 阶段 A 的 `agent_end` 是低层循环结束事件，`Agent` 随后在 `prompt` 的 `finally` 中转为 idle。未来阶段 B 的 `run_settled` 必须等最终状态、消息、事件和必要操作记录持久化后再由 SessionService 发布，三者不能互相替代。
 
-阶段 B 尚需实现会话存储与幂等 admission、服务端身份上下文、HTTP/SSE 与事件回放，以及外部写入结果未知时的持久化和核验流程。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
+现有 `/agent-api/v1/query` 是无状态、只读的单次查询入口，并已通过 `/getInfo` 验证当前用户；它不等同于完整的阶段 B 服务。阶段 B 尚需实现会话存储与幂等 admission、会话所有权和权限校验、sessions/runs/inputs/cancel API、SSE 与事件回放，以及外部写入结果未知时的持久化和核验流程。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。

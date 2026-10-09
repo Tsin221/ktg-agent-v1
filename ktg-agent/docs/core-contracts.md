@@ -1,6 +1,6 @@
 # 阶段 A 核心契约与阶段 B 交接
 
-本文描述当前代码已经实现并由测试约束的公开接口。概念性的 HTTP、SSE、持久化和真实 KTG 工具仍属于阶段 B，不能从本文推断为已实现。
+本文描述当前代码已经实现并由测试约束的公开接口。阶段 A 核心之外，仓库还提供了 OpenAI 兼容 Provider、无状态 HTTP 查询入口，以及按当前 KTG 用户身份执行的三个固定只读工具。它们是可用的查询扩展，不代表阶段 B 的会话服务、持久化、SSE 或写操作恢复已经实现。
 
 ## 公开模块
 
@@ -11,14 +11,19 @@
 | `ktg_agent.core.messages` | `SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolResultMessage`、`TextBlock`、`ToolCall`、`StopReason`、`message_to_dict`、`message_from_dict`、`project_model_messages` |
 | `ktg_agent.providers.base` | `Provider`、`ProviderRequest`、`ModelConfig`、`ToolSchema`、`TextDelta`、`ToolCallCompleted`、`ResponseCompleted`、`FinalResponse`、`Usage`、`ProviderError` |
 | `ktg_agent.providers.fake` | `FakeProvider`、`ScriptedTurn` |
+| `ktg_agent.providers.openai_compatible` | `OpenAICompatibleProvider`，把 OpenAI 兼容 chat completions 响应转换为核心 Provider 事件 |
 | `ktg_agent.tools` | `ToolDefinition`、`ToolRegistry`、`ToolRunner`、`ToolContext`、`ToolResult`，以及 effect、执行方式、重试策略和状态枚举 |
 | `ktg_agent.core.loop` | `AgentLoop`、`RunLimits`、`AgentRunResult`、`AgentLoopError` |
 | `ktg_agent.core.events` | `AgentEventType`、`AgentEvent`、`EventPublisher`、`ToolProgressPublisher`、`EventSink` |
 | `ktg_agent.core` | `Agent`、`AgentState`、`AgentBusyError`、`AgentNotRunningError`、`CancellationToken`、`InputMode`、`InputQueue` |
+| `ktg_agent.ktg.client` | `KTGClient`、`KTGError`，使用请求携带的 Bearer token 调用固定 KTG 基址 |
+| `ktg_agent.ktg.queries` | `build_query_tools`，注册产品、库存和工单三个固定只读工具 |
+| `ktg_agent.service` | `QueryService`，验证当前用户并执行一次无状态查询 |
+| `ktg_agent.server` | `Settings`、`create_service`、`AgentHTTPServer`，提供本地 health/query HTTP 入口 |
 
 ## 消息与 Provider
 
-消息是不可变 dataclass，内容必须是非空 tuple。`ToolCall.arguments`、事件 payload 和工具结构化数据只能包含 JSON 值。工具结果的 `tool_call_id` 必须引用之前出现且尚未完成的调用；重复 ID、未知结果或缺失结果会使 `project_model_messages` 失败。
+消息是不可变 dataclass，内容必须是非空 tuple。`ToolCall.arguments`、事件 payload 和工具结构化数据只能包含 JSON 值，其中数字必须是有限值，`NaN` 与正负无穷会被拒绝；出站 JSON 也禁止生成这些非标准数值。工具结果的 `tool_call_id` 必须引用之前出现且尚未完成的调用；重复 ID、未知结果或缺失结果会使 `project_model_messages` 失败。
 
 `TextBlock.model_visible=False` 的文本不会进入 Provider 请求。`ToolResultMessage.details` 用于可信 UI 或记录，在模型上下文投影时总会移除；模型只看到 `content`。持久化层必须保存原始消息，不能用投影覆盖历史事实。
 
@@ -68,13 +73,20 @@
 
 监听器异常由 `Agent` 隔离，不会中断其他监听器或运行。用于可靠持久化的 sink 不应注册成普通监听器；应通过 `AgentLoop.event_sink` 或 SessionService 的事务流程处理，使失败能够传播或阻止 settled。
 
-## 阶段 A 已知限制
+## 当前无状态只读查询扩展
 
-- 没有真实 Provider、真实 KTG 工具、权限策略实现、重试编排或 token 用量预算。
+`GET /health` 用于检查本地进程，`POST /agent-api/v1/query` 接受一次查询。每个查询请求必须携带当前网页用户的 Bearer token；`QueryService` 先调用 KTG `/getInfo` 验证当前身份，再创建短期客户端和 Agent。token 不写入消息、工具参数或持久化存储。
+
+模型只能选择 `ktg_search_items`、`ktg_query_stock` 和 `ktg_list_workorders` 三个白名单工具；工具分别映射到固定的产品、库存和工单 GET 接口。模型不能指定 KTG 基址、HTTP 方法或任意路径。当前入口不保存会话和历史，不提供 run/input/cancel API，也没有 SSE、事件回放或写工具，因此不能当作阶段 B SessionService 使用。
+
+## 当前已知限制
+
+- 真实模型仅提供 OpenAI 兼容 chat completions 适配；当前适配器把完整响应转换为核心事件，不提供模型侧实时增量流。尚无重试编排或 token 用量预算。
+- 真实 KTG 工具仅限三个固定只读查询；尚无写工具、细粒度工具权限策略或业务操作恢复。
 - 没有 SessionService、Repository、数据库迁移、会话所有权或跨进程单写者保证。
 - 事件只含 `run_id`、`seq`、`type` 和 payload；没有 `schema_version`、`session_id`、持久化时间、回放或保留期。
 - 取消信号是进程内布尔 token；工具和 Provider 必须主动观察它，已开始的外部副作用不会自动撤销。
-- `identity` 与 `ktg_client` 仍为不透明对象，核心层不校验用户、权限或凭据生命周期。
+- `identity` 与 `ktg_client` 在核心层仍是不透明对象；当前无状态查询入口会调用 `/getInfo` 验证当前用户，但尚未实现会话所有权、长期凭据生命周期和完整权限编排。
 - `ToolStatus.UNKNOWN` 和 operation 字段已有数据形状，但持久化意图、幂等键、回读核验与恢复状态机尚未实现。
 - 当前只保证单个 `Agent` 实例单 run；阶段 B 仍要按会话管理实例、锁和 admission，不能依赖调用方自律。
 
@@ -102,7 +114,7 @@
 
 ### 身份与权限
 
-- [ ] 用 KTG `/getInfo` 服务端验证 Bearer token，构造不可由客户端伪造的身份上下文；token 不落库、不进提示词和普通日志。
+- [ ] 在现有每请求 `/getInfo` 验证的基础上，把身份绑定到持久化会话及其所有权；token 不落库、不进提示词和普通日志。
 - [ ] 会话读取、事件订阅、排队、取消和工具执行均校验所有权与权限；Java 端仍是最终权限判定。
 - [ ] 定义短期凭据过期行为：停止后续写入，重新登录后先核验未决操作。
 
@@ -133,17 +145,19 @@ uv run --locked mypy
 
 验证记录应包含实际 Python/uv/锁定依赖版本、测试数量、类型检查与构建结果；命令或预期输出变化时须同步更新 README 和本文件。
 
+2026-10-09 的独立目录离线复验使用 Windows、CPython 3.12.6 和 uv 0.11.21；锁定安装与包导入成功，示例产生 2 次 Provider 请求和 1 次工具调用，测试结果为 `92 passed`，严格类型检查结果为 `Success: no issues found in 33 source files`。
+
 ## A-08 完成记录
 
-完成日期：2026-10-06。
+完成日期：2026-10-09。
 
 实际修改文件：
 
-- `README.md`：干净环境安装、命令、离线示例、阶段边界。
-- `docs/core-contracts.md`：公开接口、事件完成语义、已知限制及阶段 B 清单。
+- `README.md`：干净环境安装、命令、离线示例、当前查询能力和阶段边界。
+- `docs/core-contracts.md`：公开接口、有限 JSON 数字约束、事件完成语义、当前只读查询扩展、已知限制及阶段 B 清单。
 - `examples/fake_agent.py`：无网络的 Provider → 工具 → Provider 闭环。
 - `tests/test_offline_example.py`：验证文档示例可由已安装包直接运行。
 
 验证环境为 Windows、CPython 3.12.6、uv 0.11.21。锁定的直接依赖为 jsonschema 4.25.1；开发依赖为 pytest 9.0.3、mypy 1.18.2 和 types-jsonschema 4.26.0.20260518；构建后端为 hatchling 1.27.0。
 
-在新建的独立虚拟环境中执行锁文件安装、包导入、离线示例、完整测试和严格类型检查，结果为：包版本 `0.1.0`；示例产生 2 次 Provider 请求和 1 次工具调用；`66 passed`；`Success: no issues found in 22 source files`。阶段 A 的消息、事件和工具契约未因 A-08 调整，下一阶段可直接按上方注入边界建立 SessionService。
+在新建的独立目录和虚拟环境中执行离线锁文件安装、包导入、离线示例、完整测试和严格类型检查，结果为：包版本 `0.1.0`；示例产生 2 次 Provider 请求和 1 次工具调用；`92 passed`；`Success: no issues found in 33 source files`。本轮同时把 A-02 的有限 JSON 数字约束、A-06 的整批 deadline 约束，以及后续加入的真实只读查询能力纳入交接说明。下一阶段可按上方注入边界建立完整 SessionService。
