@@ -5,6 +5,7 @@
 本地系统密码.txt
 mysql/
 redis/
+logs/
 .runtime/
 upload/
 .git-backups/
