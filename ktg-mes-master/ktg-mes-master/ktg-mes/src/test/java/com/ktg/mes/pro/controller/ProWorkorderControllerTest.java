@@ -20,12 +20,14 @@ import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 
 import java.util.Collections;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.doReturn;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -223,6 +225,21 @@ class ProWorkorderControllerTest {
                 .andExpect(jsonPath("$.code").value(500));
 
         verify(proWorkorderService, never()).updateDraftWorkorder(argThat(workorder -> true));
+    }
+
+    @Test
+    void removeDelegatesTheWholeBatchToTheTransactionalService() throws Exception
+    {
+        when(proWorkorderService.deleteProWorkorderByWorkorderIds(argThat(ids ->
+                ids.length == 2 && Long.valueOf(1L).equals(ids[0]) && Long.valueOf(2L).equals(ids[1]))))
+                .thenReturn(2);
+
+        mockMvc.perform(delete("/mes/pro/workorder/1,2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(proWorkorderService).deleteProWorkorderByWorkorderIds(argThat(ids -> ids.length == 2));
+        verify(proWorkorderService, never()).selectProWorkorderByWorkorderId(any());
     }
 
     @Test

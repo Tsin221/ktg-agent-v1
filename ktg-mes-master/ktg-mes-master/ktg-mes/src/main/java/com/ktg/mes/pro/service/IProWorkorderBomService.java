@@ -28,7 +28,7 @@ public interface IProWorkorderBomService
     public List<ProWorkorderBom> selectProWorkorderBomList(ProWorkorderBom proWorkorderBom);
 
     /**
-     * 新增生产工单BOM组成
+     * 为草稿工单新增 BOM 组成；与工单删除共用工单行锁，避免并发产生孤儿 BOM。
      * 
      * @param proWorkorderBom 生产工单BOM组成
      * @return 结果

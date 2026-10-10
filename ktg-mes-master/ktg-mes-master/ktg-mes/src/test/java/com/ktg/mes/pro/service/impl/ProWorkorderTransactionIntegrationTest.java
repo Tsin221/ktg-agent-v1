@@ -12,6 +12,7 @@ import com.ktg.mes.pro.mapper.ProWorkorderMapper;
 import com.ktg.mes.pro.service.IProFeedbackService;
 import com.ktg.mes.pro.service.IProRouteProcessService;
 import com.ktg.mes.pro.service.IProRouteProductService;
+import com.ktg.mes.pro.service.IProWorkorderBomService;
 import com.ktg.mes.pro.service.IProWorkorderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,7 @@ import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -57,6 +59,8 @@ class ProWorkorderTransactionIntegrationTest
     @Autowired
     private IProWorkorderService service;
     @Autowired
+    private IProWorkorderBomService bomService;
+    @Autowired
     private JdbcTemplate jdbc;
     @Autowired
     private JdbcWorkorderBomMapper bomMapper;
@@ -69,6 +73,7 @@ class ProWorkorderTransactionIntegrationTest
         bomMapper.resetFailure();
         workorderMapper.resetInsertBarrier();
         workorderMapper.resetUpdateBarrier();
+        workorderMapper.resetDeleteControls();
         jdbc.update("delete from pro_workorder_bom");
         jdbc.update("delete from pro_workorder");
         jdbc.update("delete from md_product_bom");
@@ -78,6 +83,128 @@ class ProWorkorderTransactionIntegrationTest
         jdbc.update("insert into md_item(item_id,item_code,item_name,specification,unit_of_measure) values (102,'M-102','物料二','规格二','个')");
         jdbc.update("insert into md_product_bom(item_id,bom_item_id,bom_item_code,bom_item_name,bom_item_spec,unit_of_measure,item_or_product,quantity) values (10,101,'M-101','物料一','规格一','个','ITEM',2)");
         jdbc.update("insert into md_product_bom(item_id,bom_item_id,bom_item_code,bom_item_name,bom_item_spec,unit_of_measure,item_or_product,quantity) values (10,102,'M-102','物料二','规格二','个','ITEM',3)");
+    }
+
+    @Test
+    void mixedStatusBatchDeleteLeavesEveryWorkorderAndBomUnchanged()
+    {
+        Long draftId = insertExisting("WO-DELETE-DRAFT", "5", "草稿");
+        Long confirmedId = insertExisting("WO-DELETE-CONFIRMED", "6", "已确认");
+        jdbc.update("update pro_workorder set status='CONFIRMED' where workorder_id=?", confirmedId);
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{draftId, confirmedId}));
+
+        assertEquals(Integer.valueOf(409), error.getCode());
+        assertEquals(2, count("select count(*) from pro_workorder"));
+        assertEquals(4, count("select count(*) from pro_workorder_bom"));
+    }
+
+    @Test
+    void batchDeleteRollsBackEarlierBomDeletesWhenLaterDeleteFails()
+    {
+        Long firstId = insertExisting("WO-DELETE-FIRST", "5", "第一张");
+        Long secondId = insertExisting("WO-DELETE-SECOND", "6", "第二张");
+        bomMapper.failOnDeleteWithDatabaseError(2);
+
+        assertThrows(DataAccessException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{firstId, secondId}));
+
+        assertEquals(2, count("select count(*) from pro_workorder"));
+        assertEquals(4, count("select count(*) from pro_workorder_bom"));
+        assertEquals(2, count("select count(*) from pro_workorder_bom where workorder_id=" + firstId));
+    }
+
+    @Test
+    void finalWorkorderDatabaseFailureRestoresAllDeletedBomRows()
+    {
+        Long firstId = insertExisting("WO-DELETE-FINAL-1", "5", "第一张");
+        Long secondId = insertExisting("WO-DELETE-FINAL-2", "6", "第二张");
+        workorderMapper.failNextBatchDeleteWithDatabaseError();
+
+        assertThrows(DataAccessException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{firstId, secondId}));
+
+        assertEquals(2, count("select count(*) from pro_workorder"));
+        assertEquals(4, count("select count(*) from pro_workorder_bom"));
+    }
+
+    @Test
+    void invalidIdBatchesLeaveDatabaseUnchanged()
+    {
+        insertExisting("WO-DELETE-INVALID", "5", "保留");
+
+        assertThrows(ServiceException.class, () -> service.deleteProWorkorderByWorkorderIds(null));
+        assertThrows(ServiceException.class, () -> service.deleteProWorkorderByWorkorderIds(new Long[0]));
+        assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{1L, null}));
+
+        assertEquals(1, count("select count(*) from pro_workorder"));
+        assertEquals(2, count("select count(*) from pro_workorder_bom"));
+    }
+
+    @Test
+    void concurrentBomInsertCannotLeaveOrphanAfterWorkorderDelete() throws Exception
+    {
+        Long id = insertExisting("WO-DELETE-CONCURRENT-BOM", "5", "并发删除");
+        workorderMapper.pauseBeforeNextBatchDelete();
+        bomMapper.observeNextInsert();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try
+        {
+            Future<Integer> deletion = executor.submit(
+                    () -> service.deleteProWorkorderByWorkorderIds(new Long[]{id}));
+            assertTrue(workorderMapper.awaitBatchDeleteReady());
+
+            ProWorkorderBom newBom = new ProWorkorderBom();
+            newBom.setWorkorderId(id);
+            newBom.setItemId(101L);
+            newBom.setItemCode("M-101");
+            newBom.setItemName("并发物料");
+            newBom.setQuantity(BigDecimal.ONE);
+            Future<Object> insertion = executor.submit(() -> insertBomOrReturnError(newBom));
+            bomMapper.awaitObservedInsert(300, TimeUnit.MILLISECONDS);
+
+            workorderMapper.releaseBatchDelete();
+            assertEquals(1, deletion.get(5, TimeUnit.SECONDS));
+            Object insertResult = insertion.get(5, TimeUnit.SECONDS);
+
+            assertTrue(insertResult instanceof ServiceException);
+            assertEquals(Integer.valueOf(404), ((ServiceException) insertResult).getCode());
+            assertEquals(0, count("select count(*) from pro_workorder where workorder_id=" + id));
+            assertEquals(0, count("select count(*) from pro_workorder_bom where workorder_id=" + id));
+        }
+        finally
+        {
+            workorderMapper.releaseBatchDelete();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void validBatchDeleteRemovesAllBomAndTreatsDuplicateIdsAsOneWorkorder()
+    {
+        Long firstId = insertExisting("WO-DELETE-OK-1", "5", "第一张");
+        Long secondId = insertExisting("WO-DELETE-OK-2", "6", "第二张");
+
+        int deleted = service.deleteProWorkorderByWorkorderIds(new Long[]{firstId, firstId, secondId});
+
+        assertEquals(2, deleted);
+        assertEquals(0, count("select count(*) from pro_workorder"));
+        assertEquals(0, count("select count(*) from pro_workorder_bom"));
+    }
+
+    @Test
+    void missingIdBatchDeleteLeavesExistingWorkorderAndBomUnchanged()
+    {
+        Long existingId = insertExisting("WO-DELETE-MISSING", "5", "存在");
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{existingId, 404L}));
+
+        assertEquals(Integer.valueOf(404), error.getCode());
+        assertEquals(1, count("select count(*) from pro_workorder"));
+        assertEquals(2, count("select count(*) from pro_workorder_bom"));
     }
 
     @Test
@@ -259,6 +386,18 @@ class ProWorkorderTransactionIntegrationTest
         }
     }
 
+    private Object insertBomOrReturnError(ProWorkorderBom bom)
+    {
+        try
+        {
+            return bomService.insertProWorkorderBom(bom);
+        }
+        catch (ServiceException e)
+        {
+            return e;
+        }
+    }
+
     private boolean isEditConflict(Object result)
     {
         return result instanceof ServiceException
@@ -355,6 +494,9 @@ class ProWorkorderTransactionIntegrationTest
 
         @Bean
         IProWorkorderService workorderService() { return new ProWorkorderServiceImpl(); }
+
+        @Bean
+        IProWorkorderBomService workorderBomService() { return new ProWorkorderBomServiceImpl(); }
     }
 
     static class JdbcWorkorderMapper implements ProWorkorderMapper
@@ -362,6 +504,9 @@ class ProWorkorderTransactionIntegrationTest
         private final JdbcTemplate jdbc;
         private volatile CountDownLatch insertBarrier;
         private volatile CountDownLatch updateBarrier;
+        private volatile CountDownLatch batchDeleteReady;
+        private volatile CountDownLatch batchDeleteRelease;
+        private volatile boolean failBatchDelete;
         private final RowMapper<ProWorkorder> rowMapper = (rs, rowNum) -> {
             ProWorkorder value = new ProWorkorder();
             value.setWorkorderId(rs.getLong("workorder_id"));
@@ -382,6 +527,27 @@ class ProWorkorderTransactionIntegrationTest
         void resetInsertBarrier() { insertBarrier = null; }
         void barrierBeforeNextTwoDraftUpdates() { updateBarrier = new CountDownLatch(2); }
         void resetUpdateBarrier() { updateBarrier = null; }
+        void pauseBeforeNextBatchDelete()
+        {
+            batchDeleteReady = new CountDownLatch(1);
+            batchDeleteRelease = new CountDownLatch(1);
+        }
+        boolean awaitBatchDeleteReady() throws InterruptedException
+        {
+            return batchDeleteReady.await(5, TimeUnit.SECONDS);
+        }
+        void releaseBatchDelete()
+        {
+            CountDownLatch release = batchDeleteRelease;
+            if (release != null) release.countDown();
+        }
+        void failNextBatchDeleteWithDatabaseError() { failBatchDelete = true; }
+        void resetDeleteControls()
+        {
+            batchDeleteReady = null;
+            batchDeleteRelease = null;
+            failBatchDelete = false;
+        }
 
         @Override
         public ProWorkorder selectProWorkorderByWorkorderId(Long id)
@@ -486,22 +652,71 @@ class ProWorkorderTransactionIntegrationTest
 
         @Override public List<ProWorkorder> selectProWorkorderList(ProWorkorder value) { return Collections.emptyList(); }
         @Override public int deleteProWorkorderByWorkorderId(Long id) { return jdbc.update("delete from pro_workorder where workorder_id=?", id); }
-        @Override public int deleteProWorkorderByWorkorderIds(Long[] ids) { throw new UnsupportedOperationException(); }
+        @Override
+        public int deleteProWorkorderByWorkorderIds(Long[] ids)
+        {
+            CountDownLatch ready = batchDeleteReady;
+            CountDownLatch release = batchDeleteRelease;
+            if (ready != null && release != null)
+            {
+                batchDeleteReady = null;
+                ready.countDown();
+                try
+                {
+                    if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("删除并发测试未释放");
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                batchDeleteRelease = null;
+            }
+            if (failBatchDelete)
+            {
+                jdbc.update("delete from missing_workorder_table");
+            }
+            int deleted = 0;
+            for (Long id : ids)
+            {
+                deleted += jdbc.update("delete from pro_workorder where workorder_id=?", id);
+            }
+            return deleted;
+        }
     }
 
     static class JdbcWorkorderBomMapper implements ProWorkorderBomMapper
     {
         private final JdbcTemplate jdbc;
         private final AtomicInteger insertCount = new AtomicInteger();
+        private final AtomicInteger deleteCount = new AtomicInteger();
         private volatile int failingInsert;
+        private volatile int failingDelete;
+        private volatile CountDownLatch observedInsert;
 
         JdbcWorkorderBomMapper(JdbcTemplate jdbc) { this.jdbc = jdbc; }
         void failOnInsert(int number) { insertCount.set(0); failingInsert = number; }
-        void resetFailure() { insertCount.set(0); failingInsert = 0; }
+        void failOnDeleteWithDatabaseError(int number) { deleteCount.set(0); failingDelete = number; }
+        void observeNextInsert() { observedInsert = new CountDownLatch(1); }
+        boolean awaitObservedInsert(long timeout, TimeUnit unit) throws InterruptedException
+        {
+            CountDownLatch observed = observedInsert;
+            return observed != null && observed.await(timeout, unit);
+        }
+        void resetFailure()
+        {
+            insertCount.set(0);
+            deleteCount.set(0);
+            failingInsert = 0;
+            failingDelete = 0;
+            observedInsert = null;
+        }
 
         @Override
         public int insertProWorkorderBom(ProWorkorderBom value)
         {
+            CountDownLatch observed = observedInsert;
+            if (observed != null) observed.countDown();
             if (insertCount.incrementAndGet() == failingInsert)
             {
                 throw new ServiceException("模拟 BOM 写入失败");
@@ -511,7 +726,15 @@ class ProWorkorderTransactionIntegrationTest
                     value.getUnitOfMeasure(), value.getItemOrProduct(), value.getQuantity());
         }
 
-        @Override public int deleteProWorkorderBomByWorkorderId(Long id) { return jdbc.update("delete from pro_workorder_bom where workorder_id=?", id); }
+        @Override
+        public int deleteProWorkorderBomByWorkorderId(Long id)
+        {
+            if (deleteCount.incrementAndGet() == failingDelete)
+            {
+                jdbc.update("delete from missing_workorder_bom_table");
+            }
+            return jdbc.update("delete from pro_workorder_bom where workorder_id=?", id);
+        }
         @Override public ProWorkorderBom selectProWorkorderBomByLineId(Long id) { throw new UnsupportedOperationException(); }
         @Override public List<ProWorkorderBom> selectProWorkorderBomList(ProWorkorderBom value) { return Collections.emptyList(); }
         @Override public int updateProWorkorderBom(ProWorkorderBom value) { throw new UnsupportedOperationException(); }

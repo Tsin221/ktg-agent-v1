@@ -36,6 +36,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.times;
 
 @ExtendWith(MockitoExtension.class)
 class ProWorkorderServiceImplTest {
@@ -57,6 +58,87 @@ class ProWorkorderServiceImplTest {
 
     @InjectMocks
     private ProWorkorderServiceImpl service;
+
+    @Test
+    void batchDeleteRejectsEmptyIdsBeforeReadingOrWriting()
+    {
+        ServiceException nullError = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(null));
+        ServiceException emptyError = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[0]));
+        ServiceException nullElementError = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{1L, null}));
+
+        assertEquals(Integer.valueOf(400), nullError.getCode());
+        assertEquals("工单 ID 不能为空！", nullError.getMessage());
+        assertEquals(Integer.valueOf(400), emptyError.getCode());
+        assertEquals(Integer.valueOf(400), nullElementError.getCode());
+        verify(proWorkorderMapper, never()).selectProWorkorderByWorkorderIdForUpdate(any());
+        verify(proWorkorderBomMapper, never()).deleteProWorkorderBomByWorkorderId(any());
+        verify(proWorkorderMapper, never()).deleteProWorkorderByWorkorderIds(any());
+    }
+
+    @Test
+    void batchDeleteRejectsMissingWorkorderBeforeDeletingAnything()
+    {
+        ProWorkorder first = new ProWorkorder();
+        first.setWorkorderId(1L);
+        first.setStatus("PREPARE");
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(1L)).thenReturn(first);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(404L)).thenReturn(null);
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{1L, 404L}));
+
+        assertEquals(Integer.valueOf(404), error.getCode());
+        assertEquals("生产工单不存在：404", error.getMessage());
+        verify(proWorkorderBomMapper, never()).deleteProWorkorderBomByWorkorderId(any());
+        verify(proWorkorderMapper, never()).deleteProWorkorderByWorkorderIds(any());
+    }
+
+    @Test
+    void batchDeleteRejectsMixedStatusBeforeDeletingAnything()
+    {
+        ProWorkorder draft = new ProWorkorder();
+        draft.setWorkorderId(1L);
+        draft.setStatus("PREPARE");
+        ProWorkorder confirmed = new ProWorkorder();
+        confirmed.setWorkorderId(2L);
+        confirmed.setStatus("CONFIRMED");
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(1L)).thenReturn(draft);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(2L)).thenReturn(confirmed);
+
+        ServiceException error = assertThrows(ServiceException.class,
+                () -> service.deleteProWorkorderByWorkorderIds(new Long[]{1L, 2L}));
+
+        assertEquals(Integer.valueOf(409), error.getCode());
+        assertEquals("只能删除草稿状态生产工单：2", error.getMessage());
+        verify(proWorkorderBomMapper, never()).deleteProWorkorderBomByWorkorderId(any());
+        verify(proWorkorderMapper, never()).deleteProWorkorderByWorkorderIds(any());
+    }
+
+    @Test
+    void batchDeleteDeduplicatesIdsAndDeletesBomBeforeWorkorders()
+    {
+        ProWorkorder first = new ProWorkorder();
+        first.setWorkorderId(1L);
+        first.setStatus("PREPARE");
+        ProWorkorder second = new ProWorkorder();
+        second.setWorkorderId(2L);
+        second.setStatus("PREPARE");
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(1L)).thenReturn(first);
+        when(proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(2L)).thenReturn(second);
+        when(proWorkorderMapper.deleteProWorkorderByWorkorderIds(any())).thenReturn(2);
+
+        int deleted = service.deleteProWorkorderByWorkorderIds(new Long[]{1L, 1L, 2L});
+
+        assertEquals(2, deleted);
+        verify(proWorkorderMapper, times(1)).selectProWorkorderByWorkorderIdForUpdate(1L);
+        verify(proWorkorderBomMapper).deleteProWorkorderBomByWorkorderId(1L);
+        verify(proWorkorderBomMapper).deleteProWorkorderBomByWorkorderId(2L);
+        verify(proWorkorderMapper).deleteProWorkorderByWorkorderIds(argThat(ids ->
+                ids.length == 2 && Long.valueOf(1L).equals(ids[0]) && Long.valueOf(2L).equals(ids[1])));
+    }
 
     @Test
     void createDraftReturnsGeneratedIdAndBuildsIndependentBomRows()

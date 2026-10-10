@@ -7,7 +7,6 @@ import javax.servlet.http.HttpServletResponse;
 import javax.validation.Valid;
 
 import cn.hutool.core.collection.CollUtil;
-import com.ktg.common.constant.UserConstants;
 import com.ktg.common.core.page.TableDataInfo;
 import com.ktg.mes.md.domain.MdProductBom;
 import com.ktg.mes.md.service.IMdProductBomService;
@@ -127,27 +126,9 @@ public class ProWorkorderController extends BaseController
     @PreAuthorize("@ss.hasPermi('mes:pro:workorder:remove')")
     @Log(title = "生产工单", businessType = BusinessType.DELETE)
 	@DeleteMapping("/{workorderIds}")
-    public AjaxResult remove(@PathVariable Long[] workorderIds)
+    public AjaxResult remove(@PathVariable("workorderIds") Long[] workorderIds)
     {
-        for (Long id:workorderIds
-             ) {
-            ProWorkorder workorder = proWorkorderService.selectProWorkorderByWorkorderId(id);
-            if(!UserConstants.ORDER_STATUS_PREPARE.equals(workorder.getStatus())){
-                return AjaxResult.error("只能删除草稿状态单据！");
-            }
-            removeBomLine(id);
-        }
         return toAjax(proWorkorderService.deleteProWorkorderByWorkorderIds(workorderIds));
-    }
-
-    /**
-     * 删除当前工单下所有BOM组成
-     * @param workorderId
-     */
-    private void removeBomLine(Long workorderId){
-        ProWorkorderBom param = new ProWorkorderBom();
-        param.setWorkorderId(workorderId);
-        proWorkorderBomService.deleteProWorkorderBomByWorkorderId(workorderId);
     }
 
     /**

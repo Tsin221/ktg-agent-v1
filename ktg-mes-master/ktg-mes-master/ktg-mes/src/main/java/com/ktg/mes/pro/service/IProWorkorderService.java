@@ -54,10 +54,11 @@ public interface IProWorkorderService
     public int updateDraftWorkorder(ProWorkorder proWorkorder);
 
     /**
-     * 批量删除生产工单
+     * 原子批量删除草稿生产工单及其 BOM。
+     * 重复 ID 按一个工单处理；空 ID、不存在 ID 或非草稿工单会拒绝整个批次。
      * 
      * @param workorderIds 需要删除的生产工单主键集合
-     * @return 结果
+     * @return 实际删除的工单数（去重后）
      */
     public int deleteProWorkorderByWorkorderIds(Long[] workorderIds);
 

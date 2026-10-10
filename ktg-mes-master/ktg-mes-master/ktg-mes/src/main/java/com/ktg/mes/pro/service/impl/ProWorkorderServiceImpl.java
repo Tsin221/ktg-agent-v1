@@ -6,6 +6,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import com.ktg.common.constant.UserConstants;
@@ -312,9 +314,49 @@ public class ProWorkorderServiceImpl implements IProWorkorderService
      * @return 结果
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public int deleteProWorkorderByWorkorderIds(Long[] workorderIds)
     {
-        return proWorkorderMapper.deleteProWorkorderByWorkorderIds(workorderIds);
+        if (workorderIds == null || workorderIds.length == 0)
+        {
+            throw new ServiceException("工单 ID 不能为空！", HttpStatus.BAD_REQUEST);
+        }
+
+        Set<Long> uniqueIds = new TreeSet<>();
+        for (Long workorderId : workorderIds)
+        {
+            if (workorderId == null)
+            {
+                throw new ServiceException("工单 ID 不能为空！", HttpStatus.BAD_REQUEST);
+            }
+            uniqueIds.add(workorderId);
+        }
+
+        for (Long workorderId : uniqueIds)
+        {
+            ProWorkorder workorder = proWorkorderMapper.selectProWorkorderByWorkorderIdForUpdate(workorderId);
+            if (StringUtils.isNull(workorder))
+            {
+                throw new ServiceException("生产工单不存在：" + workorderId, HttpStatus.NOT_FOUND);
+            }
+            if (!UserConstants.ORDER_STATUS_PREPARE.equals(workorder.getStatus()))
+            {
+                throw new ServiceException("只能删除草稿状态生产工单：" + workorderId, HttpStatus.CONFLICT);
+            }
+        }
+
+        for (Long workorderId : uniqueIds)
+        {
+            proWorkorderBomMapper.deleteProWorkorderBomByWorkorderId(workorderId);
+        }
+
+        Long[] ids = uniqueIds.toArray(new Long[0]);
+        int deleted = proWorkorderMapper.deleteProWorkorderByWorkorderIds(ids);
+        if (deleted != ids.length)
+        {
+            throw new ServiceException("生产工单批量删除失败");
+        }
+        return deleted;
     }
 
     /**
