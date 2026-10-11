@@ -103,7 +103,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self._write_json(HTTPStatus.OK, {"status": "ok"})
 
     def do_POST(self) -> None:
-        if self.path != "/agent-api/v1/query":
+        if self.path not in {
+            "/agent-api/v1/query",
+            "/agent-api/v1/workorder-drafts/confirm",
+        }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
             return
         try:
@@ -118,18 +121,31 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._write_error(HTTPStatus.BAD_REQUEST, "INVALID_JSON", "请求不是有效 JSON。")
             return
-        message = payload.get("message") if isinstance(payload, dict) else None
-        if not isinstance(message, str):
-            self._write_error(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "message 必须是文本。")
+        if not isinstance(payload, dict):
+            self._write_error(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求必须是对象。")
             return
         authorization = self.headers.get("Authorization", "")
         try:
-            response = asyncio.run(
-                self.server.query_service.query(
-                    message=message,
-                    authorization=authorization,
+            if self.path == "/agent-api/v1/query":
+                message = payload.get("message")
+                if not isinstance(message, str):
+                    raise ValueError("message 必须是文本。")
+                response = asyncio.run(
+                    self.server.query_service.query(
+                        message=message,
+                        authorization=authorization,
+                    )
                 )
-            )
+            else:
+                preview_id = payload.get("preview_id")
+                if not isinstance(preview_id, str):
+                    raise ValueError("preview_id 必须是文本。")
+                response = asyncio.run(
+                    self.server.query_service.confirm(
+                        preview_id=preview_id,
+                        authorization=authorization,
+                    )
+                )
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return
@@ -143,7 +159,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._write_error(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
-                "Agent 查询失败，请稍后重试。",
+                "Agent 请求失败，请稍后重试。",
             )
             return
         self._write_json(HTTPStatus.OK, response)

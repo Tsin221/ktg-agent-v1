@@ -37,11 +37,21 @@
 
         <div v-for="message in messages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
           <div class="agent-message">{{ message.text }}</div>
-          <agent-result-card
+          <div
             v-for="(result, index) in message.results || []"
             :key="`${message.id}-${index}`"
-            :result="result"
-          />
+          >
+            <agent-workorder-draft-card
+              v-if="isWorkorderResult(result)"
+              :result="result"
+              :confirming="confirmingPreviewId === result.preview_id"
+              :completed="completedPreviewIds.includes(result.preview_id)"
+              @confirm="confirmPreview"
+              @select-product="selectProduct($event, message.sourceText)"
+              @view-workorder="viewWorkorder"
+            />
+            <agent-result-card v-else :result="result" />
+          </div>
         </div>
         <div v-if="loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
           正在按当前用户权限查询…
@@ -57,10 +67,10 @@
           rows="2"
           maxlength="2000"
           placeholder="例如：查询产品 A 的库存"
-          :disabled="loading"
+          :disabled="busy"
           @keydown.enter.exact.prevent="send"
         />
-        <button type="submit" :disabled="loading || !draft.trim()">
+        <button type="submit" :disabled="busy || !draft.trim()">
           <i class="el-icon-s-promotion" aria-hidden="true" />
           <span>发送</span>
         </button>
@@ -70,21 +80,30 @@
 </template>
 
 <script>
-import { queryAgent } from '@/api/agent'
+import { confirmWorkorderDraft, queryAgent } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
+import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
+import { isWorkorderAssistantResult } from './workorderPresentation'
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard },
+  components: { AgentResultCard, AgentWorkorderDraftCard },
   data() {
     return {
       open: false,
       loading: false,
       draft: '',
       currentUser: '',
+      confirmingPreviewId: '',
+      completedPreviewIds: [],
       messageId: 0,
       messages: [],
-      examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '查询最近的生产工单']
+      examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
+    }
+  },
+  computed: {
+    busy() {
+      return this.loading || Boolean(this.confirmingPreviewId)
     }
   },
   methods: {
@@ -101,7 +120,7 @@ export default {
     },
     async send() {
       const text = this.draft.trim()
-      if (!text || this.loading) return
+      if (!text || this.busy) return
       this.messages.push({ id: ++this.messageId, role: 'user', text })
       this.draft = ''
       this.loading = true
@@ -113,6 +132,7 @@ export default {
           id: ++this.messageId,
           role: 'assistant',
           text: response.answer,
+          sourceText: text,
           results: response.results || []
         })
       } catch (error) {
@@ -128,6 +148,48 @@ export default {
         this.scrollToBottom()
         this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
       }
+    },
+    isWorkorderResult(result) {
+      return isWorkorderAssistantResult(result)
+    },
+    async confirmPreview(previewId) {
+      if (!previewId || this.confirmingPreviewId) return
+      this.confirmingPreviewId = previewId
+      try {
+        const response = await confirmWorkorderDraft(previewId)
+        const result = response.result
+        this.completedPreviewIds.push(previewId)
+        this.messages.push({
+          id: ++this.messageId,
+          role: 'assistant',
+          text: result.outcome === 'succeeded' ? '工单草稿已写入并完成回读核验。' : (result.label || '工单操作未完成。'),
+          results: [result]
+        })
+        if (result.outcome === 'succeeded') {
+          window.dispatchEvent(new CustomEvent('ktg:workorder-changed', { detail: result }))
+        }
+      } catch (error) {
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        this.messages.push({
+          id: ++this.messageId,
+          role: 'assistant',
+          text: message || '确认请求失败。系统不会自动重新提交，请先核对工单列表。'
+        })
+      } finally {
+        this.confirmingPreviewId = ''
+        this.scrollToBottom()
+      }
+    },
+    selectProduct(candidate, sourceText) {
+      const code = candidate && candidate.itemCode
+      if (!code || this.busy) return
+      this.draft = `${sourceText || '继续生成工单草稿'}\n产品请使用编码 ${code}。`
+      this.send()
+    },
+    viewWorkorder(result) {
+      window.dispatchEvent(new CustomEvent('ktg:workorder-changed', { detail: result }))
+      this.$router.push({ path: '/mes/pro/workorder', query: { workorderId: result.workorderId }}).catch(() => {})
     },
     scrollToBottom() {
       this.$nextTick(() => {

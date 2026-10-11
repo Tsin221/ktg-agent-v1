@@ -5,6 +5,7 @@ $composeFile = Join-Path $workspaceRoot 'docker-compose.mysql.yml'
 $backendScript = Join-Path $workspaceRoot 'scripts\start-backend.ps1'
 $frontendScript = Join-Path $workspaceRoot 'scripts\start-frontend.ps1'
 $agentScript = Join-Path $workspaceRoot 'scripts\start-agent.ps1'
+$migrationScript = Join-Path $workspaceRoot 'scripts\apply-db-migrations.ps1'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Test-LocalPort {
@@ -44,7 +45,7 @@ function Wait-LocalPort {
 }
 
 try {
-    foreach ($requiredFile in @($composeFile, $backendScript, $frontendScript, $agentScript, $windowsPowerShell)) {
+    foreach ($requiredFile in @($composeFile, $backendScript, $frontendScript, $agentScript, $migrationScript, $windowsPowerShell)) {
         if (-not (Test-Path -LiteralPath $requiredFile)) {
             throw "Required file not found: $requiredFile"
         }
@@ -75,6 +76,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Docker services failed to start with exit code $LASTEXITCODE."
     }
+
+    Write-Host 'Applying database migrations...' -ForegroundColor Cyan
+    & $migrationScript
 
     if (Test-LocalPort -Port 8080) {
         throw 'Port 8080 is already in use. Stop the existing backend and try again.'

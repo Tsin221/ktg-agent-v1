@@ -53,9 +53,16 @@
 | 编辑草稿 | `PREPARE` | `PUT /mes/pro/workorder` 可用；请求必须携带 `version`，仅产品或数量变化时在同一事务重建 BOM | 可用 | S2-02 |
 | 查询 | 不变 | `GET /list`、`GET /{id}` 可用 | 可用 | S2-02 复用 |
 | 确认 | `CONFIRMED` | **不可用**；无独立接口 | 本任务移除通用编辑伪确认按钮 | S2-06 实现独立动作及并发校验 |
-| 完成 | `FINISHED` | **不可用**；`/finish/{id}` 无控制器映射 | API 声明保留为契约占位，页面不再展示失效按钮 | S2-07 |
-| 取消 | `CANCELED` | **不可用**；`/cancel/{id}` 无控制器映射 | API 声明保留为契约占位，页面不再展示失效按钮 | S2-07 |
-| 携任务查询 | 不变 | **不可用**；`/listWithTaskJson` 无控制器映射 | 排产页面仍有遗留调用，不应视为已交付能力 | S2-06 核定响应结构后实现或替换 |
+| 完成 | `FINISHED` | **不可用**；`/finish/{id}` 无控制器映射 | API 占位声明已移除，页面不展示失效按钮 | 后续独立状态动作任务 |
+| 取消 | `CANCELED` | **不可用**；`/cancel/{id}` 无控制器映射 | API 占位声明已移除，页面不展示失效按钮 | 后续独立状态动作任务 |
+| 携任务查询 | 不变 | **不可用**；`/listWithTaskJson` 无控制器映射 | API 占位声明和遗留调用已移除；旧进度页只展示真实列表并明确提示任务进度暂不可用 | 后续任务进度接口任务 |
+
+## S2-06 前端交接
+
+- 创建和编辑统一通过草稿字段白名单组装请求；产品快照、状态、执行数量、审计字段和未落库的供应商字段不会发送。
+- 创建成功后用响应中的工单 ID 回读详情；编辑成功后同样回读，页面以服务端的 `status`、`version`、产品快照、单位和日期为准。
+- 编辑遇到 409 乐观锁冲突时保留用户输入，展示服务端返回的当前状态和版本，并提供带覆盖确认的“重新读取最新工单”入口。
+- 可复用草稿输入字段：`workorderCode`、`workorderName`、`workorderType`、`orderSource`、`sourceCode`、`productId`、`batchCode`、`quantity`、`clientId/clientCode/clientName`、`requestDate`、`parentId`、`remark`；编辑额外要求 `workorderId` 和 `version`。
 
 ## 样例（交付 S2-02 / S2-06 / S2-07）
 

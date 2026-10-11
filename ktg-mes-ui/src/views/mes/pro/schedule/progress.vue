@@ -1,5 +1,12 @@
 <template>
     <div>
+    <el-alert
+        title="工序进度暂不可用"
+        description="后端尚未提供携任务的工单查询接口，当前页面仅展示可查询的工单信息。"
+        type="info"
+        show-icon
+        :closable="false"
+    />
     <el-row :gutter="20">
         <el-col :span="24">
             <el-form :model="queryParams" ref="queryForm" size="small" :inline="true" v-show="showSearch" label-width="68px">
@@ -98,19 +105,6 @@
             <el-table-column label="产品名称" width="200" align="center" prop="productName" :show-overflow-tooltip="true"/>
             <el-table-column label="工单数量" width="100" align="center" prop="quantity" />                 
             <el-table-column label="已生产数量" align="center" width="100px" prop="quantityProduced" /> 
-            <el-table-column label="生产进度" align="center" :style="{ 'width': '200px', 'overflow': 'auto' }" prop="quantityProduced" >
-            <template slot-scope="scope">             
-                <div style="display: flex" >
-                  <div v-for="(task,index) in scope.row.tasks" :key="task.processId">
-                    <div style="align-items: center">
-                      <el-progress type="circle" :width="120" :percentage="getPercentage(task)" />
-                      <span>{{ task.processName }}</span>
-                    </div>
-                    <span v-if="index != scope.row.tasks.length -1" >-</span>
-                  </div>
-                </div>                   
-            </template>
-            </el-table-column>
             <el-table-column label="需求日期" align="center" prop="requestDate" width="180">
                 <template slot-scope="scope">
                 <span>{{ parseTime(scope.row.requestDate, '{y}-{m}-{d}') }}</span>
@@ -137,14 +131,10 @@
     </div>
 </template>
 <script>
-import { listWorkorder, listWithTaskJson,getWorkorder, delWorkorder, addWorkorder, updateWorkorder } from "@/api/mes/pro/workorder";
-import ProcessInfo from "./process.vue";    
+import { listWorkorder, getWorkorder } from "@/api/mes/pro/workorder";
 export default {
   name: "processview",
   dicts: ['mes_order_status','mes_workorder_sourcetype'],
-  components: {
-    ProcessInfo
-  },
   data() {
     return {
       // 遮罩层
@@ -208,7 +198,7 @@ export default {
     /** 查询生产工单列表 */
     getList() {
       this.loading = true;
-      listWithTaskJson(this.queryParams).then(response => {
+      listWorkorder(this.queryParams).then(response => {
         this.workorderList = this.handleTree(response.rows, "workorderId", "parentId");
         if(this.workorderList.length>0){
             this.selectedWorkorderId = this.workorderList[0].workorderId;
@@ -268,13 +258,6 @@ export default {
         this.title = "查看工单信息";
         this.optType = "view";
       });
-    },
-    getPercentage(task){
-      if(task.quantity !=0 && task.quantity != null){
-        return parseFloat((task.quantityProduced/task.quantity*100).toFixed(0))
-      }else{
-        return 0;
-      }      
     }
   }
 };

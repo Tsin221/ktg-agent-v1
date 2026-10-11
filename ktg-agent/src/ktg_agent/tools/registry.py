@@ -146,6 +146,7 @@ class ToolDefinition:
     timeout_seconds: float
     execute: ToolExecute
     retry_policy: RetryPolicy = RetryPolicy.NEVER
+    expose_to_model: bool = True
 
     def __post_init__(self) -> None:
         _required_text(self.name, "tool name")
@@ -184,6 +185,8 @@ class ToolDefinition:
             raise ToolDefinitionError("timeout_seconds must be positive")
         if not callable(self.execute):
             raise ToolDefinitionError("execute must be callable")
+        if not isinstance(self.expose_to_model, bool):
+            raise ToolDefinitionError("expose_to_model must be a boolean")
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -210,4 +213,8 @@ class ToolRegistry:
         return self._definitions[name]
 
     def model_schemas(self) -> tuple[ToolSchema, ...]:
-        return tuple(tool.model_schema() for tool in self._definitions.values())
+        return tuple(
+            tool.model_schema()
+            for tool in self._definitions.values()
+            if tool.expose_to_model
+        )

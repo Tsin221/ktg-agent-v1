@@ -202,11 +202,12 @@ docker compose -f docker-compose.mysql.yml stop
 
 1. 检查 Docker Desktop；
 2. 启动并等待 MySQL、Redis 健康；
-3. 检查后端 `8080` 和前端 `81` 端口；
-4. 打开一个后端 PowerShell 窗口，自动加载 JDK 8、密码本、构建并启动后端；
-5. 打开前端 PowerShell 窗口，使用项目 Node 16 启动前端；
-6. 打开 Agent PowerShell 窗口，加载 `.env` 并启动真实模型查询服务；
-7. 等待三个端口实际监听，并调用 Agent `/health`；只有全部通过才报告启动成功。
+3. 按顺序执行仓库登记的幂等数据库迁移；
+4. 检查后端 `8080` 和前端 `81` 端口；
+5. 打开一个后端 PowerShell 窗口，自动加载 JDK 8、密码本、构建并启动后端；
+6. 打开前端 PowerShell 窗口，使用项目 Node 16 启动前端；
+7. 打开 Agent PowerShell 窗口，加载 `.env` 并启动真实模型查询服务；
+8. 等待三个端口实际监听，并调用 Agent `/health`；只有全部通过才报告启动成功。
 
 不要关闭这三个运行窗口。停止服务时，在对应窗口按 `Ctrl+C`。
 

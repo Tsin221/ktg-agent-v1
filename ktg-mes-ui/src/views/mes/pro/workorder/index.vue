@@ -60,12 +60,18 @@
         />
       </el-form-item>
       <el-form-item label="工单类型" prop="workorderType">
-        <el-input
+        <el-select
           v-model="queryParams.workorderType"
           placeholder="请选择工单类型"
           clearable
-          @keyup.enter.native="handleQuery"
-        />
+        >
+          <el-option
+            v-for="dict in dict.type.mes_workorder_type"
+            :key="dict.value"
+            :label="dict.label"
+            :value="dict.value"
+          />
+        </el-select>
       </el-form-item>
       <el-form-item label="需求日期" prop="requestDate">
         <el-date-picker clearable
@@ -197,6 +203,15 @@
 
     <!-- 添加或修改生产工单对话框 -->
     <el-dialog :title="title" :visible.sync="open" width="960px" @close="cancel" append-to-body>
+      <el-alert
+        v-if="conflictInfo"
+        title="工单已发生变更，当前输入尚未丢失"
+        :description="conflictInfo.message"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="mb8"
+      />
       <el-form ref="form" :model="form" :rules="rules" label-width="100px">
         <el-row>
           <el-col :span="16">
@@ -251,7 +266,7 @@
             <el-row>
               <el-col :span="24">
                 <el-form-item label="工单类型" prop="workorderType">
-                  <el-select v-model="form.workorderType" placeholder="请选择类型">
+                  <el-select v-model="form.workorderType" placeholder="请选择类型" :disabled="optType == 'view'">
                     <el-option
                       v-for="dict in dict.type.mes_workorder_type"
                       :key="dict.value"
@@ -269,9 +284,9 @@
         </el-row>
         <el-row>
           <el-col :span="12">
-            <el-form-item label="产品编号" prop="productCode">
-              <el-input v-model="form.productCode" placeholder="请选择产品" >
-                <el-button slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
+            <el-form-item label="产品编号" prop="productId">
+              <el-input v-model="form.productCode" placeholder="请选择产品" readonly>
+                <el-button v-if="optType != 'view'" slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
               </el-input>
               <ItemSelect ref="itemSelect" @onSelected="onItemSelected" > </ItemSelect>
             </el-form-item>
@@ -297,7 +312,7 @@
         <el-row>
           <el-col :span="8">
             <el-form-item label="工单数量" prop="quantity">
-              <el-input-number :min="1" :max="99999999" v-model="form.quantity" placeholder="请输入生产数量" />
+              <el-input-number :min="0.01" :max="99999999" v-model="form.quantity" placeholder="请输入生产数量" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -329,22 +344,6 @@
           </el-col>
           <el-col></el-col>
         </el-row>
-        <el-row v-if="form.workorderType == 'OUTSOURCE' || form.workorderType == 'PURCHASE'">
-          <el-col :span="12">
-            <el-form-item label="供应商编码" prop="vendorCode">
-              <el-input v-model="form.vendorCode" placeholder="请选择供应商" >
-                <el-button slot="append" @click="handleSelectVendor" icon="el-icon-search"></el-button>
-              </el-input>
-              <VendorSelect ref="vendorSelect" @onSelected="onVendorSelected" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="供应商名称" prop="vendorName">
-              <el-input v-model="form.vendorName" readonly="readonly" placeholder="请选择供应商" />
-            </el-form-item>
-          </el-col>
-          <el-col></el-col>
-        </el-row>
         <el-row>
           <el-col></el-col>
           <el-col></el-col>
@@ -367,7 +366,8 @@
         </el-tab-pane>
       </el-tabs>
       <div slot="footer" class="dialog-footer">
-        <el-button type="primary" @click="submitForm" v-if="form.status =='PREPARE' && optType !='view' ">保 存</el-button>
+        <el-button v-if="conflictInfo" type="warning" plain @click="reloadConflictedWorkorder">重新读取最新工单</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitForm" v-if="form.status =='PREPARE' && optType !='view' ">保 存</el-button>
         <el-button @click="cancel">关 闭</el-button>
       </div>
     </el-dialog>
@@ -380,7 +380,7 @@ import Workorderbom from "./bom/bom.vue";
 import WorkorderItemList from "./items/item.vue";
 import ItemSelect  from "@/components/itemSelect/single.vue";
 import ClientSelect from "@/components/clientSelect/single.vue";
-import VendorSelect from "@/components/vendorSelect/single.vue";
+import { extractWorkorderConflict } from "@/api/mes/pro/workorderContract";
 import {genCode} from "@/api/system/autocode/rule"
 import Treeselect from "@riophae/vue-treeselect";
 import BarcodeImg from "@/components/barcodeImg/index.vue"
@@ -393,7 +393,6 @@ export default {
     Treeselect,
     ItemSelect ,
     ClientSelect,
-    VendorSelect,
     Workorderbom,
     WorkorderItemList,
     BarcodeImg
@@ -423,6 +422,8 @@ export default {
       title: "",
       // 是否显示弹出层
       open: false,
+      submitting: false,
+      conflictInfo: null,
       // 查询参数
       queryParams: {
         pageNum: 1,
@@ -463,7 +464,7 @@ export default {
         ],
         workorderName: [
           { required: true, message: "工单名称不能为空", trigger: "blur" },
-          { max: 100, message: "字段过长", trigger: "blur" }
+          { max: 255, message: "工单名称长度不能超过255个字符", trigger: "blur" }
         ],
         workorderType: [
           { required: true, message: "请选择生产工单类型", trigger: "blur" }
@@ -471,23 +472,27 @@ export default {
         orderSource: [
           { required: true, message: "来源类型不能为空", trigger: "blur" }
         ],
+        sourceCode: [
+          { max: 64, message: "来源单据长度不能超过64个字符", trigger: "blur" }
+        ],
         productId: [
           { required: true, message: "产品不能为空", trigger: "blur" }
         ],
-        productCode: [
-          { required: true, message: "产品编号不能为空", trigger: "blur" }
-        ],
-        productName: [
-          { required: true, message: "产品名称不能为空", trigger: "blur" }
-        ],
         quantity: [
-          { required: true, message: "生产数量不能为空", trigger: "blur" }
+          { required: true, message: "生产数量不能为空", trigger: "blur" },
+          { type: "number", min: 0.01, message: "生产数量必须大于0", trigger: "change" }
         ],
         requestDate: [
           { required: true, message: "需求日期不能为空", trigger: "blur" }
         ],
+        clientCode: [
+          { max: 64, message: "客户编码长度不能超过64个字符", trigger: "blur" }
+        ],
+        clientName: [
+          { max: 255, message: "客户名称长度不能超过255个字符", trigger: "blur" }
+        ],
         remark: [
-          { max: 250, message: '长度必须小于250个字符', trigger: 'blur' }
+          { max: 500, message: '备注长度不能超过500个字符', trigger: 'blur' }
         ]
       }
     };
@@ -495,7 +500,16 @@ export default {
   created() {
     this.getList();
   },
+  mounted() {
+    window.addEventListener('ktg:workorder-changed', this.handleAgentWorkorderChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:workorder-changed', this.handleAgentWorkorderChanged);
+  },
   methods: {
+    handleAgentWorkorderChanged() {
+      this.getList();
+    },
     handleClickTab(tab) {
       if (tab.name == 'item') {
         this.itemStatus = true
@@ -576,9 +590,6 @@ export default {
         clientId: null,
         clientCode: null,
         clientName: null,
-        vendorId: null,
-        vendorCode: null,
-        vendorName: null,
         requestDate: null,
         parentId: null,
         status: "PREPARE",
@@ -589,6 +600,8 @@ export default {
         updateBy: null,
         updateTime: null
       };
+      this.conflictInfo = null;
+      this.submitting = false;
       this.autoGenFlag = false;
       this.resetForm("form");
     },
@@ -658,14 +671,8 @@ export default {
     handleUpdate(row) {
       this.reset();
       this.getTreeselect();
-      if (row != null) {
-        this.form.parentId = row.workorderId;
-      }
       getWorkorder(row.workorderId).then(response => {
         this.form = response.data;
-
-        this.form.workorderCode = response.data.workorderCode
-        this.form.workorderId = response.data.workorderId
         this.open = true;
         this.title = "修改生产工单";
         this.optType="edit";
@@ -674,26 +681,47 @@ export default {
     /** 提交按钮 */
     submitForm() {
       this.$refs["form"].validate(valid => {
-        if (valid) {
-          if (this.form.workorderId != null) {
-            updateWorkorder(this.form).then(response => {
-              this.$modal.msgSuccess("修改成功");
-              this.form.version += 1;
-              //this.open = false;
-              this.$refs["bomlist"].getList();
-              this.getList();
-            });
-          } else {
-            addWorkorder(this.form).then(response => {
-              this.$modal.msgSuccess("新增成功");
-              //this.open = false;
-              this.form.workorderId = response.data;
-              this.form.version = 0;
-              this.getList();
-            });
-          }
+        if (!valid) {
+          return;
         }
+
+        this.submitting = true;
+        this.conflictInfo = null;
+        const editing = this.form.workorderId != null;
+        const saveRequest = editing ? updateWorkorder(this.form) : addWorkorder(this.form);
+        saveRequest.then(response => {
+          const workorderId = editing ? this.form.workorderId : response.data;
+          return getWorkorder(workorderId).then(detailResponse => {
+            this.form = detailResponse.data;
+            this.optType = "edit";
+            this.$modal.msgSuccess(editing ? "修改成功" : "新增成功");
+            this.getList();
+            this.$nextTick(() => {
+              if (this.$refs["bomlist"]) {
+                this.$refs["bomlist"].getList();
+              }
+            });
+          });
+        }).catch(error => {
+          const conflict = extractWorkorderConflict(error);
+          if (conflict) {
+            this.conflictInfo = conflict;
+          }
+        }).finally(() => {
+          this.submitting = false;
+        });
       });
+    },
+    reloadConflictedWorkorder() {
+      const workorderId = this.form.workorderId;
+      this.$modal.confirm("重新读取会用服务器中的最新内容替换当前输入，是否继续？").then(() => {
+        return getWorkorder(workorderId);
+      }).then(response => {
+        this.form = response.data;
+        this.conflictInfo = null;
+        this.$modal.msgSuccess("已读取最新工单");
+        this.getList();
+      }).catch(() => {});
     },
     handlePreview(row){
       //todo:本地环境报表地址
@@ -738,19 +766,6 @@ export default {
         this.form.clientId = obj.clientId;
         this.form.clientCode = obj.clientCode;
         this.form.clientName = obj.clientName;
-      }
-    },
-    //供应商选择
-    handleSelectVendor(){
-      this.$refs.vendorSelect.showFlag = true;
-    },
-    //供应商选择弹出框
-    onVendorSelected(obj){
-      debugger;
-      if(obj != undefined && obj != null){
-        this.form.vendorId = obj.vendorId;
-        this.form.vendorCode = obj.vendorCode;
-        this.form.vendorName = obj.vendorName;
       }
     },
     //自动生成编码

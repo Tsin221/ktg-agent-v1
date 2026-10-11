@@ -1,4 +1,4 @@
-"""Authenticated read-only client for the existing KTG service."""
+"""Authenticated, fixed-origin client for the existing KTG service."""
 
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ class KTGError(RuntimeError):
 
 type KTGTransport = Callable[
     [str, Mapping[str, str], Mapping[str, object], float],
+    Awaitable[object],
+]
+type KTGWriteTransport = Callable[
+    [str, str, Mapping[str, str], Mapping[str, object], float],
     Awaitable[dict[str, object]],
 ]
 
@@ -34,6 +38,7 @@ class KTGClient:
         authorization: str,
         timeout_seconds: float = 15.0,
         transport: KTGTransport | None = None,
+        write_transport: KTGWriteTransport | None = None,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("KTG_BASE_URL must be an HTTP(S) URL")
@@ -43,6 +48,7 @@ class KTGClient:
         self._headers = {"Authorization": authorization}
         self._timeout_seconds = timeout_seconds
         self._transport = transport or self._default_transport
+        self._write_transport = write_transport or self._default_write_transport
 
     async def get_current_user(self) -> JsonObject:
         payload = await self.get("/getInfo")
@@ -54,14 +60,63 @@ class KTGClient:
     async def get(
         self, path: str, params: Mapping[str, object] | None = None
     ) -> dict[str, object]:
-        if not path.startswith("/") or path.startswith("//"):
-            raise ValueError("KTG path must be absolute and local to the configured host")
+        self._validate_path(path)
         payload = await self._transport(
             f"{self._base_url}{path}",
             self._headers,
             params or {},
             self._timeout_seconds,
         )
+        if not isinstance(payload, dict):
+            raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回结果不是对象。")
+        checked = cast(dict[str, object], payload)
+        self._raise_for_business_error(checked)
+        return checked
+
+    async def get_text(self, path: str) -> str:
+        """Read one fixed KTG text endpoint, such as the auto-code service."""
+        self._validate_path(path)
+        payload = await self._transport(
+            f"{self._base_url}{path}", self._headers, {}, self._timeout_seconds
+        )
+        if isinstance(payload, str) and payload.strip():
+            return payload.strip()
+        if isinstance(payload, dict):
+            self._raise_for_business_error(cast(dict[str, object], payload))
+            value = payload.get("data")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        raise KTGError("KTG_INVALID_RESPONSE", "KTG 未返回有效文本。")
+
+    async def post(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
+        return await self._write("POST", path, body)
+
+    async def put(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
+        return await self._write("PUT", path, body)
+
+    async def _write(
+        self, method: str, path: str, body: Mapping[str, object]
+    ) -> dict[str, object]:
+        self._validate_path(path)
+        payload = await self._write_transport(
+            method,
+            f"{self._base_url}{path}",
+            self._headers,
+            body,
+            self._timeout_seconds,
+        )
+        if not isinstance(payload, dict):
+            raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回结果不是对象。")
+        self._raise_for_business_error(payload)
+        return payload
+
+    @staticmethod
+    def _validate_path(path: str) -> None:
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError("KTG path must be absolute and local to the configured host")
+
+    @staticmethod
+    def _raise_for_business_error(payload: Mapping[str, object]) -> None:
         code = payload.get("code", 200)
         if code != 200:
             message = payload.get("msg")
@@ -69,11 +124,16 @@ class KTGClient:
                 raise KTGError("AUTH_EXPIRED", "登录状态已过期。", status=401)
             if code == 403:
                 raise KTGError("PERMISSION_DENIED", "当前用户没有该查询权限。", status=403)
+            if code == 409:
+                raise KTGError(
+                    "KTG_CONFLICT",
+                    message if isinstance(message, str) else "工单状态或版本已变化。",
+                    status=409,
+                )
             raise KTGError(
                 "KTG_REQUEST_FAILED",
-                message if isinstance(message, str) else "KTG 查询失败。",
+                message if isinstance(message, str) else "KTG 请求失败。",
             )
-        return payload
 
     @staticmethod
     async def _default_transport(
@@ -81,9 +141,9 @@ class KTGClient:
         headers: Mapping[str, str],
         params: Mapping[str, object],
         timeout_seconds: float,
-    ) -> dict[str, object]:
+    ) -> object:
         return await asyncio.to_thread(
-            KTGClient._get_json,
+            KTGClient._get_payload,
             url,
             headers,
             params,
@@ -91,12 +151,12 @@ class KTGClient:
         )
 
     @staticmethod
-    def _get_json(
+    def _get_payload(
         url: str,
         headers: Mapping[str, str],
         params: Mapping[str, object],
         timeout_seconds: float,
-    ) -> dict[str, object]:
+    ) -> object:
         query = urlencode([(key, str(value)) for key, value in params.items()])
         target = f"{url}?{query}" if query else url
         request = Request(target, headers=dict(headers), method="GET")
@@ -113,11 +173,69 @@ class KTGClient:
             raise KTGError("KTG_HTTP_ERROR", f"KTG 接口返回 HTTP {exc.code}。") from exc
         except (URLError, TimeoutError) as exc:
             raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc
+        return KTGClient._decode_payload(raw)
+
+    @staticmethod
+    async def _default_write_transport(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        return await asyncio.to_thread(
+            KTGClient._send_json, method, url, headers, body, timeout_seconds
+        )
+
+    @staticmethod
+    def _send_json(
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: Mapping[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        request_headers = {**headers, "Content-Type": "application/json;charset=utf-8"}
+        request = Request(
+            url,
+            headers=request_headers,
+            data=json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+            method=method,
+        )
         try:
-            value = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回了无效数据。") from exc
+            with urlopen(request, timeout=timeout_seconds) as response:
+                raw = response.read()
+        except HTTPError as exc:
+            KTGClient._raise_http_error(exc)
+        except (URLError, TimeoutError) as exc:
+            raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc
+        value = KTGClient._decode_payload(raw)
         if not isinstance(value, dict):
             raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回结果不是对象。")
         return cast(dict[str, object], value)
+
+    @staticmethod
+    def _decode_payload(raw: bytes) -> object:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回了无效数据。") from exc
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            if text.strip():
+                return text.strip()
+            raise KTGError("KTG_INVALID_RESPONSE", "KTG 返回了无效数据。")
+
+    @staticmethod
+    def _raise_http_error(exc: HTTPError) -> None:
+        if exc.code in {401, 403}:
+            raise KTGError(
+                "AUTH_EXPIRED" if exc.code == 401 else "PERMISSION_DENIED",
+                "登录状态已过期。" if exc.code == 401 else "当前用户没有该操作权限。",
+                status=exc.code,
+            ) from exc
+        if exc.code == 409:
+            raise KTGError("KTG_CONFLICT", "工单状态或版本已变化。", status=409) from exc
+        raise KTGError("KTG_HTTP_ERROR", f"KTG 接口返回 HTTP {exc.code}。") from exc
 

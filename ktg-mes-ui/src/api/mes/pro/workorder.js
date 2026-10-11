@@ -1,4 +1,5 @@
 import request from '@/utils/request'
+import { buildWorkorderDraftPayload } from './workorderContract'
 
 // 查询生产工单列表
 export function listWorkorder(query) {
@@ -17,21 +18,12 @@ export function getWorkorder(workorderId) {
   })
 }
 
-// 契约占位：当前后端尚未实现，排产页面在对应后端能力交付前不可依赖此调用。
-export function listWithTaskJson(query) {
-  return request({
-    url: '/mes/pro/workorder/listWithTaskJson',
-    method: 'get',
-    params: query
-  })
-}
-
 // 新增生产工单
 export function addWorkorder(data) {
   return request({
     url: '/mes/pro/workorder',
     method: 'post',
-    data: data
+    data: buildWorkorderDraftPayload(data, false)
   })
 }
 
@@ -40,7 +32,7 @@ export function updateWorkorder(data) {
   return request({
     url: '/mes/pro/workorder',
     method: 'put',
-    data: data
+    data: buildWorkorderDraftPayload(data, true)
   })
 }
 
@@ -60,21 +52,6 @@ export function listItems(query) {
     params: query
   })
 }
-
-export function dofinish(workorderId){
-  return request({
-    url: '/mes/pro/workorder/finish/'+workorderId,
-    method: 'put'
-  })
-}
-
-export function doCancel(workorderId){
-  return request({
-    url: '/mes/pro/workorder/cancel/'+workorderId,
-    method: 'put'
-  })
-}
-
 
 // 首页查询生产工单列表
 export function getHomeList(query) {

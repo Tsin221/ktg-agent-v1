@@ -103,7 +103,10 @@ service.interceptors.response.use(res => {
       Notification.error({
         title: msg
       })
-      return Promise.reject('error')
+      const requestError = new Error(msg)
+      requestError.code = code
+      requestError.data = res.data
+      return Promise.reject(requestError)
     } else {
       return res.data
     }
