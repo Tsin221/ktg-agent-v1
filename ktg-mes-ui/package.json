@@ -10,7 +10,7 @@
     "build:stage": "vue-cli-service build --mode staging",
     "preview": "node build/index.js --preview",
     "lint": "eslint --ext .js,.vue src",
-    "test:workorder": "node tests/workorder-contract.test.js"
+    "test:workorder": "node tests/workorder-contract.test.js && node tests/agent-workorder-presentation.test.js && node tests/vue-config-targets.test.js"
   },
   "husky": {
     "hooks": {

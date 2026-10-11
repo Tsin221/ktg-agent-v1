@@ -277,6 +277,41 @@ http://localhost:81
 7. 在 `ktg-mes-ui` 中执行 `npm run dev -- --port 81`
 8. 浏览器访问 `http://localhost:81`，通过公共布局右下角“智能查询”使用当前账号查询产品、库存和工单
 
+### 8.1 独立端到端验收环境
+
+生产工单草稿链路需要联调时，建议使用独立数据库和独立端口，不要在日常开发库中注入故障。前端开发代理支持通过环境变量覆盖后端与 Agent 地址，默认值保持不变：
+
+```powershell
+$env:KTG_API_TARGET = 'http://127.0.0.1:18080'
+$env:KTG_AGENT_TARGET = 'http://127.0.0.1:18001'
+Set-Location E:\ktg_agent\ktg_agent_v1\ktg-mes-ui
+. ..\use-node16.ps1
+npm run dev -- --port 18081
+```
+
+对应的后端应连接专用验收库，Agent 的 `KTG_BASE_URL` 应指向同一后端。验收至少包括：原生页面创建/编辑/刷新、悬浮助手预览/确认/回读、BOM 一致性、重复编号、同名产品、无效数量、非草稿编辑、并发版本冲突、批量删除事务和写入响应丢失后的核验。确认、完工、取消和库存扣减不属于本轮草稿能力范围。
+
+可复跑的自动化检查：
+
+```powershell
+# 后端事务与接口测试
+Set-Location E:\ktg_agent\ktg_agent_v1\ktg-mes-master\ktg-mes-master
+. ..\..\use-java8.ps1
+mvn -s ..\..\maven-settings.xml -pl ktg-mes -am test
+
+# Agent 测试与类型检查
+Set-Location E:\ktg_agent\ktg_agent_v1\ktg-agent
+uv run pytest
+uv run mypy
+
+# 前端工单契约、展示和代理配置测试
+Set-Location E:\ktg_agent\ktg_agent_v1\ktg-mes-ui
+. ..\use-node16.ps1
+npm run test:workorder
+```
+
+完整验收记录见 `docs/S2-08-端到端联调验收记录.md`。
+
 ## 9. 前后端打包
 
 后端：

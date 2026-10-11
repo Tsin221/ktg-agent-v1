@@ -10,6 +10,8 @@ const CompressionPlugin = require('compression-webpack-plugin')
 const name = process.env.VUE_APP_TITLE || '苦糖果MES-软件开发记录' // 网页标题
 
 const port = process.env.port || process.env.npm_config_port || 80 // 端口
+const apiTarget = process.env.KTG_API_TARGET || 'http://localhost:8080'
+const agentTarget = process.env.KTG_AGENT_TARGET || 'http://127.0.0.1:8001'
 
 // vue.config.js 配置说明
 //官方vue.config.js 参考文档 https://cli.vuejs.org/zh/config/#css-loaderoptions
@@ -35,18 +37,18 @@ module.exports = {
     proxy: {
       // detail: https://cli.vuejs.org/config/#devserver-proxy
       [process.env.VUE_APP_BASE_API]: {
-        target: `http://localhost:8080`,
+        target: apiTarget,
         changeOrigin: true,
         pathRewrite: {
           ['^' + process.env.VUE_APP_BASE_API]: ''
         }
       },
       '/agent-api': {
-        target: 'http://127.0.0.1:8001',
+        target: agentTarget,
         changeOrigin: false
       },
       '/ureport': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         ws:false,
         changeOrigin: true,
         pathRewrite: {

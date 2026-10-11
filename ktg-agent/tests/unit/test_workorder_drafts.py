@@ -256,6 +256,77 @@ async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() ->
     assert write_attempts == 1
 
 
+def test_create_timeout_with_failed_reconciliation_stays_unknown_without_retry() -> None:
+    asyncio.run(_create_timeout_with_failed_reconciliation_stays_unknown_without_retry())
+
+
+async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry() -> None:
+    write_attempts = 0
+
+    async def read_transport(
+        url: str,
+        _headers: Mapping[str, str],
+        _params: Mapping[str, object],
+        _timeout: float,
+    ) -> object:
+        if url.endswith("/mes/md/mditem/list"):
+            return {"code": 200, "total": 1, "rows": [_product()]}
+        if url.endswith("/system/autocode/get/WORKORDER_CODE"):
+            return "WO-20261011-001"
+        if url.endswith("/mes/pro/workorder/list"):
+            raise KTGError("KTG_CONNECTION_ERROR", "回读连接中断")
+        raise AssertionError(url)
+
+    async def write_transport(
+        _method: str,
+        _url: str,
+        _headers: Mapping[str, str],
+        _body: Mapping[str, object],
+        _timeout: float,
+    ) -> dict[str, object]:
+        nonlocal write_attempts
+        write_attempts += 1
+        raise KTGError("KTG_CONNECTION_ERROR", "写入响应中断")
+
+    client = KTGClient(
+        base_url="http://127.0.0.1:8080",
+        authorization="Bearer current-user-token",
+        transport=read_transport,
+        write_transport=write_transport,
+    )
+    store = PreviewStore(ttl_seconds=600)
+    tools = {tool.name: tool for tool in build_workorder_tools(store)}
+    preview = await tools["ktg_preview_create_workorder_draft"].execute(
+        _context("preview-call", client, user_id=7),
+        {
+            "product_code": "A-01",
+            "quantity": 100,
+            "request_date": "2026-10-31",
+        },
+    )
+    assert preview.details is not None
+    preview_id = preview.details["preview_id"]
+    assert isinstance(preview_id, str)
+
+    result = await tools["ktg_create_workorder_draft"].execute(
+        _context("confirm-call", client, user_id=7, operation_id=preview_id),
+        {"preview_id": preview_id},
+    )
+    repeated = await tools["ktg_create_workorder_draft"].execute(
+        _context("repeat-call", client, user_id=7, operation_id=preview_id),
+        {"preview_id": preview_id},
+    )
+
+    assert result.status is ToolStatus.UNKNOWN
+    assert result.error_code == "WRITE_RESULT_UNKNOWN"
+    assert result.details is not None
+    assert result.details["outcome"] == "unknown"
+    assert result.details["label"] == "待核实"
+    assert result.verification == {"reconciled_after_error": True}
+    assert repeated.details == result.details
+    assert write_attempts == 1
+
+
 def test_edit_preview_merges_allowed_change_and_checks_version_before_write() -> None:
     asyncio.run(_edit_preview_merges_allowed_change_and_checks_version_before_write())
 
