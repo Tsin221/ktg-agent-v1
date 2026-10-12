@@ -14,6 +14,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
@@ -82,6 +83,22 @@ class ProWorkorderControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
                 .andExpect(jsonPath("$.data").value(77));
+    }
+
+    @Test
+    void addDoesNotExposeDatabaseDetailsWhenBomWriteFails() throws Exception
+    {
+        doReturn("tester").when(controller).getUsername();
+        when(proWorkorderService.createDraftWorkorder(any()))
+                .thenThrow(new DataAccessResourceFailureException(
+                        "SQL: insert into pro_workorder_bom; jar:file:/internal/ktg-mes.jar"));
+
+        mockMvc.perform(post("/mes/pro/workorder")
+                        .contentType("application/json")
+                        .content(validDraftJson()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(500))
+                .andExpect(jsonPath("$.msg").value("数据库操作失败，请稍后重试"));
     }
 
     @Test

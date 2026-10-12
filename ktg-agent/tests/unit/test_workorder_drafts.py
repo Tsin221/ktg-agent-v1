@@ -2,7 +2,14 @@ import asyncio
 from collections.abc import Mapping
 
 from ktg_agent.ktg.client import KTGClient, KTGError
-from ktg_agent.ktg.workorders import PreviewStore, build_workorder_tools
+from ktg_agent.ktg.workorders import (
+    PreviewError,
+    PreviewStore,
+    _matches_request,
+    _resolve_product,
+    _verified_result,
+    build_workorder_tools,
+)
 from ktg_agent.tools import ToolContext, ToolStatus
 
 
@@ -35,9 +42,13 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
             return "WO-20261011-001"
         if url.endswith("/mes/pro/workorder/51"):
             return {"code": 200, "data": _saved_workorder()}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"bomItemId": 101, "quantity": 2}]}
         if url.endswith("/mes/pro/workorderbom/list"):
             assert params["workorderId"] == 51
-            return {"code": 200, "total": 1, "rows": [{"workorderId": 51}]}
+            return {"code": 200, "total": 1,
+                    "rows": [{"workorderId": 51, "itemId": 101, "quantity": 200}]}
         raise AssertionError(url)
 
     async def write_transport(
@@ -115,6 +126,142 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
 
 def test_preview_rejects_ambiguous_product_without_creating_approval() -> None:
     asyncio.run(_preview_rejects_ambiguous_product_without_creating_approval())
+
+
+def test_product_code_never_accepts_a_partial_match() -> None:
+    async def read_transport(url: str, _headers: Mapping[str, str],
+                             _params: Mapping[str, object], _timeout: float) -> object:
+        assert url.endswith("/mes/md/mditem/list")
+        return {"code": 200, "total": 1,
+                "rows": [{"itemId": 7, "itemCode": "XA-01-Z", "itemName": "其他产品"}]}
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=read_transport)
+    async def check() -> None:
+        try:
+            await _resolve_product(client, {"product_code": "A-01"})
+        except PreviewError as exc:
+            assert exc.code == "PRODUCT_NOT_FOUND"
+        else:
+            raise AssertionError("partial code was accepted")
+    asyncio.run(check())
+
+
+def test_product_id_uses_detail_instead_of_first_list_page() -> None:
+    async def read_transport(url: str, _headers: Mapping[str, str],
+                             _params: Mapping[str, object], _timeout: float) -> object:
+        assert url.endswith("/mes/md/mditem/25")
+        return {"code": 200, "data": {"itemId": 25, "itemCode": "P-25",
+                                          "itemName": "第二页产品"}}
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=read_transport)
+    product = asyncio.run(_resolve_product(client, {"product_id": 25}))
+    assert product["itemId"] == 25
+
+    async def mismatched_code() -> None:
+        try:
+            await _resolve_product(client, {"product_id": 25, "product_code": "P-26"})
+        except PreviewError as exc:
+            assert exc.code == "PRODUCT_MISMATCH"
+        else:
+            raise AssertionError("conflicting product identifiers were accepted")
+    asyncio.run(mismatched_code())
+
+
+def test_product_name_checks_later_pages_for_duplicates() -> None:
+    async def read_transport(url: str, _headers: Mapping[str, str],
+                             params: Mapping[str, object], _timeout: float) -> object:
+        assert url.endswith("/mes/md/mditem/list")
+        if params["pageNum"] == 1:
+            return {"code": 200, "total": 21,
+                    "rows": [{"itemId": 1, "itemCode": "P-1", "itemName": "产品 A"}]
+                    + [{"itemId": i, "itemCode": f"P-{i}", "itemName": "产品 A 零件"}
+                       for i in range(2, 21)]}
+        return {"code": 200, "total": 21,
+                "rows": [{"itemId": 21, "itemCode": "P-21", "itemName": "产品 A"}]}
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=read_transport)
+    async def check() -> None:
+        try:
+            await _resolve_product(client, {"product_name": "产品 A"})
+        except PreviewError as exc:
+            assert exc.code == "AMBIGUOUS_PRODUCT"
+        else:
+            raise AssertionError("later duplicate was ignored")
+    asyncio.run(check())
+
+
+def test_verification_rejects_a_different_remark() -> None:
+    request = {"workorderCode": "WO-1", "workorderName": "工单", "workorderType": "SELF",
+               "orderSource": "MANUAL", "productId": 11, "parentId": 0,
+               "quantity": "1", "requestDate": "2026-10-31", "remark": "新备注"}
+    detail: dict[object, object] = {}
+    detail.update(request)
+    detail.update({"status": "PREPARE", "remark": "旧备注"})
+    assert not _matches_request(detail, request)
+
+
+def test_verification_rejects_an_uncleared_batch_code() -> None:
+    request = {"workorderCode": "WO-1", "workorderName": "工单", "workorderType": "SELF",
+               "orderSource": "MANUAL", "productId": 11, "parentId": 0,
+               "quantity": "1", "requestDate": "2026-10-31", "batchCode": ""}
+    detail: dict[object, object] = {}
+    detail.update(request)
+    detail.update({"status": "PREPARE", "batchCode": "OLD-BATCH"})
+    assert not _matches_request(detail, request)
+
+
+def test_create_bom_verification_rejects_missing_required_line() -> None:
+    async def read_transport(url: str, _headers: Mapping[str, str],
+                             _params: Mapping[str, object], _timeout: float) -> object:
+        if url.endswith("/mes/pro/workorder/51"):
+            return {"code": 200, "data": _saved_workorder()}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"bomItemId": 101, "quantity": 2}]}
+        if url.endswith("/mes/pro/workorderbom/list"):
+            return {"code": 200, "total": 0, "rows": []}
+        raise AssertionError(url)
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=read_transport)
+    request = {"workorderCode": "WO-20261011-001", "workorderName": "产品 A 工单",
+               "workorderType": "SELF", "orderSource": "MANUAL", "productId": 11,
+               "parentId": 0, "quantity": "100", "requestDate": "2026-10-31"}
+    async def check() -> None:
+        try:
+            await _verified_result(client, "create", request, 51, "preview", reconciled=False)
+        except PreviewError as exc:
+            assert exc.code == "BOM_VERIFICATION_FAILED"
+        else:
+            raise AssertionError("missing BOM line was reported as verified")
+    asyncio.run(check())
+
+
+def test_bom_verification_accepts_mysql_two_decimal_storage() -> None:
+    async def read_transport(url: str, _headers: Mapping[str, str],
+                             _params: Mapping[str, object], _timeout: float) -> object:
+        if url.endswith("/mes/pro/workorder/51"):
+            return {"code": 200, "data": {**_saved_workorder(), "quantity": 12.01}}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"bomItemId": 101, "quantity": 0.5}]}
+        if url.endswith("/mes/pro/workorderbom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"itemId": 101, "quantity": 6.0}]}
+        raise AssertionError(url)
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=read_transport)
+    request = {"workorderCode": "WO-20261011-001", "workorderName": "产品 A 工单",
+               "workorderType": "SELF", "orderSource": "MANUAL", "productId": 11,
+               "parentId": 0, "quantity": "12.01", "requestDate": "2026-10-31"}
+    result = asyncio.run(_verified_result(client, "create", request, 51, "preview",
+                                          reconciled=False))
+    assert result.details is not None
+    assert result.details["bom_verified"] is True
 
 
 async def _preview_rejects_ambiguous_product_without_creating_approval() -> None:
@@ -210,6 +357,8 @@ async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() ->
             return {"code": 200, "total": 1, "rows": [_saved_workorder()]}
         if url.endswith("/mes/pro/workorder/51"):
             return {"code": 200, "data": _saved_workorder()}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 0, "rows": []}
         if url.endswith("/mes/pro/workorderbom/list"):
             return {"code": 200, "total": 0, "rows": []}
         raise AssertionError(url)
@@ -352,6 +501,14 @@ async def _edit_preview_merges_allowed_change_and_checks_version_before_write() 
             }
         if url.endswith("/mes/md/mditem/list"):
             return {"code": 200, "total": 1, "rows": [_product()]}
+        if url.endswith("/mes/md/mditem/11"):
+            return {"code": 200, "data": _product()}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"bomItemId": 101, "quantity": 2}]}
+        if url.endswith("/mes/pro/workorderbom/list"):
+            return {"code": 200, "total": 1,
+                    "rows": [{"itemId": 101, "quantity": 240}]}
         raise AssertionError(url)
 
     async def write_transport(

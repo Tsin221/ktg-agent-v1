@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from http.client import HTTPException
 from typing import cast
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -171,7 +172,7 @@ class KTGClient:
                     status=exc.code,
                 ) from exc
             raise KTGError("KTG_HTTP_ERROR", f"KTG 接口返回 HTTP {exc.code}。") from exc
-        except (URLError, TimeoutError) as exc:
+        except (OSError, HTTPException) as exc:
             raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc
         return KTGClient._decode_payload(raw)
 
@@ -207,7 +208,7 @@ class KTGClient:
                 raw = response.read()
         except HTTPError as exc:
             KTGClient._raise_http_error(exc)
-        except (URLError, TimeoutError) as exc:
+        except (OSError, HTTPException) as exc:
             raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc
         value = KTGClient._decode_payload(raw)
         if not isinstance(value, dict):

@@ -420,6 +420,11 @@ async def _execute_approved(
     try:
         if action == "edit":
             await _assert_current_edit_version(client, record.request)
+        verify_bom = action == "create" or any(
+            isinstance(change, Mapping)
+            and change.get("field") in {"productId", "quantity"}
+            for change in cast(list[object], record.preview.get("changes", []))
+        )
         try:
             response = (
                 await client.post("/mes/pro/workorder", record.request)
@@ -433,7 +438,7 @@ async def _execute_approved(
             }:
                 raise
             result = await _reconcile_after_uncertain_write(
-                client, action, record.request, preview_id
+                client, action, record.request, preview_id, verify_bom=verify_bom
             )
         else:
             try:
@@ -453,6 +458,7 @@ async def _execute_approved(
                     workorder_id,
                     preview_id,
                     reconciled=False,
+                    verify_bom=verify_bom,
                 )
             except (KTGError, PreviewError):
                 result = _unknown_result(record.request, preview_id, reconciled=False)
@@ -469,6 +475,8 @@ async def _reconcile_after_uncertain_write(
     action: str,
     request: Mapping[str, object],
     preview_id: str,
+    *,
+    verify_bom: bool,
 ) -> ToolResult:
     workorder_id: object
     try:
@@ -489,6 +497,7 @@ async def _reconcile_after_uncertain_write(
             workorder_id,
             preview_id,
             reconciled=True,
+            verify_bom=verify_bom,
         )
     except (KTGError, PreviewError):
         return _unknown_result(request, preview_id, reconciled=True)
@@ -504,6 +513,7 @@ def _unknown_result(
             "outcome": "unknown",
             "label": "待核实",
             "workorderCode": cast(JsonValue, request.get("workorderCode")),
+            "bom_verified": False,
             "preview_id": preview_id,
         },
         status=ToolStatus.UNKNOWN,
@@ -521,6 +531,7 @@ async def _verified_result(
     preview_id: str,
     *,
     reconciled: bool,
+    verify_bom: bool = True,
 ) -> ToolResult:
     payload = await client.get(f"/mes/pro/workorder/{workorder_id}")
     raw = payload.get("data")
@@ -529,16 +540,48 @@ async def _verified_result(
     detail = cast(Mapping[object, object], raw)
     if not _matches_request(detail, request):
         raise PreviewError("WRITE_VERIFICATION_FAILED", "写后回读字段不一致，结果待核实。")
-    bom_verified = action != "create"
+    expected_version = 0 if action == "create" else cast(int, request.get("version")) + 1
+    if detail.get("version") != expected_version:
+        raise PreviewError("WRITE_VERIFICATION_FAILED", "写后回读版本不一致，结果待核实。")
+    bom_verified = False
     bom_count: int | None = None
-    if action == "create":
-        bom = await client.get(
-            "/mes/pro/workorderbom/list",
-            {"workorderId": workorder_id, "pageNum": 1, "pageSize": 100},
+    if verify_bom:
+        product_id = request.get("productId")
+        if not isinstance(product_id, int):
+            raise PreviewError("BOM_VERIFICATION_FAILED", "产品 ID 无效，无法核验 BOM。")
+        templates = await _list_all_rows(
+            client, "/mes/md/bom/list", {"itemId": product_id}
         )
-        rows = bom.get("rows")
-        if not isinstance(rows, list):
-            raise PreviewError("BOM_VERIFICATION_FAILED", "工单已创建，但 BOM 回读失败。")
+        rows = await _list_all_rows(
+            client, "/mes/pro/workorderbom/list", {"workorderId": workorder_id}
+        )
+        planned_quantity = Decimal(_quantity(request.get("quantity")))
+        expected: list[tuple[int, Decimal]] = []
+        actual: list[tuple[int, Decimal]] = []
+        try:
+            for template in templates:
+                item_id = template.get("bomItemId")
+                if not isinstance(item_id, int):
+                    raise ValueError("BOM item ID missing")
+                quantity = Decimal(_quantity(template.get("quantity"))) * planned_quantity
+                expected.append((item_id, quantity))
+            for row in rows:
+                item_id = row.get("itemId")
+                if not isinstance(item_id, int):
+                    raise ValueError("workorder BOM item ID missing")
+                actual.append((item_id, Decimal(_quantity(row.get("quantity")))))
+        except (PreviewError, ValueError) as exc:
+            raise PreviewError("BOM_VERIFICATION_FAILED", "BOM 回读数据无效，结果待核实。") from exc
+        expected.sort()
+        actual.sort()
+        # pro_workorder_bom.quantity is stored with two decimal places in MySQL.
+        rounding_tolerance = Decimal("0.0050001")
+        if len(expected) != len(actual) or any(
+            expected_id != actual_id or abs(expected_quantity - actual_quantity) > rounding_tolerance
+            for (expected_id, expected_quantity), (actual_id, actual_quantity)
+            in zip(expected, actual)
+        ):
+            raise PreviewError("BOM_VERIFICATION_FAILED", "工单 BOM 与产品模板不一致，结果待核实。")
         bom_verified = True
         bom_count = len(rows)
     details: JsonObject = {
@@ -591,30 +634,25 @@ async def _assert_current_edit_version(
 async def _resolve_product(
     client: KTGClient, arguments: Mapping[str, object]
 ) -> JsonObject:
-    params: dict[str, object] = {"pageNum": 1, "pageSize": 20}
     product_id = arguments.get("product_id")
     product_code = _optional_text(arguments, "product_code")
     product_name = _optional_text(arguments, "product_name")
-    if isinstance(product_id, int):
-        params["itemId"] = product_id
-    elif product_code is not None:
-        params["itemCode"] = product_code
-    elif product_name is not None:
-        params["itemName"] = product_name
+    if isinstance(product_id, int) and not isinstance(product_id, bool):
+        payload = await client.get(f"/mes/md/mditem/{product_id}")
+        raw = payload.get("data")
+        candidates = [raw] if isinstance(raw, Mapping) and raw.get("itemId") == product_id else []
+    elif product_code is not None or product_name is not None:
+        params: dict[str, object] = (
+            {"itemCode": product_code}
+            if product_code is not None
+            else {"itemName": product_name}
+        )
+        candidates = await _list_all_rows(client, "/mes/md/mditem/list", params)
     else:
         raise PreviewError("PRODUCT_REQUIRED", "请提供产品编码、名称或 ID。")
-    payload = await client.get("/mes/md/mditem/list", params)
-    rows = payload.get("rows")
-    if not isinstance(rows, list):
-        raise PreviewError("KTG_INVALID_RESPONSE", "KTG 产品查询结果无效。")
-    candidates = [cast(Mapping[object, object], row) for row in rows if isinstance(row, Mapping)]
-    if isinstance(product_id, int):
-        candidates = [row for row in candidates if row.get("itemId") == product_id]
-    elif product_code is not None:
-        exact = [row for row in candidates if row.get("itemCode") == product_code]
-        if exact:
-            candidates = exact
-    elif product_name is not None:
+    if product_code is not None and not isinstance(product_id, int):
+        candidates = [row for row in candidates if row.get("itemCode") == product_code]
+    elif product_name is not None and not isinstance(product_id, int):
         exact = [row for row in candidates if row.get("itemName") == product_name]
         if exact:
             candidates = exact
@@ -630,12 +668,51 @@ async def _resolve_product(
         }
         raise _AmbiguousProduct(details)
     product = candidates[0]
+    if (
+        (product_code is not None and product.get("itemCode") != product_code)
+        or (
+            product_name is not None
+            and (isinstance(product_id, int) or product_code is not None)
+            and product.get("itemName") != product_name
+        )
+    ):
+        raise PreviewError("PRODUCT_MISMATCH", "产品 ID 与编码或名称不一致。")
     item_id = product.get("itemId")
     if not isinstance(item_id, int) or item_id <= 0:
         raise PreviewError("KTG_INVALID_RESPONSE", "产品缺少有效 ID。")
     if product.get("enableFlag") == "N":
         raise PreviewError("PRODUCT_DISABLED", "所选产品已停用。")
     return cast(JsonObject, {str(key): cast(JsonValue, value) for key, value in product.items()})
+
+
+async def _list_all_rows(
+    client: KTGClient, path: str, filters: Mapping[str, object]
+) -> list[Mapping[object, object]]:
+    rows: list[Mapping[object, object]] = []
+    page_size = 20
+    for page in range(1, 26):
+        payload = await client.get(
+            path, {**filters, "pageNum": page, "pageSize": page_size}
+        )
+        page_rows = payload.get("rows")
+        total = payload.get("total")
+        if (
+            not isinstance(page_rows, list)
+            or not isinstance(total, int)
+            or total < 0
+            or any(not isinstance(row, Mapping) for row in page_rows)
+        ):
+            raise PreviewError("KTG_INVALID_RESPONSE", "KTG 列表查询结果无效。")
+        if total > 500:
+            raise PreviewError("KTG_RESULT_TOO_LARGE", "匹配结果过多，请提供更精确的编码。")
+        rows.extend(cast(list[Mapping[object, object]], page_rows))
+        if len(rows) >= total:
+            if len(rows) != total:
+                raise PreviewError("KTG_INVALID_RESPONSE", "KTG 分页结果数量不一致。")
+            return rows
+        if not page_rows:
+            raise PreviewError("KTG_INVALID_RESPONSE", "KTG 分页结果不完整。")
+    raise PreviewError("KTG_RESULT_TOO_LARGE", "匹配结果过多，请提供更精确的编码。")
 
 
 class _AmbiguousProduct(PreviewError):
@@ -790,6 +867,9 @@ def _matches_request(detail: Mapping[object, object], request: Mapping[str, obje
         "parentId",
     ):
         if detail.get(key) != request.get(key):
+            return False
+    for key in ("sourceCode", "batchCode", "clientId", "clientCode", "clientName", "remark"):
+        if key in request and detail.get(key) != request[key]:
             return False
     try:
         if _quantity(detail.get("quantity")) != _quantity(request.get("quantity")):

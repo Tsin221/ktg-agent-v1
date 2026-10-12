@@ -59,6 +59,8 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
             }
         if url.endswith("/mes/pro/workorderbom/list"):
             return {"code": 200, "total": 0, "rows": []}
+        if url.endswith("/mes/md/bom/list"):
+            return {"code": 200, "total": 0, "rows": []}
         raise AssertionError(url)
 
     async def write_transport(
@@ -232,4 +234,3 @@ async def _query_service_scenario() -> None:
         "http://127.0.0.1:8080/getInfo",
         "http://127.0.0.1:8080/mes/wm/wmstock/list",
     ]
-

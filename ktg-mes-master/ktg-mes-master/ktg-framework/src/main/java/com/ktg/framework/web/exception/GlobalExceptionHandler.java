@@ -3,6 +3,7 @@ package com.ktg.framework.web.exception;
 import javax.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.BindException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -57,6 +58,16 @@ public class GlobalExceptionHandler
         log.error(e.getMessage(), e);
         Integer code = e.getCode();
         return StringUtils.isNotNull(code) ? AjaxResult.error(code, e.getMessage()) : AjaxResult.error(e.getMessage());
+    }
+
+    /**
+     * 数据库异常的详细 SQL 与文件路径只写入服务端日志。
+     */
+    @ExceptionHandler(DataAccessException.class)
+    public AjaxResult handleDataAccessException(DataAccessException e, HttpServletRequest request)
+    {
+        log.error("请求地址'{}',数据库操作失败.", request.getRequestURI(), e);
+        return AjaxResult.error("数据库操作失败，请稍后重试");
     }
 
     /**

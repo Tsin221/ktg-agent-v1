@@ -107,8 +107,17 @@
 
 - 创建成功：`POST /mes/pro/workorder` 返回 `{"code":200,"data":<workorderId>}`，`data` 是数据库生成且已提交的确定工单 ID；响应成功时对应 BOM 已在同一事务提交。
 - 回读：使用 `GET /mes/pro/workorder/{workorderId}`。调用方无需按工单编号二次查找，也不应在创建成功后自行补写 BOM。
+- Agent 按产品 ID 使用 `GET /mes/md/mditem/{itemId}` 核实；按编码只接受精确匹配；按名称会读完匹配分页再判断是否重名。查询结果超过 500 条时要求提供更精确的编码。
+- Agent 写后核对草稿字段、状态和版本；创建或影响 BOM 的编辑还对照 `GET /mes/md/bom/list` 与 `GET /mes/pro/workorderbom/list` 核对每条物料及数量。正式库的工单 BOM 数量列保留两位小数，数量比较允许半个最小单位的存储舍入误差。核验使用当前用户权限，缺少产品详情或 BOM 列表查询权限时不能报告完整核验成功。
+- `bom_verified` 仅在 BOM 模板与工单 BOM 全部匹配时为 `true`；未执行核验或核验失败时不得显示为已核验。草稿编辑以空字符串提交 `batchCode` 可清空既有批次号。
 - 冲突：并发提交相同 `workorderCode` 时数据库唯一索引只允许一条成功，失败方得到 `code: 409` 和“生产工单编号已存在！”；不能把它当成可重试的未知错误。
 - 编辑冲突：两个客户端读取同一 `version` 后只能有一个更新成功；失败方得到 `code: 409` 和当前状态/版本，工单与 BOM 均保持获胜事务的完整结果。
 - 回滚：创建或编辑过程中任一 BOM 行写入失败时接口失败，数据库保持调用前状态。
+
+### 操作员权限与部署验收
+
+- 默认 `common` 角色不含工单草稿所需权限，不能直接作为操作员角色使用。专用非管理员角色至少需要 `mes:md:mditem:list`、`mes:md:mditem:query`、`mes:md:bom:list`、`mes:pro:workorder:list`、`mes:pro:workorder:query`、`mes:pro:workorder:add`、`mes:pro:workorder:edit`、`mes:pro:workorderbom:list`；网页入口还需相应父菜单。只有草稿创建和编辑需求时无需授予工单删除、物料或 BOM 写入权限。
+- 后端数据库异常在服务端记录详情，API 只返回通用错误，不向页面暴露 SQL 或内部 jar 路径。提交后连接中断时 Agent 按编号回读；能核实则返回同一工单的结果，回读也失败则显示“待核实”，重复确认不再次写入。
+- 部署时先执行本阶段两份迁移并检查唯一索引和版本列，再使用项目的 `scripts/start-backend.ps1` 完整清理并打包。增量打包可能留下内嵌旧业务模块，不能仅凭构建命令退出码判断已加载新 Mapper。前端使用项目 Node 16 构建。正式操作员角色授权后，应按本次验收记录再跑一次登录、预览、创建、编辑和 BOM 回读。
 
 迁移前应确认没有重复 `workorder_code`；若存在重复值，唯一索引会拒绝创建，需先由业务负责人确定保留或改号方案。迁移执行后应确认 `workorder_type` 非空、既有行已回填 `SELF`、`uk_pro_workorder_code` 存在，再做一次草稿新增与查询往返。

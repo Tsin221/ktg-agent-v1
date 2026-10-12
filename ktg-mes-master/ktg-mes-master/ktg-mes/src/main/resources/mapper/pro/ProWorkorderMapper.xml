@@ -205,7 +205,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="productName != null and productName != ''">product_name = #{productName},</if>
             <if test="productSpc != null">product_spc = #{productSpc},</if>
             <if test="unitOfMeasure != null and unitOfMeasure != ''">unit_of_measure = #{unitOfMeasure},</if>
-            <if test="batchCode != null and batchCode != ''">batch_code = #{batchCode},</if>
+            <if test="batchCode != null">batch_code = #{batchCode},</if>
             <if test="quantity != null">quantity = #{quantity},</if>
             <if test="clientId != null">client_id = #{clientId},</if>
             <if test="clientCode != null">client_code = #{clientCode},</if>

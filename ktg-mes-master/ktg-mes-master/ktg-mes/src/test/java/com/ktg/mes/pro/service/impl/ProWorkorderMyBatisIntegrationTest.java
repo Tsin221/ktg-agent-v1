@@ -5,6 +5,7 @@ import com.ktg.mes.md.mapper.MdProductBomMapper;
 import com.ktg.mes.md.service.IMdItemService;
 import com.ktg.mes.pro.mapper.ProWorkorderBomMapper;
 import com.ktg.mes.pro.mapper.ProWorkorderMapper;
+import com.ktg.mes.pro.domain.ProWorkorder;
 import com.ktg.mes.pro.service.IProFeedbackService;
 import com.ktg.mes.pro.service.IProRouteProcessService;
 import com.ktg.mes.pro.service.IProRouteProductService;
@@ -46,6 +47,8 @@ class ProWorkorderMyBatisIntegrationTest
     private IProWorkorderService service;
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private ProWorkorderMapper workorderMapper;
 
     @BeforeEach
     void resetDatabase()
@@ -78,6 +81,20 @@ class ProWorkorderMyBatisIntegrationTest
         assertEquals(Integer.valueOf(409), error.getCode());
         assertEquals(2, count("select count(*) from pro_workorder"));
         assertEquals(2, count("select count(*) from pro_workorder_bom"));
+    }
+
+    @Test
+    void draftUpdateCanClearBatchCode()
+    {
+        jdbc.update("update pro_workorder set batch_code='OLD-BATCH' where workorder_id=1");
+        ProWorkorder update = new ProWorkorder();
+        update.setWorkorderId(1L);
+        update.setVersion(0L);
+        update.setBatchCode("");
+
+        assertEquals(1, workorderMapper.updateDraftWorkorder(update));
+        assertEquals("", jdbc.queryForObject(
+                "select batch_code from pro_workorder where workorder_id=1", String.class));
     }
 
     private void insertWorkorder(Long id, String code, String status)

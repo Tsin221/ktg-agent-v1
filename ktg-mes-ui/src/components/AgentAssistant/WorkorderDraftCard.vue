@@ -27,6 +27,10 @@
         <div v-if="result.requestDate"><dt>需求日期</dt><dd>{{ shortDate(result.requestDate) }}</dd></div>
         <div v-if="result.workorderId"><dt>工单 ID</dt><dd>{{ result.workorderId }}</dd></div>
         <div v-if="result.version !== undefined"><dt>版本</dt><dd>{{ result.version }}</dd></div>
+        <div v-if="result.kind === 'workorder_draft_result' && result.bom_verified !== undefined">
+          <dt>BOM</dt>
+          <dd>{{ result.bom_verified ? `已核验（${result.bom_count} 行）` : '未核验' }}</dd>
+        </div>
       </dl>
 
       <div v-if="isPreview && result.changes && result.changes.length" class="draft-card__changes">
