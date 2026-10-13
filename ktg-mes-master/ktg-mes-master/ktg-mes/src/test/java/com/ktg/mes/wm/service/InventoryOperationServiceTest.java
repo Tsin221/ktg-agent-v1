@@ -15,6 +15,7 @@ import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -38,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -287,6 +289,32 @@ class InventoryOperationServiceTest {
         assertEquals("APPROVED", jdbc.queryForObject("SELECT status FROM wm_item_recpt WHERE recpt_id=1", String.class));
         assertEquals(0, new BigDecimal("10.00").compareTo(jdbc.queryForObject(
                 "SELECT quantity_onhand FROM wm_material_stock WHERE material_stock_id=1", BigDecimal.class)));
+    }
+
+    @Test
+    void deadlockRetriesWholeReceiptTransactionWithoutDuplicateLedger() {
+        Mockito.when(receipts.getTxBeans(1L)).thenReturn(Collections.singletonList(receiptLine()));
+        AtomicInteger attempts = new AtomicInteger();
+        Mockito.doAnswer(call -> {
+            jdbc.update("UPDATE wm_material_stock SET quantity_onhand = quantity_onhand + 2 WHERE material_stock_id = 1");
+            if (attempts.incrementAndGet() == 1) {
+                throw new DeadlockLoserDataAccessException("simulated stock deadlock", new RuntimeException());
+            }
+            jdbc.update("INSERT INTO wm_transaction(transaction_type, transaction_flag, transaction_quantity, "
+                    + "source_doc_type, source_doc_id, source_doc_line_id, unit_of_measure) "
+                    + "VALUES ('ITEM_RECPT', 1, 2, 'IR', 1, 11, 'pcs')");
+            return null;
+        }).when(storage).processItemRecpt(anyList());
+
+        AjaxResult result = service.executeReceipt(1L, "a8914e8c-84f9-494d-a0ae-03d49d5a5317");
+        assertEquals(200, result.get("code"));
+        assertEquals(2, attempts.get());
+        assertEquals(0, new BigDecimal("12.00").compareTo(jdbc.queryForObject(
+                "SELECT quantity_onhand FROM wm_material_stock WHERE material_stock_id=1", BigDecimal.class)));
+        assertEquals(1, count("wm_transaction"));
+        assertEquals(1, count("wm_inventory_operation_transaction"));
+        assertEquals("FINISHED", jdbc.queryForObject(
+                "SELECT status FROM wm_item_recpt WHERE recpt_id=1", String.class));
     }
 
     @Test

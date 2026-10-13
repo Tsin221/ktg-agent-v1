@@ -1,4 +1,8 @@
-param([string]$BaseUrl = 'http://127.0.0.1:18081')
+param(
+    [string]$BaseUrl = 'http://127.0.0.1:18081',
+    [string]$SharedBatchCode = '',
+    [switch]$NoLines
+)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $workspaceRoot 'use-local-secrets.ps1')
@@ -37,8 +41,14 @@ $matches = @((Api 'Get' "/mes/wm/itemrecpt/list?recptCode=$code" $headers).rows 
 if ($matches.Count -ne 1) { throw 'Created receipt cannot be found uniquely' }
 $id = $matches[0].recptId
 
-foreach ($entry in @(@{ batch = "S305-R1-$suffix"; quantity = 2.00 },
-                    @{ batch = "S305-R2-$suffix"; quantity = 1.50 })) {
+$firstBatch = if ($SharedBatchCode) { $SharedBatchCode } else { "S305-R1-$suffix" }
+$secondBatch = if ($SharedBatchCode) { $SharedBatchCode } else { "S305-R2-$suffix" }
+$entries = @()
+if (-not $NoLines) {
+    $entries = @(@{ batch = $firstBatch; quantity = 2.00 },
+                 @{ batch = $secondBatch; quantity = 1.50 })
+}
+foreach ($entry in $entries) {
     Api 'Post' '/mes/wm/itemrecptline' $headers @{
         recptId = $id; itemId = $sourceLine.itemId; itemCode = $sourceLine.itemCode
         itemName = $sourceLine.itemName; specification = $sourceLine.specification
@@ -56,6 +66,13 @@ foreach ($nextStatus in @('APPROVING', 'APPROVED')) {
     } | Out-Null
 }
 $approved = (Api 'Get' "/mes/wm/itemrecpt/$id" $headers).data
+if ($NoLines) {
+    if ($approved.status -ne 'APPROVED') { throw 'Empty receipt did not reach approved status' }
+    Write-Output "RECEIPT_ID=$id"
+    Write-Output "RECEIPT_CODE=$code"
+    Write-Output "STATUS=$($approved.status) VERSION=$($approved.version) LINES=0"
+    return
+}
 $preview = (Api 'Get' "/mes/wm/itemrecpt/$id/execution-preview" $headers).data
 if ($approved.status -ne 'APPROVED' -or $preview.additions.Count -ne 2 -or
     $preview.documentVersion -ne $approved.version) { throw 'Approved preview mismatch' }

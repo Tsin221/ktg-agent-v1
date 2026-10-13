@@ -11,6 +11,7 @@ import com.ktg.mes.wm.domain.tx.ItemRecptTxBean;
 import com.ktg.mes.wm.mapper.InventoryOperationMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -195,28 +196,44 @@ public class InventoryOperationService {
             return replayOrConflict(mapper.find(stableOperationId), receipt, true);
         }
 
-        try {
-            transaction().execute(status -> {
-                executeReserved(receipt, normalizedExpectedStatus, expectedVersion);
-                return null;
-            });
-        } catch (DuplicateKeyException ex) {
-            String owner = mapper.executionOwner(actionType, documentType, documentId);
-            if (owner != null && !owner.equals(stableOperationId)) {
-                return persistFailure(receipt, "rejected", "DOCUMENT_ALREADY_EXECUTED",
-                        "单据已经执行", owner);
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                transaction().execute(status -> {
+                    executeReserved(receipt, normalizedExpectedStatus, expectedVersion);
+                    return null;
+                });
+                return replayOrConflict(mapper.find(stableOperationId), receipt, false);
+            } catch (PessimisticLockingFailureException ex) {
+                if (attempt == 3) {
+                    log.error("Inventory operation {} exhausted lock retries", stableOperationId, ex);
+                    return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
+                }
+                log.warn("Inventory operation {} retrying after lock conflict (attempt {})",
+                        stableOperationId, attempt);
+                try {
+                    Thread.sleep(25L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
+                }
+            } catch (DuplicateKeyException ex) {
+                String owner = mapper.executionOwner(actionType, documentType, documentId);
+                if (owner != null && !owner.equals(stableOperationId)) {
+                    return persistFailure(receipt, "rejected", "DOCUMENT_ALREADY_EXECUTED",
+                            "单据已经执行", owner);
+                }
+                log.error("Inventory operation {} hit an unrelated unique-key conflict", stableOperationId, ex);
+                return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
+            } catch (InventoryOperationException ex) {
+                return persistFailure(receipt,
+                        "LEDGER_MISMATCH".equals(ex.code) ? "failed" : "rejected",
+                        ex.code, ex.getMessage(), null);
+            } catch (RuntimeException ex) {
+                log.error("Inventory operation {} failed and was rolled back", stableOperationId, ex);
+                return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
             }
-            log.error("Inventory operation {} hit an unrelated unique-key conflict", stableOperationId, ex);
-            return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
-        } catch (InventoryOperationException ex) {
-            return persistFailure(receipt,
-                    "LEDGER_MISMATCH".equals(ex.code) ? "failed" : "rejected",
-                    ex.code, ex.getMessage(), null);
-        } catch (RuntimeException ex) {
-            log.error("Inventory operation {} failed and was rolled back", stableOperationId, ex);
-            return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
         }
-        return replayOrConflict(mapper.find(stableOperationId), receipt, false);
+        throw new IllegalStateException("Unreachable inventory retry state");
     }
 
     private void executeReserved(InventoryOperationReceipt receipt, String expectedStatus, Long expectedVersion) {
