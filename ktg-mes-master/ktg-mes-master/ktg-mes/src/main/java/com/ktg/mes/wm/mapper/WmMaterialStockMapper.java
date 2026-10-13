@@ -23,6 +23,14 @@ public interface WmMaterialStockMapper
 
     public WmMaterialStock loadMaterialStock(WmMaterialStock stock);
 
+    /** Atomically add to a dimension, creating it exactly once via the unique key. */
+    int insertOrIncrementStock(WmMaterialStock stock);
+
+    /** Returns one only when the requested debit was applied. */
+    int decrementStock(@org.apache.ibatis.annotations.Param("id") Long id,
+                       @org.apache.ibatis.annotations.Param("quantity") java.math.BigDecimal quantity,
+                       @org.apache.ibatis.annotations.Param("checkBalance") boolean checkBalance);
+
     /**
      * 查询库存记录列表
      * 

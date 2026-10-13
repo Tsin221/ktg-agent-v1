@@ -1,7 +1,7 @@
 package com.ktg.mes.wm.service.impl;
 
 import java.util.List;
-import com.ktg.common.utils.DateUtils;
+import com.ktg.common.exception.BussinessException;
 import com.ktg.mes.wm.domain.WmMaterialStock;
 import com.ktg.mes.wm.mapper.WmMaterialStockMapper;
 import com.ktg.mes.wm.service.IWmMaterialStockService;
@@ -55,8 +55,7 @@ public class WmMaterialStockServiceImpl implements IWmMaterialStockService
     @Override
     public int insertWmMaterialStock(WmMaterialStock wmMaterialStock)
     {
-        wmMaterialStock.setCreateTime(DateUtils.getNowDate());
-        return wmMaterialStockMapper.insertWmMaterialStock(wmMaterialStock);
+        throw new BussinessException("库存余额只能通过库存单据事务修改");
     }
 
     /**
@@ -68,8 +67,7 @@ public class WmMaterialStockServiceImpl implements IWmMaterialStockService
     @Override
     public int updateWmMaterialStock(WmMaterialStock wmMaterialStock)
     {
-        wmMaterialStock.setUpdateTime(DateUtils.getNowDate());
-        return wmMaterialStockMapper.updateWmMaterialStock(wmMaterialStock);
+        throw new BussinessException("库存余额只能通过库存单据事务修改");
     }
 
     /**
@@ -81,7 +79,7 @@ public class WmMaterialStockServiceImpl implements IWmMaterialStockService
     @Override
     public int deleteWmMaterialStockByMaterialStockIds(Long[] materialStockIds)
     {
-        return wmMaterialStockMapper.deleteWmMaterialStockByMaterialStockIds(materialStockIds);
+        throw new BussinessException("库存余额只能通过库存单据事务修改");
     }
 
     /**
@@ -93,6 +91,6 @@ public class WmMaterialStockServiceImpl implements IWmMaterialStockService
     @Override
     public int deleteWmMaterialStockByMaterialStockId(Long materialStockId)
     {
-        return wmMaterialStockMapper.deleteWmMaterialStockByMaterialStockId(materialStockId);
+        throw new BussinessException("库存余额只能通过库存单据事务修改");
     }
 }

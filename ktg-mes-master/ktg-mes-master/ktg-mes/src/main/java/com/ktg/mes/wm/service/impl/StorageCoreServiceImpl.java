@@ -12,12 +12,14 @@ import com.ktg.mes.wm.domain.tx.*;
 import com.ktg.mes.wm.service.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Date;
 import java.util.List;
 
 
 @Component
+@Transactional
 public class StorageCoreServiceImpl implements IStorageCoreService {
 
     @Autowired
@@ -97,6 +99,7 @@ public class StorageCoreServiceImpl implements IStorageCoreService {
             transaction_out.setTransactionType(transactionType_out);
             BeanUtils.copyBeanProp(transaction_out,line);
             transaction_out.setTransactionFlag(-1);//库存减少
+            transaction_out.setStorageCheckFlag(true);
             transaction_out.setTransactionDate(new Date());
             wmTransactionService.processTransaction(transaction_out);
 

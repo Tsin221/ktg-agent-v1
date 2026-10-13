@@ -6,7 +6,8 @@ $migrationFiles = @(
     '20261009_s2_01_workorder_contract.sql',
     '20261009_s2_04_workorder_draft_version.sql',
     '20261013_s3_02_inventory_operation.sql',
-    '20261013_s3_03_inventory_document_version.sql'
+    '20261013_s3_03_inventory_document_version.sql',
+    '20261013_s3_04_stock_atomicity.sql'
 )
 
 foreach ($migrationFile in $migrationFiles) {

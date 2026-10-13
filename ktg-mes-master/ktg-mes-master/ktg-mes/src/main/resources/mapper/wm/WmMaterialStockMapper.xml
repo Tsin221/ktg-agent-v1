@@ -90,19 +90,37 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="loadMaterialStock" parameterType="WmMaterialStock" resultMap="WmMaterialStockResult">
         <include refid="selectWmMaterialStockVo"/>
-        <where>
-            <if test="itemId != null "> and item_id = #{itemId}</if>
-            <if test="unitOfMeasure != null  and unitOfMeasure != ''"> and unit_of_measure = #{unitOfMeasure}</if>
-            <if test="batchCode != null  and batchCode != ''"> and batch_code = #{batchCode}</if>
-            <if test="warehouseId != null "> and warehouse_id = #{warehouseId}</if>
-            <if test="locationId != null "> and location_id = #{locationId}</if>
-            <if test="areaId != null "> and area_id = #{areaId}</if>
-            <if test="vendorId != null "> and vendor_id = #{vendorId}</if>
-            <if test="workorderId !=null">and workorder_id = #{workorderId}</if>
-            <if test="workorderCode !=null">and workorder_code = #{workorderCode}</if>
-        </where>
-        and 1=1 limit 1
+        where item_id = #{itemId} and warehouse_id = #{warehouseId}
+          and binary trim(unit_of_measure) = binary #{unitOfMeasure}
+          and binary coalesce(trim(batch_code), '') = binary coalesce(#{batchCode}, '')
+          and coalesce(location_id, 0) = coalesce(#{locationId}, 0)
+          and coalesce(area_id, 0) = coalesce(#{areaId}, 0)
+          and coalesce(vendor_id, 0) = coalesce(#{vendorId}, 0)
+          and coalesce(workorder_id, 0) = coalesce(#{workorderId}, 0)
+        limit 1
     </select>
+
+    <insert id="insertOrIncrementStock" parameterType="WmMaterialStock" useGeneratedKeys="true" keyProperty="materialStockId">
+        insert into wm_material_stock (item_type_id, item_id, item_code, item_name, specification,
+            unit_of_measure, batch_code, warehouse_id, warehouse_code, warehouse_name,
+            location_id, location_code, location_name, area_id, area_code, area_name,
+            vendor_id, vendor_code, vendor_name, vendor_nick, quantity_onhand,
+            workorder_id, workorder_code, recpt_date, expire_date)
+        values (#{itemTypeId}, #{itemId}, #{itemCode}, #{itemName}, #{specification},
+            #{unitOfMeasure}, #{batchCode}, #{warehouseId}, #{warehouseCode}, #{warehouseName},
+            #{locationId}, #{locationCode}, #{locationName}, #{areaId}, #{areaCode}, #{areaName},
+            #{vendorId}, #{vendorCode}, #{vendorName}, #{vendorNick}, #{quantityOnhand},
+            #{workorderId}, #{workorderCode}, #{recptDate}, #{expireDate})
+        on duplicate key update quantity_onhand = quantity_onhand + values(quantity_onhand),
+            material_stock_id = last_insert_id(material_stock_id)
+    </insert>
+
+    <update id="decrementStock">
+        update wm_material_stock
+        set quantity_onhand = quantity_onhand - #{quantity}
+        where material_stock_id = #{id}
+        <if test="checkBalance">and quantity_onhand &gt;= #{quantity}</if>
+    </update>
 
     <insert id="insertWmMaterialStock" parameterType="WmMaterialStock" useGeneratedKeys="true" keyProperty="materialStockId">
         insert into wm_material_stock

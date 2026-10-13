@@ -5,7 +5,6 @@ import java.util.Date;
 import java.util.List;
 
 import com.ktg.common.exception.BussinessException;
-import com.ktg.common.utils.DateUtils;
 import com.ktg.common.utils.StringUtils;
 import com.ktg.mes.md.domain.MdItem;
 import com.ktg.mes.md.mapper.MdItemMapper;
@@ -14,6 +13,7 @@ import com.ktg.mes.wm.mapper.WmMaterialStockMapper;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import com.ktg.mes.wm.mapper.WmTransactionMapper;
 import com.ktg.mes.wm.domain.WmTransaction;
 import com.ktg.mes.wm.service.IWmTransactionService;
@@ -37,31 +37,41 @@ public class WmTransactionServiceImpl implements IWmTransactionService
     private MdItemMapper mdItemMapper;
 
     @Override
-    public synchronized WmTransaction processTransaction(WmTransaction wmTransaction) {
+    @Transactional
+    public WmTransaction processTransaction(WmTransaction wmTransaction) {
         WmMaterialStock stock = new WmMaterialStock();
 
         validate(wmTransaction);
         initStock(wmTransaction,stock);
 
-        WmMaterialStock ms =wmMaterialStockMapper.loadMaterialStock(stock);
-        BigDecimal quantity = wmTransaction.getTransactionQuantity().multiply(new BigDecimal(wmTransaction.getTransactionFlag()));
-        if(StringUtils.isNotNull(ms)){
-            //MS已存在
-            BigDecimal resultQuantity =ms.getQuantityOnhand().add(quantity);
-            if(wmTransaction.isStorageCheckFlag() && resultQuantity.compareTo(new BigDecimal(0))<0){
-                throw new BussinessException("库存数量不足！");
-            }
-            stock.setQuantityOnhand(resultQuantity);
-            stock.setMaterialStockId(ms.getMaterialStockId());
-            wmMaterialStockMapper.updateWmMaterialStock(stock);
-        }else {
-            //MS不存在
+        BigDecimal quantity = wmTransaction.getTransactionQuantity();
+        if (wmTransaction.getTransactionFlag() == 1) {
             stock.setQuantityOnhand(quantity);
-            wmMaterialStockMapper.insertWmMaterialStock(stock);
+            wmMaterialStockMapper.insertOrIncrementStock(stock);
+        } else {
+            WmMaterialStock ms = wmTransaction.getMaterialStockId() == null
+                    ? wmMaterialStockMapper.loadMaterialStock(stock)
+                    : wmMaterialStockMapper.selectWmMaterialStockByMaterialStockId(wmTransaction.getMaterialStockId());
+            if (ms == null) {
+                if (wmTransaction.isStorageCheckFlag() || wmTransaction.getMaterialStockId() != null) {
+                    throw new BussinessException("库存记录不存在或数量不足！");
+                }
+                stock.setQuantityOnhand(quantity.negate());
+                wmMaterialStockMapper.insertOrIncrementStock(stock);
+            } else {
+                stock.setMaterialStockId(ms.getMaterialStockId());
+                if (wmMaterialStockMapper.decrementStock(ms.getMaterialStockId(), quantity,
+                        wmTransaction.isStorageCheckFlag()) != 1) {
+                    throw new BussinessException("库存数量不足！");
+                }
+            }
         }
+        if (stock.getMaterialStockId() == null) throw new BussinessException("库存记录写入失败！");
         wmTransaction.setMaterialStockId(stock.getMaterialStockId());
-        wmTransaction.setTransactionQuantity(quantity);
-        wmTransactionMapper.insertWmTransaction(wmTransaction);
+        wmTransaction.setTransactionQuantity(wmTransaction.getTransactionFlag() == 1 ? quantity : quantity.negate());
+        if (wmTransactionMapper.insertWmTransaction(wmTransaction) != 1) {
+            throw new BussinessException("库存流水写入失败！");
+        }
         return wmTransaction;
     }
 
@@ -73,6 +83,24 @@ public class WmTransactionServiceImpl implements IWmTransactionService
 
         if(StringUtils.isNull(transaction.getTransactionQuantity())){
             throw new BussinessException("事务数量不能为空");
+        }
+        if (transaction.getTransactionQuantity().signum() <= 0
+                || transaction.getTransactionQuantity().scale() > 2) {
+            throw new BussinessException("事务数量必须大于零且最多保留两位小数");
+        }
+        if (transaction.getTransactionFlag() == null
+                || (transaction.getTransactionFlag() != 1 && transaction.getTransactionFlag() != -1)) {
+            throw new BussinessException("库存方向无效");
+        }
+        if (transaction.getItemId() == null || transaction.getWarehouseId() == null
+                || StringUtils.isEmpty(transaction.getUnitOfMeasure())) {
+            throw new BussinessException("物料、仓库和单位不能为空");
+        }
+        transaction.setUnitOfMeasure(transaction.getUnitOfMeasure().trim());
+        if (transaction.getUnitOfMeasure().isEmpty()) throw new BussinessException("单位不能为空");
+        if (transaction.getBatchCode() != null) transaction.setBatchCode(transaction.getBatchCode().trim());
+        if (transaction.getSourceDocId() == null || StringUtils.isEmpty(transaction.getSourceDocType())) {
+            throw new BussinessException("来源单据不能为空");
         }
 
         if(StringUtils.isNull(transaction.getSourceDocCode())){
@@ -92,6 +120,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
 
         if(StringUtils.isNotNull(transaction.getMaterialStockId())){
             WmMaterialStock st = wmMaterialStockMapper.selectWmMaterialStockByMaterialStockId(transaction.getMaterialStockId());
+            if (st == null) throw new BussinessException("库存记录不存在！");
             BeanUtils.copyProperties(st,stock);
         }else{
             MdItem item =mdItemMapper.selectMdItemById(transaction.getItemId());
@@ -170,8 +199,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
     @Override
     public int insertWmTransaction(WmTransaction wmTransaction)
     {
-        wmTransaction.setCreateTime(DateUtils.getNowDate());
-        return wmTransactionMapper.insertWmTransaction(wmTransaction);
+        throw new BussinessException("库存流水只能通过库存单据事务写入");
     }
 
     /**
@@ -183,8 +211,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
     @Override
     public int updateWmTransaction(WmTransaction wmTransaction)
     {
-        wmTransaction.setUpdateTime(DateUtils.getNowDate());
-        return wmTransactionMapper.updateWmTransaction(wmTransaction);
+        throw new BussinessException("库存流水不可独立修改");
     }
 
     /**
@@ -196,7 +223,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
     @Override
     public int deleteWmTransactionByTransactionIds(Long[] transactionIds)
     {
-        return wmTransactionMapper.deleteWmTransactionByTransactionIds(transactionIds);
+        throw new BussinessException("库存流水不可独立删除");
     }
 
     /**
@@ -208,6 +235,6 @@ public class WmTransactionServiceImpl implements IWmTransactionService
     @Override
     public int deleteWmTransactionByTransactionId(Long transactionId)
     {
-        return wmTransactionMapper.deleteWmTransactionByTransactionId(transactionId);
+        throw new BussinessException("库存流水不可独立删除");
     }
 }
