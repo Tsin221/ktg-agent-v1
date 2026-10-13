@@ -4,7 +4,8 @@ $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $sqlRoot = Join-Path $workspaceRoot 'ktg-mes-master\ktg-mes-master\sql'
 $migrationFiles = @(
     '20261009_s2_01_workorder_contract.sql',
-    '20261009_s2_04_workorder_draft_version.sql'
+    '20261009_s2_04_workorder_draft_version.sql',
+    '20261013_s3_02_inventory_operation.sql'
 )
 
 foreach ($migrationFile in $migrationFiles) {

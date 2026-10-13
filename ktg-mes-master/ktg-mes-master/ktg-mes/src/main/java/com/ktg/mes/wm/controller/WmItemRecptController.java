@@ -7,16 +7,17 @@ import cn.hutool.core.collection.CollUtil;
 import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.StringUtils;
 import com.ktg.mes.wm.domain.*;
-import com.ktg.mes.wm.domain.tx.ItemRecptTxBean;
 import com.ktg.mes.wm.service.*;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -38,6 +39,8 @@ import com.ktg.common.core.page.TableDataInfo;
 public class WmItemRecptController extends BaseController
 {
     @Autowired
+    private InventoryOperationService inventoryOperationService;
+    @Autowired
     private IWmItemRecptService wmItemRecptService;
 
     @Autowired
@@ -51,9 +54,6 @@ public class WmItemRecptController extends BaseController
 
     @Autowired
     private IWmStorageAreaService wmStorageAreaService;
-
-    @Autowired
-    private IStorageCoreService storageCoreService;
 
     /**
      * 查询物料入库单列表
@@ -189,23 +189,11 @@ public class WmItemRecptController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
     @Log(title = "物料入库单", businessType = BusinessType.UPDATE)
-    @Transactional
     @PutMapping("/{recptId}")
-    public AjaxResult execute(@PathVariable Long recptId){
-
-        WmItemRecpt recpt = wmItemRecptService.selectWmItemRecptByRecptId(recptId);
-
-        //构造Transaction事务，并执行库存更新逻辑
-        List<ItemRecptTxBean> beans = wmItemRecptService.getTxBeans(recptId);
-
-        //调用库存核心
-        storageCoreService.processItemRecpt(beans);
-
-        //更新单据状态
-        recpt.setStatus(UserConstants.ORDER_STATUS_FINISHED);
-        wmItemRecptService.updateWmItemRecpt(recpt);
-
-        return AjaxResult.success();
+    public ResponseEntity<AjaxResult> execute(@PathVariable Long recptId,
+                                              @RequestHeader(value = "X-Operation-Id", required = false) String operationId){
+        AjaxResult result = inventoryOperationService.executeReceipt(recptId, operationId);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 
 
