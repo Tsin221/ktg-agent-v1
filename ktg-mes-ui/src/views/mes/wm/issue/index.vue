@@ -266,7 +266,7 @@
 </template>
 
 <script>
-import { listIssueheader, getIssueheader, checkQuantity, delIssueheader, addIssueheader, updateIssueheader, execute } from "@/api/mes/wm/issueheader";
+import { listIssueheader, getIssueheader, checkQuantity, delIssueheader, addIssueheader, updateIssueheader, execute, previewExecution, getExecutionResult } from "@/api/mes/wm/issueheader";
 import WorkstationSelect from "@/components/workstationSelect/simpletableSingle.vue"
 import WorkorderSelect from "@/components/workorderSelect/single.vue"
 import {getTreeList} from "@/api/mes/wm/warehouse"
@@ -589,14 +589,76 @@ export default {
     },
 
     //执行出库
-    handleExecute(row){
-      const issueIds = row.issueId || this.ids;
-      this.$modal.confirm('确认执行出库？').then(function() {
-        return execute(issueIds, row.version)//执行出库
-      }).then(() => {
-        this.getList();
-        this.$modal.msgSuccess("出库成功");
-      }).catch(() => {});
+    async handleExecute(row){
+      const issueId = row.issueId;
+      const storageKey = 'production-issue-operation-' + issueId;
+      const pendingId = sessionStorage.getItem(storageKey);
+      if (pendingId) {
+        try {
+          const previous = await getExecutionResult(issueId, pendingId);
+          if (previous.data.operationStatus === 'succeeded') {
+            sessionStorage.removeItem(storageKey);
+            this.getList();
+            this.$modal.msgSuccess('领料已完成，操作 ID：' + pendingId);
+          } else {
+            this.$modal.msgWarning('已有待核实的领料操作，操作 ID：' + pendingId);
+          }
+        } catch (error) {
+          const status = error.data && error.data.data && error.data.data.operationStatus;
+          if (status === 'rejected' || status === 'failed') {
+            sessionStorage.removeItem(storageKey);
+            this.$modal.msgWarning('原领料操作未成功，请刷新单据后重新预览');
+          } else {
+            this.$modal.msgWarning('请先核实原领料操作，操作 ID：' + pendingId);
+          }
+        }
+        return;
+      }
+      try {
+        const response = await previewExecution(issueId);
+        const preview = response.data;
+        const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[char]));
+        const details = preview.movements.map(line =>
+          `${escapeHtml(line.itemCode)} ${escapeHtml(line.itemName)}，批次 ${escapeHtml(line.batchCode)}：` +
+          `从 ${escapeHtml(line.sourceWarehouseName || line.sourceWarehouseId)} / ${escapeHtml(line.sourceLocationName || line.sourceLocationId)} / ${escapeHtml(line.sourceAreaName || line.sourceAreaId)} ` +
+          `减少 ${escapeHtml(line.quantity)} ${escapeHtml(line.unitOfMeasure)}；` +
+          `向 ${escapeHtml(line.target.warehouseName || line.target.warehouseId)} / ${escapeHtml(line.target.locationName || line.target.locationId)} / ${escapeHtml(line.target.areaName || line.target.areaId)} ` +
+          `增加 ${escapeHtml(line.quantity)} ${escapeHtml(line.unitOfMeasure)}`
+        ).join('<br>');
+        await this.$confirm(`<div>单号：${escapeHtml(preview.documentCode)}</div><div>${details}</div><p>确认执行领料？</p>`, '领料预览', {
+          dangerouslyUseHTMLString: true,
+          confirmButtonText: '确认领料',
+          cancelButtonText: '取消',
+          type: 'warning'
+        });
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 15) | 64;
+        bytes[8] = (bytes[8] & 63) | 128;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        const operationId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        sessionStorage.setItem(storageKey, operationId);
+        try {
+          await execute(issueId, preview.documentVersion, operationId);
+        } catch (error) {
+          // A lost response does not prove whether the database committed.
+        }
+        const result = await getExecutionResult(issueId, operationId);
+        if (result.data.operationStatus === 'succeeded' && result.data.documentStatus === 'FINISHED'
+            && result.data.transactions.length === preview.movements.length * 2) {
+          sessionStorage.removeItem(storageKey);
+          this.getList();
+          this.$modal.msgSuccess('领料成功，操作 ID：' + operationId);
+        } else {
+          this.$modal.msgWarning('领料结果待核实，操作 ID：' + operationId);
+        }
+      } catch (error) {
+        if (sessionStorage.getItem(storageKey)) {
+          this.$modal.msgWarning('领料结果待核实，操作 ID：' + sessionStorage.getItem(storageKey));
+        }
+      }
     },
     /** 删除按钮操作 */
     handleDelete(row) {

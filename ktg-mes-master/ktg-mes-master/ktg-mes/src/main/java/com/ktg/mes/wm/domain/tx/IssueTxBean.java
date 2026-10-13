@@ -11,6 +11,13 @@ public class IssueTxBean extends BaseEntity {
     private static final long serialVersionUID = 1L;
 
     private Long materialStockId;
+    private Boolean referenceValid;
+    private BigDecimal availableQuantity;
+
+    public Boolean getReferenceValid() { return referenceValid; }
+    public void setReferenceValid(Boolean referenceValid) { this.referenceValid = referenceValid; }
+    public BigDecimal getAvailableQuantity() { return availableQuantity; }
+    public void setAvailableQuantity(BigDecimal availableQuantity) { this.availableQuantity = availableQuantity; }
 
     /** 产品物料ID */
     private Long itemId;

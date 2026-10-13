@@ -71,6 +71,12 @@ class InventoryOperationServiceTest {
         jdbc.execute("DELETE FROM wm_issue_header");
         jdbc.execute("DELETE FROM wm_material_stock");
         jdbc.update("INSERT INTO wm_material_stock(material_stock_id, quantity_onhand) VALUES (1, 10)");
+        jdbc.execute("DELETE FROM wm_storage_area");
+        jdbc.execute("DELETE FROM wm_storage_location");
+        jdbc.execute("DELETE FROM wm_warehouse");
+        jdbc.update("INSERT INTO wm_warehouse VALUES (99, 'XBK_VIRTUAL', '线边库')");
+        jdbc.update("INSERT INTO wm_storage_location VALUES (99, 99, 'XBKKQ_VIRTUAL', '线边库区')");
+        jdbc.update("INSERT INTO wm_storage_area VALUES (99, 99, 'XBKKW_VIRTUAL', '线边库位')");
         jdbc.update("INSERT INTO wm_item_recpt(recpt_id, recpt_code, status) VALUES (1, 'IR-1', 'APPROVED')");
         jdbc.update("INSERT INTO wm_issue_header(issue_id, issue_code, status) VALUES (2, 'ISSUE-2', 'APPROVED')");
         jdbc.update("INSERT INTO wm_item_recpt_line(line_id, recpt_id) VALUES (11, 1)");
@@ -346,6 +352,43 @@ class InventoryOperationServiceTest {
         Mockito.verify(storage, Mockito.times(1)).processIssue(anyList());
     }
 
+    @Test
+    void issuePreviewShowsBothLegsAndRejectsStaleVersion() {
+        Mockito.when(issues.getTxBeans(2L)).thenReturn(Collections.singletonList(issueLine()));
+        AjaxResult preview = service.previewIssue(2L);
+        assertEquals(200, preview.get("code"));
+        Map<?, ?> movement = (Map<?, ?>) ((List<?>) data(preview).get("movements")).get(0);
+        assertEquals(1L, movement.get("sourceWarehouseId"));
+        assertEquals(99L, ((Map<?, ?>) movement.get("target")).get("warehouseId"));
+        jdbc.update("UPDATE wm_issue_header SET version = version + 1 WHERE issue_id = 2");
+        AjaxResult stale = service.executeIssue(2L,
+                "2dd69850-1b97-47f4-9a9b-401209ec543a", 0L);
+        assertEquals("DOCUMENT_VERSION_CONFLICT", stale.get("errorCode"));
+        assertEquals(0, count("wm_transaction"));
+    }
+
+    @Test
+    void issueRejectsMismatchedStockAndAggregatedShortageBeforeWriting() {
+        IssueTxBean mismatch = issueLine();
+        mismatch.setReferenceValid(false);
+        Mockito.when(issues.getTxBeans(2L)).thenReturn(Collections.singletonList(mismatch));
+        assertEquals("INVALID_DOCUMENT_LINES", service.executeIssue(2L,
+                "c4901bd5-a576-42a2-9986-644dff548b6b").get("errorCode"));
+
+        IssueTxBean first = issueLine();
+        first.setTransactionQuantity(new BigDecimal("6.00"));
+        IssueTxBean second = issueLine();
+        second.setSourceDocLineId(22L);
+        second.setTransactionQuantity(new BigDecimal("5.00"));
+        Mockito.when(issues.getTxBeans(2L)).thenReturn(Arrays.asList(first, second));
+        assertEquals("INSUFFICIENT_STOCK", service.executeIssue(2L,
+                "3754a6cc-f69e-4aae-a003-b123d9cd8955").get("errorCode"));
+        assertEquals(0, count("wm_transaction"));
+        assertEquals("APPROVED", jdbc.queryForObject(
+                "SELECT status FROM wm_issue_header WHERE issue_id = 2", String.class));
+        Mockito.verifyNoInteractions(storage);
+    }
+
     private ItemRecptTxBean receiptLine() {
         ItemRecptTxBean line = new ItemRecptTxBean();
         line.setSourceDocLineId(11L);
@@ -367,6 +410,9 @@ class InventoryOperationServiceTest {
         IssueTxBean line = new IssueTxBean();
         line.setSourceDocLineId(21L);
         line.setSourceDocId(2L);
+        line.setSourceDocType("ISSUE");
+        line.setReferenceValid(true);
+        line.setAvailableQuantity(new BigDecimal("10.00"));
         line.setMaterialStockId(1L);
         line.setItemId(3L);
         line.setItemCode("ITEM-3");

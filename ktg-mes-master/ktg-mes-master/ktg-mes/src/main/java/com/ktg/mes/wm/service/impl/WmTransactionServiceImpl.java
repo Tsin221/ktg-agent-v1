@@ -10,6 +10,7 @@ import com.ktg.mes.md.domain.MdItem;
 import com.ktg.mes.md.mapper.MdItemMapper;
 import com.ktg.mes.wm.domain.WmMaterialStock;
 import com.ktg.mes.wm.mapper.WmMaterialStockMapper;
+import com.ktg.mes.wm.service.InsufficientStockException;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -54,7 +55,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
                     : wmMaterialStockMapper.selectWmMaterialStockByMaterialStockId(wmTransaction.getMaterialStockId());
             if (ms == null) {
                 if (wmTransaction.isStorageCheckFlag() || wmTransaction.getMaterialStockId() != null) {
-                    throw new BussinessException("库存记录不存在或数量不足！");
+                    throw new InsufficientStockException();
                 }
                 stock.setQuantityOnhand(quantity.negate());
                 wmMaterialStockMapper.insertOrIncrementStock(stock);
@@ -62,7 +63,7 @@ public class WmTransactionServiceImpl implements IWmTransactionService
                 stock.setMaterialStockId(ms.getMaterialStockId());
                 if (wmMaterialStockMapper.decrementStock(ms.getMaterialStockId(), quantity,
                         wmTransaction.isStorageCheckFlag()) != 1) {
-                    throw new BussinessException("库存数量不足！");
+                    throw new InsufficientStockException();
                 }
             }
         }

@@ -103,18 +103,83 @@ public class InventoryOperationService {
         return AjaxResult.success(proposal);
     }
 
+    public AjaxResult previewIssue(Long documentId) {
+        if (documentId == null || documentId <= 0) {
+            return error(422, "INVALID_DOCUMENT_ID", "单据 ID 无效", null);
+        }
+        Map<String, Object> document = mapper.readIssueDocument(documentId);
+        if (document == null) return error(404, "DOCUMENT_NOT_FOUND", "领料单不存在", null);
+        if (!"APPROVED".equals(document.get("status"))) {
+            return error(409, "DOCUMENT_STATE_CONFLICT", "领料单状态不允许执行", null);
+        }
+        if (blank((String) document.get("document_code"))) {
+            return error(422, "INVALID_DOCUMENT_LINES", "单据编号不能为空", null);
+        }
+        if (mapper.executionOwner(ISSUE, "ISSUE", documentId) != null
+                || !mapper.transactions("ISSUE", documentId).isEmpty()) {
+            return error(409, "DOCUMENT_ALREADY_EXECUTED", "领料单已经执行", null);
+        }
+        List<IssueTxBean> lines = issueHeaderService.getTxBeans(documentId);
+        Map<String, Object> target = mapper.issueTarget();
+        try {
+            validateIssueLines(documentId, lines);
+            requireIssueTarget(target);
+            requirePhysicalIssueSource(lines, target);
+        } catch (InventoryOperationException ex) {
+            return error("INSUFFICIENT_STOCK".equals(ex.code) ? 409 : 422,
+                    ex.code, ex.getMessage(), null);
+        }
+        Map<String, Object> proposal = new LinkedHashMap<>();
+        proposal.put("documentId", documentId);
+        proposal.put("documentCode", document.get("document_code"));
+        proposal.put("documentStatus", document.get("status"));
+        proposal.put("documentVersion", document.get("version"));
+        List<Map<String, Object>> movements = new java.util.ArrayList<>();
+        for (IssueTxBean line : lines) {
+            Map<String, Object> movement = new LinkedHashMap<>();
+            movement.put("sourceDocLineId", line.getSourceDocLineId());
+            movement.put("materialStockId", line.getMaterialStockId());
+            movement.put("itemId", line.getItemId());
+            movement.put("itemCode", line.getItemCode());
+            movement.put("itemName", line.getItemName());
+            movement.put("quantity", line.getTransactionQuantity());
+            movement.put("unitOfMeasure", line.getUnitOfMeasure());
+            movement.put("batchCode", line.getBatchCode());
+            movement.put("availableQuantity", line.getAvailableQuantity());
+            movement.put("sourceWarehouseId", line.getWarehouseId());
+            movement.put("sourceWarehouseName", line.getWarehouseName());
+            movement.put("sourceLocationId", line.getLocationId());
+            movement.put("sourceLocationName", line.getLocationName());
+            movement.put("sourceAreaId", line.getAreaId());
+            movement.put("sourceAreaName", line.getAreaName());
+            movement.put("target", target);
+            movements.add(movement);
+        }
+        proposal.put("movements", movements);
+        return AjaxResult.success(proposal);
+    }
+
     public AjaxResult receiptResult(Long documentId, String operationId) {
+        return documentResult(RECEIPT, "IR", documentId, operationId);
+    }
+
+    public AjaxResult issueResult(Long documentId, String operationId) {
+        return documentResult(ISSUE, "ISSUE", documentId, operationId);
+    }
+
+    private AjaxResult documentResult(String actionType, String documentType, Long documentId, String operationId) {
         if (documentId == null || operationId == null) {
             return error(422, "INVALID_OPERATION_ID", "操作 ID 无效", null);
         }
         InventoryOperationReceipt receipt = mapper.find(operationId);
-        if (receipt == null || !RECEIPT.equals(receipt.getActionType())
+        if (receipt == null || !actionType.equals(receipt.getActionType())
                 || !documentId.equals(receipt.getDocumentId())) {
-            return error(404, "OPERATION_NOT_FOUND", "入库操作不存在", null);
+            return error(404, "OPERATION_NOT_FOUND", "库存操作不存在", null);
         }
         if ("succeeded".equals(receipt.getOperationStatus())) {
-            Map<String, Object> document = mapper.readReceiptDocument(documentId);
-            List<Map<String, Object>> transactions = mapper.transactions("IR", documentId);
+            Map<String, Object> document = RECEIPT.equals(actionType)
+                    ? mapper.readReceiptDocument(documentId) : mapper.readIssueDocument(documentId);
+            List<Map<String, Object>> transactions = mapper.transactions(documentType, documentId);
             List<?> recorded = receipt.getResultJson() == null ? null
                     : (List<?>) parse(receipt.getResultJson()).get("transactions");
             Set<Long> actualIds = new HashSet<>();
@@ -131,7 +196,7 @@ public class InventoryOperationService {
                     || recorded == null || transactions.isEmpty()
                     || transactions.size() != mapper.linkedTransactionCount(operationId)
                     || transactions.size() != recorded.size() || !actualIds.equals(recordedIds)) {
-                return error(202, "RESULT_UNKNOWN", "入库结果待核实", baseResult(receipt, "unknown"));
+                return error(202, "RESULT_UNKNOWN", "库存结果待核实", baseResult(receipt, "unknown"));
             }
         }
         return replayOrConflict(receipt, receipt, true);
@@ -226,8 +291,11 @@ public class InventoryOperationService {
                 return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
             } catch (InventoryOperationException ex) {
                 return persistFailure(receipt,
-                        "LEDGER_MISMATCH".equals(ex.code) ? "failed" : "rejected",
+                        "LEDGER_MISMATCH".equals(ex.code) || "INSUFFICIENT_STOCK".equals(ex.code)
+                                ? "failed" : "rejected",
                         ex.code, ex.getMessage(), null);
+            } catch (InsufficientStockException ex) {
+                return persistFailure(receipt, "failed", "INSUFFICIENT_STOCK", ex.getMessage(), null);
             } catch (RuntimeException ex) {
                 log.error("Inventory operation {} failed and was rolled back", stableOperationId, ex);
                 return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
@@ -263,6 +331,8 @@ public class InventoryOperationService {
         int expectedTransactionCount;
         Map<Long, BigDecimal> expectedQuantities = new LinkedHashMap<>();
         Map<Long, String> expectedUnits = new LinkedHashMap<>();
+        Map<Long, IssueTxBean> issueLines = new LinkedHashMap<>();
+        Map<String, Object> issueTarget = null;
         if (RECEIPT.equals(receipt.getActionType())) {
             List<ItemRecptTxBean> lines = itemRecptService.getTxBeans(receipt.getDocumentId());
             validateReceiptLines(receipt.getDocumentId(), lines);
@@ -275,21 +345,14 @@ public class InventoryOperationService {
             storageCoreService.processItemRecpt(lines);
         } else {
             List<IssueTxBean> lines = issueHeaderService.getTxBeans(receipt.getDocumentId());
-            if (lines == null || lines.isEmpty()) {
-                throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单没有有效明细");
-            }
+            validateIssueLines(receipt.getDocumentId(), lines);
+            issueTarget = mapper.issueTarget();
+            requireIssueTarget(issueTarget);
+            requirePhysicalIssueSource(lines, issueTarget);
             for (IssueTxBean line : lines) {
-                if (line.getSourceDocLineId() == null || line.getTransactionQuantity() == null
-                        || line.getTransactionQuantity().signum() <= 0 || line.getMaterialStockId() == null
-                        || line.getItemId() == null || blank(line.getItemCode())
-                        || blank(line.getUnitOfMeasure()) || blank(line.getBatchCode())
-                        || line.getWarehouseId() == null || line.getLocationId() == null
-                        || line.getAreaId() == null || !receipt.getDocumentId().equals(line.getSourceDocId())) {
-                    throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单明细无效");
-                }
-                if (expectedQuantities.put(line.getSourceDocLineId(), line.getTransactionQuantity()) != null)
-                    throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单明细 ID 重复");
+                expectedQuantities.put(line.getSourceDocLineId(), line.getTransactionQuantity());
                 expectedUnits.put(line.getSourceDocLineId(), line.getUnitOfMeasure());
+                issueLines.put(line.getSourceDocLineId(), line);
             }
             expectedTransactionCount = lines.size() * 2;
             storageCoreService.processIssue(lines);
@@ -301,6 +364,9 @@ public class InventoryOperationService {
             throw new InventoryOperationException("LEDGER_MISMATCH", "库存流水数量与单据明细不符");
         }
         verifyLedger(receipt.getActionType(), transactions, expectedQuantities, expectedUnits);
+        if (ISSUE.equals(receipt.getActionType())) {
+            verifyIssueLedger(transactions, issueLines, issueTarget);
+        }
         if (mapper.finishDocument(receipt.getDocumentType(), receipt.getDocumentId()) != 1) {
             throw new InventoryOperationException("DOCUMENT_STATE_CONFLICT", "单据状态已改变");
         }
@@ -323,8 +389,9 @@ public class InventoryOperationService {
                                       String code, String message, String existingOperationId) {
         Map<String, Object> result = baseResult(receipt, status);
         result.put("message", message);
-        int httpCode = "failed".equals(status) ? 500
-                : "INVALID_DOCUMENT_LINES".equals(code) ? 422
+        int httpCode = "INSUFFICIENT_STOCK".equals(code) ? 409
+                : "failed".equals(status) ? 500
+                : "INVALID_DOCUMENT_LINES".equals(code) || "INVALID_ISSUE_TARGET".equals(code) ? 422
                 : "DOCUMENT_NOT_FOUND".equals(code) ? 404 : 409;
         result.put("responseCode", httpCode);
         if (existingOperationId != null) {
@@ -421,6 +488,95 @@ public class InventoryOperationService {
                     || !documentId.equals(line.getSourceDocId())
                     || !"IR".equals(line.getSourceDocType())) {
                 throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "入库单明细无效");
+            }
+        }
+    }
+
+    private void validateIssueLines(Long documentId, List<IssueTxBean> lines) {
+        if (lines == null || lines.isEmpty()) {
+            throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单没有有效明细");
+        }
+        Set<Long> ids = new HashSet<>();
+        Map<Long, BigDecimal> required = new LinkedHashMap<>();
+        Map<Long, BigDecimal> available = new LinkedHashMap<>();
+        for (IssueTxBean line : lines) {
+            if (line.getSourceDocLineId() == null || !ids.add(line.getSourceDocLineId())
+                    || !Boolean.TRUE.equals(line.getReferenceValid())
+                    || line.getTransactionQuantity() == null
+                    || line.getTransactionQuantity().signum() <= 0
+                    || line.getTransactionQuantity().scale() > 2
+                    || line.getMaterialStockId() == null || line.getMaterialStockId() <= 0
+                    || line.getItemId() == null || line.getItemId() <= 0
+                    || blank(line.getItemCode()) || blank(line.getUnitOfMeasure())
+                    || blank(line.getBatchCode()) || line.getWarehouseId() == null
+                    || line.getLocationId() == null || line.getAreaId() == null
+                    || !documentId.equals(line.getSourceDocId())
+                    || !"ISSUE".equals(line.getSourceDocType())) {
+                throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单明细或来源库存不匹配");
+            }
+            required.merge(line.getMaterialStockId(), line.getTransactionQuantity(), BigDecimal::add);
+            available.put(line.getMaterialStockId(), line.getAvailableQuantity());
+        }
+        for (Map.Entry<Long, BigDecimal> entry : required.entrySet()) {
+            BigDecimal balance = available.get(entry.getKey());
+            if (balance == null || balance.compareTo(entry.getValue()) < 0) {
+                throw new InventoryOperationException("INSUFFICIENT_STOCK",
+                        "来源库存不足，库存 ID：" + entry.getKey());
+            }
+        }
+    }
+
+    private void requireIssueTarget(Map<String, Object> target) {
+        if (target == null || target.get("warehouseId") == null
+                || target.get("locationId") == null || target.get("areaId") == null) {
+            throw new InventoryOperationException("INVALID_ISSUE_TARGET", "线边库位置不存在或层级不匹配");
+        }
+    }
+
+    private void requirePhysicalIssueSource(List<IssueTxBean> lines, Map<String, Object> target) {
+        long virtualWarehouseId = ((Number) target.get("warehouseId")).longValue();
+        for (IssueTxBean line : lines) {
+            if (line.getWarehouseId() == virtualWarehouseId) {
+                throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料来源不能是线边库");
+            }
+        }
+    }
+
+    private void verifyIssueLedger(List<Map<String, Object>> transactions,
+                                   Map<Long, IssueTxBean> lines, Map<String, Object> target) {
+        Map<Long, Long> outIds = new LinkedHashMap<>();
+        for (Map<String, Object> tx : transactions) {
+            Long lineId = ((Number) tx.get("sourceDocLineId")).longValue();
+            IssueTxBean line = lines.get(lineId);
+            boolean outgoing = UserConstants.TRANSACTION_TYPE_ITEM_ISSUE_OUT.equals(tx.get("transactionType"));
+            if (line == null || !line.getItemId().equals(((Number) tx.get("itemId")).longValue())
+                    || !line.getBatchCode().equals(tx.get("batchCode"))) {
+                throw new InventoryOperationException("LEDGER_MISMATCH", "领料流水物料或批次不符");
+            }
+            if (outgoing) {
+                if (!line.getMaterialStockId().equals(((Number) tx.get("materialStockId")).longValue())
+                        || !line.getWarehouseId().equals(((Number) tx.get("warehouseId")).longValue())
+                        || !line.getLocationId().equals(((Number) tx.get("locationId")).longValue())
+                        || !line.getAreaId().equals(((Number) tx.get("areaId")).longValue())
+                        || tx.get("relatedTransactionId") != null) {
+                    throw new InventoryOperationException("LEDGER_MISMATCH", "领料出库位置不符");
+                }
+                outIds.put(lineId, ((Number) tx.get("transactionId")).longValue());
+            } else if (((Number) target.get("warehouseId")).longValue()
+                    != ((Number) tx.get("warehouseId")).longValue()
+                    || ((Number) target.get("locationId")).longValue()
+                    != ((Number) tx.get("locationId")).longValue()
+                    || ((Number) target.get("areaId")).longValue()
+                    != ((Number) tx.get("areaId")).longValue()) {
+                throw new InventoryOperationException("LEDGER_MISMATCH", "领料入库位置不符");
+            }
+        }
+        for (Map<String, Object> tx : transactions) {
+            if (UserConstants.TRANSACTION_TYPE_ITEM_ISSUE_IN.equals(tx.get("transactionType"))) {
+                Long lineId = ((Number) tx.get("sourceDocLineId")).longValue();
+                if (!outIds.get(lineId).equals(tx.get("relatedTransactionId"))) {
+                    throw new InventoryOperationException("LEDGER_MISMATCH", "领料出入流水未配对");
+                }
             }
         }
     }

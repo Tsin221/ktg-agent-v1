@@ -44,6 +44,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <resultMap id="IssueTxBeanResult" type="IssueTxBean">
         <result property="materialStockId" column="material_stock_id"></result>
+        <result property="referenceValid" column="reference_valid"></result>
+        <result property="availableQuantity" column="available_quantity"></result>
         <result property="itemId" column="item_id"></result>
         <result property="itemCode" column="item_code"></result>
         <result property="itemName" column="item_name"></result>
@@ -122,13 +124,29 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <select id="getTxBeans" parameterType="Long" resultMap="IssueTxBeanResult">
         SELECT irl.material_stock_id, irl.`item_id`,irl.`item_code`,irl.`item_name`,irl.`specification`,irl.`unit_of_measure`,irl.`batch_code`,
-               irl.`warehouse_id`,irl.`warehouse_code`,irl.`warehouse_name`,irl.`location_id`,irl.`location_code`,irl.`location_name`,irl.`area_id`,irl.`area_code`,irl.`area_name`,
+               irl.`warehouse_id`,w.`warehouse_code`,w.`warehouse_name`,
+               irl.`location_id`,l.`location_code`,l.`location_name`,
+               irl.`area_id`,a.`area_code`,a.`area_name`,
+               st.vendor_id, st.vendor_code, st.vendor_name, st.vendor_nick,
                'ISSUE' AS source_doc_type,ir.`issue_id` AS source_doc_id,ir.`issue_code` AS source_doc_code,irl.`line_id` AS source_doc_line_id,
                irl.`quantity_issued` AS transaction_quantity,ir.workorder_id,ir.workorder_code,
-               ir.`create_by`,ir.`create_time`,ir.`update_by`,ir.`update_time`
+               ir.`create_by`,ir.`create_time`,ir.`update_by`,ir.`update_time`, st.quantity_onhand AS available_quantity,
+               CASE WHEN st.material_stock_id IS NOT NULL AND st.item_id = irl.item_id
+                 AND BINARY st.unit_of_measure = BINARY irl.unit_of_measure
+                 AND BINARY st.batch_code = BINARY irl.batch_code
+                 AND st.warehouse_id = irl.warehouse_id AND st.location_id = irl.location_id
+                 AND st.area_id = irl.area_id AND m.item_id IS NOT NULL
+                 AND m.item_code = irl.item_code AND m.unit_of_measure = irl.unit_of_measure
+                 AND w.warehouse_id IS NOT NULL AND l.location_id IS NOT NULL
+                 AND a.area_id IS NOT NULL THEN 1 ELSE 0 END AS reference_valid
         FROM wm_issue_header ir
                  LEFT JOIN wm_issue_line irl
                            ON ir.issue_id = irl.`issue_id`
+                 LEFT JOIN wm_material_stock st ON st.material_stock_id = irl.material_stock_id
+                 LEFT JOIN md_item m ON m.item_id = irl.item_id
+                 LEFT JOIN wm_warehouse w ON w.warehouse_id = irl.warehouse_id
+                 LEFT JOIN wm_storage_location l ON l.location_id = irl.location_id AND l.warehouse_id = w.warehouse_id
+                 LEFT JOIN wm_storage_area a ON a.area_id = irl.area_id AND a.location_id = l.location_id
         WHERE ir.`issue_id` = #{issueId}
     </select>
         

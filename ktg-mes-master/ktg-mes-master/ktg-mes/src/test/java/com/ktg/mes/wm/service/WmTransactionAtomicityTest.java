@@ -83,6 +83,12 @@ class WmTransactionAtomicityTest {
         jdbc.execute("DELETE FROM wm_material_stock");
         jdbc.execute("DELETE FROM wm_item_recpt");
         jdbc.execute("DELETE FROM wm_issue_header");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS wm_warehouse (warehouse_id BIGINT PRIMARY KEY, warehouse_code VARCHAR(64), warehouse_name VARCHAR(64))");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS wm_storage_location (location_id BIGINT PRIMARY KEY, warehouse_id BIGINT, location_code VARCHAR(64), location_name VARCHAR(64))");
+        jdbc.execute("CREATE TABLE IF NOT EXISTS wm_storage_area (area_id BIGINT PRIMARY KEY, location_id BIGINT, area_code VARCHAR(64), area_name VARCHAR(64))");
+        jdbc.update("INSERT INTO wm_warehouse (warehouse_id, warehouse_code, warehouse_name) VALUES (202, 'XBK_VIRTUAL', '线边库') ON DUPLICATE KEY UPDATE warehouse_code=VALUES(warehouse_code)");
+        jdbc.update("INSERT INTO wm_storage_location (location_id, warehouse_id, location_code, location_name) VALUES (302, 202, 'XBKKQ_VIRTUAL', '线边库区') ON DUPLICATE KEY UPDATE warehouse_id=VALUES(warehouse_id)");
+        jdbc.update("INSERT INTO wm_storage_area (area_id, location_id, area_code, area_name) VALUES (402, 302, 'XBKKW_VIRTUAL', '线边库位') ON DUPLICATE KEY UPDATE location_id=VALUES(location_id)");
         LoginUser login = new LoginUser();
         SysUser user = new SysUser();
         user.setUserName("s304-operator");
@@ -346,8 +352,53 @@ class WmTransactionAtomicityTest {
         assertEquals("succeeded", jdbc.queryForObject("SELECT operation_status FROM wm_inventory_operation", String.class));
     }
 
+    @Test
+    void issueMovesTwoBatchesFromDifferentSourceLocations() {
+        service.processTransaction(transaction(1, "5.00", 10));
+        WmTransaction secondStock = transaction(1, "3.00", 11);
+        secondStock.setBatchCode("B2");
+        secondStock.setLocationId(303L);
+        secondStock.setAreaId(403L);
+        service.processTransaction(secondStock);
+        long firstId = jdbc.queryForObject(
+                "SELECT material_stock_id FROM wm_material_stock WHERE batch_code='B1'", Long.class);
+        long secondId = jdbc.queryForObject(
+                "SELECT material_stock_id FROM wm_material_stock WHERE batch_code='B2'", Long.class);
+        jdbc.update("INSERT INTO wm_issue_header(issue_id, issue_code, status) VALUES (2, 'S306-ISSUE', 'APPROVED')");
+        IssueTxBean first = issueLine(firstId);
+        IssueTxBean second = issueLine(secondId);
+        second.setSourceDocLineId(22L);
+        second.setBatchCode("B2");
+        second.setLocationId(303L);
+        second.setAreaId(403L);
+        second.setAvailableQuantity(new BigDecimal("3.00"));
+        second.setTransactionQuantity(new BigDecimal("1.00"));
+        Mockito.when(issueLines.getTxBeans(2L)).thenReturn(java.util.Arrays.asList(first, second));
+        WmWarehouse warehouse = new WmWarehouse();
+        warehouse.setWarehouseId(202L);
+        WmStorageLocation location = new WmStorageLocation();
+        location.setLocationId(302L);
+        WmStorageArea area = new WmStorageArea();
+        area.setAreaId(402L);
+        Mockito.when(warehouses.selectWmWarehouseByWarehouseCode(Mockito.anyString())).thenReturn(warehouse);
+        Mockito.when(locations.selectWmStorageLocationByLocationCode(Mockito.anyString())).thenReturn(location);
+        Mockito.when(areas.selectWmStorageAreaByAreaCode(Mockito.anyString())).thenReturn(area);
+
+        AjaxResult result = operationService.executeIssue(2L, "f7de724d-8a68-4327-9944-cb70273f02bf");
+        assertEquals(200, result.get("code"));
+        assertEquals(4, jdbc.queryForObject("SELECT COUNT(*) FROM wm_transaction WHERE source_doc_type='ISSUE'", Integer.class));
+        assertEquals(0, new BigDecimal("3.00").compareTo(jdbc.queryForObject(
+                "SELECT quantity_onhand FROM wm_material_stock WHERE material_stock_id=?", BigDecimal.class, firstId)));
+        assertEquals(0, new BigDecimal("2.00").compareTo(jdbc.queryForObject(
+                "SELECT quantity_onhand FROM wm_material_stock WHERE material_stock_id=?", BigDecimal.class, secondId)));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM wm_material_stock WHERE warehouse_id=202", Integer.class));
+        assertEquals(4, jdbc.queryForObject("SELECT COUNT(*) FROM wm_inventory_operation_transaction", Integer.class));
+    }
+
     private IssueTxBean issueLine(long sourceStockId) {
         IssueTxBean line = new IssueTxBean();
+        line.setReferenceValid(true);
+        line.setAvailableQuantity(new BigDecimal("5.00"));
         line.setMaterialStockId(sourceStockId);
         line.setItemId(101L);
         line.setItemCode("S304-ITEM");

@@ -1,6 +1,7 @@
 package com.ktg.mes.wm.mapper;
 
 import com.ktg.mes.wm.domain.InventoryOperationReceipt;
+import com.ktg.common.constant.UserConstants;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -97,6 +98,25 @@ public class InventoryOperationMapper {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    public Map<String, Object> readIssueDocument(Long documentId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT issue_code AS document_code, status, version FROM wm_issue_header WHERE issue_id = ?",
+                documentId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    public Map<String, Object> issueTarget() {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT w.warehouse_id AS warehouseId, w.warehouse_name AS warehouseName, "
+                + "l.location_id AS locationId, l.location_name AS locationName, "
+                + "a.area_id AS areaId, a.area_name AS areaName "
+                + "FROM wm_warehouse w JOIN wm_storage_location l ON l.warehouse_id = w.warehouse_id "
+                + "JOIN wm_storage_area a ON a.location_id = l.location_id "
+                + "WHERE w.warehouse_code = ? AND l.location_code = ? AND a.area_code = ?",
+                UserConstants.VIRTUAL_WH, UserConstants.VIRTUAL_WS, UserConstants.VIRTUAL_WA);
+        return rows.size() == 1 ? rows.get(0) : null;
+    }
+
     public int finishDocument(String documentType, Long documentId) {
         String sql = "IR".equals(documentType)
                 ? "UPDATE wm_item_recpt SET status = 'FINISHED', version = version + 1 WHERE recpt_id = ? AND status = 'APPROVED'"
@@ -107,7 +127,8 @@ public class InventoryOperationMapper {
     public List<Map<String, Object>> transactions(String documentType, Long documentId) {
         return jdbc.query("SELECT transaction_id, transaction_type, transaction_flag, "
                 + "transaction_quantity, source_doc_type, source_doc_id, source_doc_line_id, "
-                + "unit_of_measure, related_transaction_id FROM wm_transaction "
+                + "unit_of_measure, related_transaction_id, material_stock_id, item_id, batch_code, "
+                + "warehouse_id, location_id, area_id FROM wm_transaction "
                 + "WHERE source_doc_type = ? AND source_doc_id = ? ORDER BY transaction_id",
                 (rs, row) -> {
                     Map<String, Object> transaction = new LinkedHashMap<>();
@@ -119,6 +140,12 @@ public class InventoryOperationMapper {
                     transaction.put("sourceDocId", rs.getLong("source_doc_id"));
                     transaction.put("sourceDocLineId", rs.getLong("source_doc_line_id"));
                     transaction.put("unitOfMeasure", rs.getString("unit_of_measure"));
+                    transaction.put("materialStockId", rs.getLong("material_stock_id"));
+                    transaction.put("itemId", rs.getLong("item_id"));
+                    transaction.put("batchCode", rs.getString("batch_code"));
+                    transaction.put("warehouseId", rs.getLong("warehouse_id"));
+                    transaction.put("locationId", rs.getLong("location_id"));
+                    transaction.put("areaId", rs.getLong("area_id"));
                     long related = rs.getLong("related_transaction_id");
                     transaction.put("relatedTransactionId", rs.wasNull() ? null : related);
                     return transaction;

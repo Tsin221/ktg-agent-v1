@@ -112,11 +112,11 @@ public class StorageCoreServiceImpl implements IStorageCoreService {
             //由于是新增的库存记录所以需要将查询出来的库存记录ID置为空
             transaction_in.setMaterialStockId(null);
 
-            //使用出库事务的供应商初始化入库事务的供应商
-            transaction_in.setVendorId(transaction_out.getVendorId());
-            transaction_in.setVendorCode(transaction_out.getVendorCode());
-            transaction_in.setVendorName(transaction_out.getVendorName());
-            transaction_in.setVendorNick(transaction_out.getVendorNick());
+            // 来源库存的供应商维度必须随同一批物料转入线边库。
+            transaction_in.setVendorId(line.getVendorId());
+            transaction_in.setVendorCode(line.getVendorCode());
+            transaction_in.setVendorName(line.getVendorName());
+            transaction_in.setVendorNick(line.getVendorNick());
 
             //这里使用系统默认生成的线边库初始化对应的入库仓库、库区、库位
             WmWarehouse warehouse = wmWarehouseService.selectWmWarehouseByWarehouseCode(UserConstants.VIRTUAL_WH);

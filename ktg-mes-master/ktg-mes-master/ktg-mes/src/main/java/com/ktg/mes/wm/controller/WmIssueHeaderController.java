@@ -90,6 +90,21 @@ public class WmIssueHeaderController extends BaseController
         return AjaxResult.success(wmIssueHeaderService.selectWmIssueHeaderByIssueId(issueId));
     }
 
+    @PreAuthorize("@ss.hasPermi('mes:wm:issueheader:edit')")
+    @GetMapping("/{issueId}/execution-preview")
+    public ResponseEntity<AjaxResult> executionPreview(@PathVariable Long issueId) {
+        AjaxResult result = inventoryOperationService.previewIssue(issueId);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
+    @PreAuthorize("@ss.hasPermi('mes:wm:issueheader:edit')")
+    @GetMapping("/{issueId}/operations/{operationId}")
+    public ResponseEntity<AjaxResult> executionResult(@PathVariable Long issueId,
+                                                       @PathVariable String operationId) {
+        AjaxResult result = inventoryOperationService.issueResult(issueId, operationId);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
     /**
      * 新增生产领料单头
      */

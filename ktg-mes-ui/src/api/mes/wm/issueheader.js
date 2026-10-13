@@ -56,11 +56,23 @@ export function delIssueheader(issueId) {
   })
 }
 
-//执行出库
-export function execute(issueId, version) {
+export function previewExecution(issueId) {
+  return request({ url: '/mes/wm/issueheader/' + issueId + '/execution-preview', method: 'get' })
+}
+
+export function getExecutionResult(issueId, operationId) {
+  return request({ url: '/mes/wm/issueheader/' + issueId + '/operations/' + operationId, method: 'get' })
+}
+
+//执行领料
+export function execute(issueId, version, operationId) {
   return request({
     url: '/mes/wm/issueheader/' + issueId,
     method: 'put',
-    headers: version == null ? {} : { 'X-Document-Version': version }
+    headers: {
+      'X-Document-Version': version,
+      'X-Operation-Id': operationId,
+      repeatSubmit: false
+    }
   })
 }

@@ -2,6 +2,7 @@ package com.ktg.mes.wm.controller;
 
 import com.ktg.common.core.domain.AjaxResult;
 import com.ktg.mes.wm.service.InventoryOperationService;
+import com.ktg.framework.web.service.PermissionService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -15,14 +16,21 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/mes/wm/inventory-operations")
 public class InventoryOperationController {
     @Autowired private InventoryOperationService service;
+    @Autowired private PermissionService permissions;
 
-    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit') or @ss.hasPermi('mes:wm:issueheader:edit')")
     @PostMapping
     public ResponseEntity<AjaxResult> execute(@RequestBody Command command) {
         AjaxResult result;
-        if (!"ITEM_RECEIPT_EXECUTE".equals(command.getActionType())) {
+        if (!"ITEM_RECEIPT_EXECUTE".equals(command.getActionType())
+                && !"PRODUCTION_ISSUE_EXECUTE".equals(command.getActionType())) {
             result = AjaxResult.error(422, "此入口暂不支持该库存动作")
                     .put("errorCode", "UNSUPPORTED_ACTION");
+        } else if (("ITEM_RECEIPT_EXECUTE".equals(command.getActionType())
+                && !permissions.hasPermi("mes:wm:itemrecpt:edit"))
+                || ("PRODUCTION_ISSUE_EXECUTE".equals(command.getActionType())
+                && !permissions.hasPermi("mes:wm:issueheader:edit"))) {
+            result = AjaxResult.error(403, "没有库存动作权限").put("errorCode", "FORBIDDEN");
         } else if (command.getOperationId() == null || command.getOperationId().trim().isEmpty()) {
             result = AjaxResult.error(422, "操作 ID 不能为空")
                     .put("errorCode", "INVALID_OPERATION_ID");
