@@ -45,11 +45,29 @@ export function confirmItemrecpt(data) {
 }
 
 //执行入库
-export function execute(recptId, version) {
+export function previewExecution(recptId) {
+  return request({
+    url: '/mes/wm/itemrecpt/' + recptId + '/execution-preview',
+    method: 'get'
+  })
+}
+
+export function getExecutionResult(recptId, operationId) {
+  return request({
+    url: '/mes/wm/itemrecpt/' + recptId + '/operations/' + operationId,
+    method: 'get'
+  })
+}
+
+export function execute(recptId, version, operationId) {
   return request({
     url: '/mes/wm/itemrecpt/' + recptId,
     method: 'put',
-    headers: version == null ? {} : { 'X-Document-Version': version }
+    headers: {
+      'X-Document-Version': version,
+      'X-Operation-Id': operationId,
+      repeatSubmit: false
+    }
   })
 }
 

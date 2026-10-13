@@ -239,6 +239,7 @@ class WmTransactionAtomicityTest {
         line.setLocationId(301L);
         line.setAreaId(401L);
         line.setSourceDocType("IR");
+        line.setReferenceValid(true);
         line.setSourceDocId(1L);
         line.setSourceDocCode("S304-IR");
         line.setSourceDocLineId(11L);
@@ -252,6 +253,51 @@ class WmTransactionAtomicityTest {
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM wm_transaction", Integer.class));
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM wm_inventory_operation_transaction", Integer.class));
         assertEquals("succeeded", jdbc.queryForObject("SELECT operation_status FROM wm_inventory_operation", String.class));
+    }
+
+    @Test
+    void twoReceiptLinesInDifferentBatchesCommitOnceAndReplay() {
+        jdbc.update("INSERT INTO wm_item_recpt(recpt_id, recpt_code, status) VALUES (1, 'S305-IR', 'APPROVED')");
+        ItemRecptTxBean first = new ItemRecptTxBean();
+        first.setItemId(101L);
+        first.setItemCode("S304-ITEM");
+        first.setUnitOfMeasure("pcs");
+        first.setBatchCode("B1");
+        first.setWarehouseId(201L);
+        first.setLocationId(301L);
+        first.setAreaId(401L);
+        first.setSourceDocType("IR");
+        first.setSourceDocId(1L);
+        first.setSourceDocCode("S305-IR");
+        first.setSourceDocLineId(11L);
+        first.setReferenceValid(true);
+        first.setTransactionQuantity(new BigDecimal("2.00"));
+        ItemRecptTxBean second = new ItemRecptTxBean();
+        second.setItemId(101L);
+        second.setItemCode("S304-ITEM");
+        second.setUnitOfMeasure("pcs");
+        second.setBatchCode("B2");
+        second.setWarehouseId(201L);
+        second.setLocationId(301L);
+        second.setAreaId(401L);
+        second.setSourceDocType("IR");
+        second.setSourceDocId(1L);
+        second.setSourceDocCode("S305-IR");
+        second.setSourceDocLineId(12L);
+        second.setReferenceValid(true);
+        second.setTransactionQuantity(new BigDecimal("1.50"));
+        Mockito.when(receiptLines.getTxBeans(1L)).thenReturn(java.util.Arrays.asList(first, second));
+
+        String id = "54bb4ad7-00b1-4370-9319-0439cc70b67d";
+        assertEquals(200, operationService.executeReceipt(1L, id).get("code"));
+        assertEquals(200, operationService.executeReceipt(1L, id).get("code"));
+        assertEquals("DOCUMENT_ALREADY_EXECUTED", operationService.executeReceipt(1L,
+                "54bb4ad7-00b1-4370-9319-0439cc70b67e").get("errorCode"));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM wm_material_stock", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM wm_transaction WHERE source_doc_type='IR'", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM wm_inventory_operation_transaction", Integer.class));
+        assertEquals(0, new BigDecimal("3.50").compareTo(jdbc.queryForObject(
+                "SELECT SUM(quantity_onhand) FROM wm_material_stock", BigDecimal.class)));
     }
 
     @Test

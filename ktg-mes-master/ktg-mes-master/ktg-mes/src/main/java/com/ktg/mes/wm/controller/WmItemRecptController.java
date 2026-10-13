@@ -91,6 +91,21 @@ public class WmItemRecptController extends BaseController
         return AjaxResult.success(wmItemRecptService.selectWmItemRecptByRecptId(recptId));
     }
 
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @GetMapping("/{recptId}/execution-preview")
+    public ResponseEntity<AjaxResult> executionPreview(@PathVariable Long recptId) {
+        AjaxResult result = inventoryOperationService.previewReceipt(recptId);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @GetMapping("/{recptId}/operations/{operationId}")
+    public ResponseEntity<AjaxResult> executionResult(@PathVariable Long recptId,
+                                                       @PathVariable String operationId) {
+        AjaxResult result = inventoryOperationService.receiptResult(recptId, operationId);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
     /**
      * 新增物料入库单
      */

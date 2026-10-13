@@ -80,6 +80,12 @@ public class ItemRecptTxBean extends BaseEntity {
     /** 单据行ID */
     private Long sourceDocLineId;
 
+    /** Whether referenced item and storage hierarchy still match the line. */
+    private Boolean referenceValid;
+
+    public Boolean getReferenceValid() { return referenceValid; }
+    public void setReferenceValid(Boolean referenceValid) { this.referenceValid = referenceValid; }
+
     /** 事务数量 */
     private BigDecimal transactionQuantity;
 

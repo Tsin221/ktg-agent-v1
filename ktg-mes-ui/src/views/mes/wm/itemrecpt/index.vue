@@ -255,7 +255,7 @@
 </template>
 
 <script>
-import { listItemrecpt, getItemrecpt, delItemrecpt, addItemrecpt, updateItemrecpt, confirmItemrecpt,execute } from "@/api/mes/wm/itemrecpt";
+import { listItemrecpt, getItemrecpt, delItemrecpt, addItemrecpt, updateItemrecpt, confirmItemrecpt, execute, previewExecution, getExecutionResult } from "@/api/mes/wm/itemrecpt";
 import {getTreeList} from "@/api/mes/wm/warehouse"
 import {genCode} from "@/api/system/autocode/rule"
 import VendorSelect from "@/components/vendorSelect/single.vue";
@@ -488,14 +488,72 @@ export default {
     },
 
     //执行入库
-    handleExecute(row){
-      const recptIds = row.recptId || this.ids;
-      this.$modal.confirm('确认执行入库？').then(function() {
-        return execute(recptIds, row.version)//执行入库
-      }).then(() => {
-        this.getList();
-        this.$modal.msgSuccess("入库成功");
-      }).catch(() => {});
+    async handleExecute(row){
+      const recptId = row.recptId;
+      const storageKey = 'item-receipt-operation-' + recptId;
+      const pendingId = sessionStorage.getItem(storageKey);
+      if (pendingId) {
+        try {
+          const previous = await getExecutionResult(recptId, pendingId);
+          if (previous.data.operationStatus === 'succeeded') {
+            sessionStorage.removeItem(storageKey);
+            this.getList();
+            this.$modal.msgSuccess('入库已完成，操作 ID：' + pendingId);
+          } else {
+            this.$modal.msgWarning('已有待核实的入库操作，操作 ID：' + pendingId);
+          }
+        } catch (error) {
+          const status = error.data && error.data.data && error.data.data.operationStatus;
+          if (status === 'rejected' || status === 'failed') {
+            sessionStorage.removeItem(storageKey);
+            this.$modal.msgWarning('原入库操作未成功，请刷新单据后重新预览');
+          } else {
+            this.$modal.msgWarning('请先核实原入库操作，操作 ID：' + pendingId);
+          }
+        }
+        return;
+      }
+      try {
+        const response = await previewExecution(recptId);
+        const preview = response.data;
+        const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[char]));
+        const details = preview.additions.map(line =>
+          `${escapeHtml(line.itemCode)} ${escapeHtml(line.itemName)}：${escapeHtml(line.quantity)} ${escapeHtml(line.unitOfMeasure)}，批次 ${escapeHtml(line.batchCode)}，${escapeHtml(line.warehouseName || line.warehouseId)} / ${escapeHtml(line.locationName || line.locationId)} / ${escapeHtml(line.areaName || line.areaId)}`
+        ).join('<br>');
+        await this.$confirm(`<div>单号：${escapeHtml(preview.documentCode)}</div><div>${details}</div><p>确认执行入库？</p>`, '入库预览', {
+          dangerouslyUseHTMLString: true,
+          confirmButtonText: '确认入库',
+          cancelButtonText: '取消',
+          type: 'warning'
+        });
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 15) | 64;
+        bytes[8] = (bytes[8] & 63) | 128;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        const operationId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        sessionStorage.setItem(storageKey, operationId);
+        try {
+          await execute(recptId, preview.documentVersion, operationId);
+        } catch (error) {
+          // A lost response does not tell us whether the database committed.
+        }
+        const result = await getExecutionResult(recptId, operationId);
+        if (result.data.operationStatus === 'succeeded' && result.data.documentStatus === 'FINISHED'
+            && result.data.transactions.length === preview.additions.length) {
+          sessionStorage.removeItem(storageKey);
+          this.getList();
+          this.$modal.msgSuccess('入库成功，操作 ID：' + operationId);
+        } else {
+          this.$modal.msgWarning('入库结果待核实，操作 ID：' + operationId);
+        }
+      } catch (error) {
+        if (sessionStorage.getItem(storageKey)) {
+          this.$modal.msgWarning('入库结果待核实，操作 ID：' + sessionStorage.getItem(storageKey));
+        }
+      }
     },
     /** 保存按钮 */
     saveForm() {

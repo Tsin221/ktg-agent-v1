@@ -84,6 +84,19 @@ public class InventoryOperationMapper {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    public Map<String, Object> readReceiptDocument(Long documentId) {
+        List<Map<String, Object>> rows = jdbc.query(
+                "SELECT recpt_code AS document_code, status, version FROM wm_item_recpt WHERE recpt_id = ?",
+                (rs, row) -> {
+                    Map<String, Object> document = new LinkedHashMap<>();
+                    document.put("document_code", rs.getString("document_code"));
+                    document.put("status", rs.getString("status"));
+                    document.put("version", rs.getLong("version"));
+                    return document;
+                }, documentId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     public int finishDocument(String documentType, Long documentId) {
         String sql = "IR".equals(documentType)
                 ? "UPDATE wm_item_recpt SET status = 'FINISHED', version = version + 1 WHERE recpt_id = ? AND status = 'APPROVED'"
@@ -116,6 +129,11 @@ public class InventoryOperationMapper {
         jdbc.update("INSERT INTO wm_inventory_operation_transaction "
                 + "(operation_id, transaction_id, sequence_no) VALUES (?, ?, ?)",
                 operationId, transactionId, sequence);
+    }
+
+    public int linkedTransactionCount(String operationId) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM wm_inventory_operation_transaction WHERE operation_id = ?",
+                Integer.class, operationId);
     }
 
     public int complete(String operationId, String status, String errorCode, String resultJson) {

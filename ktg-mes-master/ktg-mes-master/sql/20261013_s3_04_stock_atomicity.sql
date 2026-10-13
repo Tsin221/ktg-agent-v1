@@ -7,7 +7,7 @@ SET @s304_has_key := (SELECT COUNT(*) FROM information_schema.columns
     WHERE table_schema = DATABASE() AND table_name = 'wm_material_stock'
       AND column_name = 'stock_dimension_key');
 SET @s304_sql := IF(@s304_has_key = 0,
-    'ALTER TABLE wm_material_stock ADD COLUMN stock_dimension_key CHAR(64) GENERATED ALWAYS AS (SHA2(CONCAT_WS(CHAR(31), item_id, warehouse_id, COALESCE(location_id,0), COALESCE(area_id,0), COALESCE(vendor_id,0), COALESCE(workorder_id,0), HEX(TRIM(COALESCE(unit_of_measure,''))), HEX(TRIM(COALESCE(batch_code,'')))), 256)) STORED',
+    'ALTER TABLE wm_material_stock ADD COLUMN stock_dimension_key CHAR(64) GENERATED ALWAYS AS (SHA2(CONCAT_WS(CHAR(31), item_id, warehouse_id, COALESCE(location_id,0), COALESCE(area_id,0), COALESCE(vendor_id,0), COALESCE(workorder_id,0), HEX(TRIM(COALESCE(unit_of_measure,''''))), HEX(TRIM(COALESCE(batch_code,'''')))), 256)) STORED',
     'SELECT 1');
 PREPARE s304_stmt FROM @s304_sql;
 EXECUTE s304_stmt;

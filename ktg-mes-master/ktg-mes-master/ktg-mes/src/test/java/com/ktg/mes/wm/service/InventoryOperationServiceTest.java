@@ -217,12 +217,17 @@ class InventoryOperationServiceTest {
 
         String id = "2fd58fc8-148d-4bde-9083-86b6c7a46c5b";
         AjaxResult first = service.executeReceipt(1L, id);
+        AjaxResult queried = service.receiptResult(1L, id);
         AjaxResult replay = service.executeReceipt(1L, id);
+        AjaxResult explicitReplay = service.execute("ITEM_RECEIPT_EXECUTE", 1L, id, null);
         AjaxResult another = service.executeReceipt(1L, "2fd58fc8-148d-4bde-9083-86b6c7a46c5c");
         AjaxResult conflicting = service.executeIssue(2L, id);
 
         assertEquals(200, first.get("code"));
+        assertEquals(200, queried.get("code"));
+        assertEquals("succeeded", data(queried).get("operationStatus"));
         assertEquals(200, replay.get("code"));
+        assertEquals(200, explicitReplay.get("code"));
         assertEquals(Boolean.TRUE, data(replay).get("replayed"));
         assertEquals(409, another.get("code"));
         assertEquals(id, data(another).get("existingOperationId"));
@@ -236,6 +241,52 @@ class InventoryOperationServiceTest {
                 "SELECT status FROM wm_item_recpt WHERE recpt_id = 1", String.class));
         assertNotNull(jdbc.queryForObject("SELECT result_json FROM wm_inventory_operation WHERE operation_id = ?",
                 String.class, id));
+    }
+
+    @Test
+    void previewContainsBothServerLinesAndRequiresCurrentVersion() {
+        ItemRecptTxBean first = receiptLine();
+        ItemRecptTxBean second = receiptLine();
+        second.setSourceDocLineId(12L);
+        second.setBatchCode("BATCH-2");
+        second.setTransactionQuantity(new BigDecimal("1.50"));
+        Mockito.when(receipts.getTxBeans(1L)).thenReturn(Arrays.asList(first, second));
+
+        AjaxResult preview = service.previewReceipt(1L);
+        assertEquals(200, preview.get("code"));
+        assertEquals(2, ((List<?>) data(preview).get("additions")).size());
+        assertEquals(0L, data(preview).get("documentVersion"));
+        Mockito.verifyNoInteractions(storage);
+
+        jdbc.update("UPDATE wm_item_recpt SET version = version + 1 WHERE recpt_id = 1");
+        AjaxResult stale = service.executeReceipt(1L,
+                "fd1a272e-6039-444e-a908-153691c982ec", 0L);
+        assertEquals("DOCUMENT_VERSION_CONFLICT", stale.get("errorCode"));
+        assertEquals(0, count("wm_transaction"));
+    }
+
+    @Test
+    void secondReceiptLineFailureRollsBackFirstLine() {
+        ItemRecptTxBean first = receiptLine();
+        ItemRecptTxBean second = receiptLine();
+        second.setSourceDocLineId(12L);
+        second.setBatchCode("BATCH-2");
+        Mockito.when(receipts.getTxBeans(1L)).thenReturn(Arrays.asList(first, second));
+        Mockito.doAnswer(call -> {
+            jdbc.update("UPDATE wm_material_stock SET quantity_onhand = quantity_onhand + 2 WHERE material_stock_id = 1");
+            jdbc.update("INSERT INTO wm_transaction(transaction_type, transaction_flag, transaction_quantity, "
+                    + "source_doc_type, source_doc_id, source_doc_line_id, unit_of_measure) "
+                    + "VALUES ('ITEM_RECPT', 1, 2, 'IR', 1, 11, 'pcs')");
+            throw new IllegalStateException("second line failed");
+        }).when(storage).processItemRecpt(anyList());
+
+        AjaxResult result = service.executeReceipt(1L, "ccb8ff6d-b6a6-4677-922f-bf87fcbbd44e");
+        assertEquals("EXECUTION_FAILED", result.get("errorCode"));
+        assertEquals(0, count("wm_transaction"));
+        assertEquals(0, count("wm_inventory_operation_transaction"));
+        assertEquals("APPROVED", jdbc.queryForObject("SELECT status FROM wm_item_recpt WHERE recpt_id=1", String.class));
+        assertEquals(0, new BigDecimal("10.00").compareTo(jdbc.queryForObject(
+                "SELECT quantity_onhand FROM wm_material_stock WHERE material_stock_id=1", BigDecimal.class)));
     }
 
     @Test
@@ -270,6 +321,8 @@ class InventoryOperationServiceTest {
     private ItemRecptTxBean receiptLine() {
         ItemRecptTxBean line = new ItemRecptTxBean();
         line.setSourceDocLineId(11L);
+        line.setSourceDocType("IR");
+        line.setReferenceValid(true);
         line.setSourceDocId(1L);
         line.setItemId(3L);
         line.setItemCode("ITEM-3");

@@ -62,6 +62,7 @@
         <result property="sourceDocId" column="source_doc_id"></result>
         <result property="sourceDocCode" column="source_doc_code"></result>
         <result property="sourceDocLineId" column="source_doc_line_id"></result>
+        <result property="referenceValid" column="reference_valid"></result>
         <result property="transactionQuantity" column="transaction_quantity"></result>
         <result property="recptDate" column="recpt_date"></result>
         <result property="expireDate" column="expire_date"></result>
@@ -119,10 +120,20 @@
             ir.`vendor_id`,ir.`vendor_code`,ir.`vendor_name`,ir.`vendor_nick`,
             'IR' AS source_doc_type,ir.`recpt_id` AS source_doc_id,ir.`recpt_code` AS source_doc_code,irl.`line_id` AS source_doc_line_id,
             irl.`quantity_recived` AS transaction_quantity,ir.recpt_date, irl.`expire_date`,
-            ir.`create_by`,ir.`create_time`,ir.`update_by`,ir.`update_time`
+            ir.`create_by`,ir.`create_time`,ir.`update_by`,ir.`update_time`,
+            CASE WHEN m.item_id IS NOT NULL AND m.item_code = irl.item_code
+                AND m.unit_of_measure = irl.unit_of_measure
+                AND w.warehouse_id IS NOT NULL AND l.location_id IS NOT NULL
+                AND a.area_id IS NOT NULL THEN 1 ELSE 0 END AS reference_valid
         FROM wm_item_recpt ir
            LEFT JOIN wm_item_recpt_line irl
            ON ir.recpt_id = irl.`recpt_id`
+           LEFT JOIN md_item m ON m.item_id = irl.item_id
+           LEFT JOIN wm_warehouse w ON w.warehouse_id = irl.warehouse_id
+           LEFT JOIN wm_storage_location l ON l.location_id = irl.location_id
+                AND l.warehouse_id = w.warehouse_id
+           LEFT JOIN wm_storage_area a ON a.area_id = irl.area_id
+                AND a.location_id = l.location_id
         WHERE ir.`recpt_id` = #{recptId}
     </select>
 
