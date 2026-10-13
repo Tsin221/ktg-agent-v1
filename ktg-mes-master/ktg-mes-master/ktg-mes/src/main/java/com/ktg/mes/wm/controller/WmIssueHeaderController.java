@@ -39,6 +39,7 @@ public class WmIssueHeaderController extends BaseController
 {
     @Autowired
     private InventoryOperationService inventoryOperationService;
+    @Autowired private InventoryDocumentGuard documentGuard;
     @Autowired
     private IWmIssueHeaderService wmIssueHeaderService;
 
@@ -165,13 +166,11 @@ public class WmIssueHeaderController extends BaseController
 	@DeleteMapping("/{issueIds}")
     public AjaxResult remove(@PathVariable Long[] issueIds)
     {
+        for (Long id : new java.util.TreeSet<>(java.util.Arrays.asList(issueIds))) {
+            documentGuard.requireDraft("ISSUE", id);
+        }
         for (long issueId:issueIds
              ) {
-            WmIssueHeader header = wmIssueHeaderService.selectWmIssueHeaderByIssueId(issueId);
-            if(!UserConstants.ORDER_STATUS_PREPARE.equals(header.getStatus())){
-                return AjaxResult.error("只能删除草稿状态的单据!");
-            }
-
             wmIssueLineService.deleteByIssueHeaderId(issueId);
         }
 
@@ -186,8 +185,9 @@ public class WmIssueHeaderController extends BaseController
     @Log(title = "生产领料单头", businessType = BusinessType.UPDATE)
     @PutMapping("/{issueId}")
     public ResponseEntity<AjaxResult> execute(@PathVariable Long issueId,
-                                              @RequestHeader(value = "X-Operation-Id", required = false) String operationId){
-        AjaxResult result = inventoryOperationService.executeIssue(issueId, operationId);
+                                              @RequestHeader(value = "X-Operation-Id", required = false) String operationId,
+                                              @RequestHeader(value = "X-Document-Version", required = false) Long expectedVersion){
+        AjaxResult result = inventoryOperationService.executeIssue(issueId, operationId, expectedVersion);
         return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 

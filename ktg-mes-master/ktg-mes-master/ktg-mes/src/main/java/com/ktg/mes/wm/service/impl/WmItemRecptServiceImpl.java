@@ -6,6 +6,8 @@ import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.DateUtils;
 import com.ktg.common.utils.StringUtils;
 import com.ktg.mes.wm.domain.tx.ItemRecptTxBean;
+import com.ktg.mes.wm.service.InventoryDocumentGuard;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ktg.mes.wm.mapper.WmItemRecptMapper;
@@ -23,6 +25,7 @@ public class WmItemRecptServiceImpl implements IWmItemRecptService
 {
     @Autowired
     private WmItemRecptMapper wmItemRecptMapper;
+    @Autowired private InventoryDocumentGuard documentGuard;
 
     /**
      * 查询物料入库单
@@ -78,10 +81,15 @@ public class WmItemRecptServiceImpl implements IWmItemRecptService
      * @return 结果
      */
     @Override
+    @Transactional
     public int updateWmItemRecpt(WmItemRecpt wmItemRecpt)
     {
+        documentGuard.lockHeaderUpdate("IR", wmItemRecpt.getRecptId(), wmItemRecpt.getVersion(), wmItemRecpt.getStatus());
         wmItemRecpt.setUpdateTime(DateUtils.getNowDate());
-        return wmItemRecptMapper.updateWmItemRecpt(wmItemRecpt);
+        int changed = wmItemRecptMapper.updateWmItemRecpt(wmItemRecpt);
+        if (changed != 1) throw InventoryDocumentGuard.conflict("单据更新失败");
+        documentGuard.bumpVersion("IR", wmItemRecpt.getRecptId());
+        return changed;
     }
 
     /**
@@ -91,8 +99,11 @@ public class WmItemRecptServiceImpl implements IWmItemRecptService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmItemRecptByRecptIds(Long[] recptIds)
     {
+        if (recptIds == null || recptIds.length == 0) throw InventoryDocumentGuard.conflict("单据 ID 无效");
+        for (Long id : new java.util.TreeSet<>(java.util.Arrays.asList(recptIds))) documentGuard.requireDraft("IR", id);
         return wmItemRecptMapper.deleteWmItemRecptByRecptIds(recptIds);
     }
 
@@ -103,8 +114,10 @@ public class WmItemRecptServiceImpl implements IWmItemRecptService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmItemRecptByRecptId(Long recptId)
     {
+        documentGuard.requireDraft("IR", recptId);
         return wmItemRecptMapper.deleteWmItemRecptByRecptId(recptId);
     }
 

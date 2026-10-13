@@ -15,8 +15,10 @@ CREATE TABLE wm_inventory_operation_transaction (
  sequence_no INT NOT NULL, PRIMARY KEY(operation_id, transaction_id),
  UNIQUE(operation_id, sequence_no),
  FOREIGN KEY(operation_id) REFERENCES wm_inventory_operation(operation_id));
-CREATE TABLE wm_item_recpt (recpt_id BIGINT PRIMARY KEY, recpt_code VARCHAR(64), status VARCHAR(64));
-CREATE TABLE wm_issue_header (issue_id BIGINT PRIMARY KEY, issue_code VARCHAR(64), status VARCHAR(64));
+CREATE TABLE wm_item_recpt (recpt_id BIGINT PRIMARY KEY, recpt_code VARCHAR(64), status VARCHAR(64), version BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE wm_issue_header (issue_id BIGINT PRIMARY KEY, issue_code VARCHAR(64), status VARCHAR(64), version BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE wm_item_recpt_line (line_id BIGINT PRIMARY KEY, recpt_id BIGINT NOT NULL);
+CREATE TABLE wm_issue_line (line_id BIGINT PRIMARY KEY, issue_id BIGINT NOT NULL);
 CREATE TABLE wm_material_stock (material_stock_id BIGINT PRIMARY KEY, quantity_onhand DECIMAL(12,2));
 CREATE TABLE wm_transaction (
  transaction_id BIGINT AUTO_INCREMENT PRIMARY KEY, transaction_type VARCHAR(64),

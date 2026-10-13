@@ -491,7 +491,7 @@ export default {
     handleExecute(row){
       const recptIds = row.recptId || this.ids;
       this.$modal.confirm('确认执行入库？').then(function() {
-        return execute(recptIds)//执行入库
+        return execute(recptIds, row.version)//执行入库
       }).then(() => {
         this.getList();
         this.$modal.msgSuccess("入库成功");

@@ -592,7 +592,7 @@ export default {
     handleExecute(row){
       const issueIds = row.issueId || this.ids;
       this.$modal.confirm('确认执行出库？').then(function() {
-        return execute(issueIds)//执行入库
+        return execute(issueIds, row.version)//执行出库
       }).then(() => {
         this.getList();
         this.$modal.msgSuccess("出库成功");

@@ -40,6 +40,7 @@ public class WmItemRecptController extends BaseController
 {
     @Autowired
     private InventoryOperationService inventoryOperationService;
+    @Autowired private InventoryDocumentGuard documentGuard;
     @Autowired
     private IWmItemRecptService wmItemRecptService;
 
@@ -127,7 +128,9 @@ public class WmItemRecptController extends BaseController
     @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
     @Log(title = "物料入库单", businessType = BusinessType.UPDATE)
     @PutMapping("/confirm")
+    @Transactional
     public AjaxResult confirm(@RequestBody WmItemRecpt wmItemRecpt){
+        documentGuard.lockEditable("IR", wmItemRecpt.getRecptId(), wmItemRecpt.getVersion());
         //检查有没有入库单行
         WmItemRecptLine param = new WmItemRecptLine();
         param.setRecptId(wmItemRecpt.getRecptId());
@@ -191,8 +194,9 @@ public class WmItemRecptController extends BaseController
     @Log(title = "物料入库单", businessType = BusinessType.UPDATE)
     @PutMapping("/{recptId}")
     public ResponseEntity<AjaxResult> execute(@PathVariable Long recptId,
-                                              @RequestHeader(value = "X-Operation-Id", required = false) String operationId){
-        AjaxResult result = inventoryOperationService.executeReceipt(recptId, operationId);
+                                              @RequestHeader(value = "X-Operation-Id", required = false) String operationId,
+                                              @RequestHeader(value = "X-Document-Version", required = false) Long expectedVersion){
+        AjaxResult result = inventoryOperationService.executeReceipt(recptId, operationId, expectedVersion);
         return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 
@@ -206,14 +210,12 @@ public class WmItemRecptController extends BaseController
 	@DeleteMapping("/{recptIds}")
     public AjaxResult remove(@PathVariable Long[] recptIds)
     {
+        for (Long id : new java.util.TreeSet<>(java.util.Arrays.asList(recptIds))) {
+            documentGuard.requireDraft("IR", id);
+        }
         for (Long id:
                 recptIds
              ) {
-            WmItemRecpt itemRecpt = wmItemRecptService.selectWmItemRecptByRecptId(id);
-            if(!UserConstants.ORDER_STATUS_PREPARE.equals(itemRecpt.getStatus())){
-                return AjaxResult.error("只能删除草稿状态的单据!");
-            }
-
             wmItemRecptLineService.deleteByRecptId(id);
         }
 

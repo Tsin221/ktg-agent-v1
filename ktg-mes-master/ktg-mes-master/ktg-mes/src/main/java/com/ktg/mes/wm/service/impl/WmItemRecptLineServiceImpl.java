@@ -6,6 +6,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ktg.mes.wm.mapper.WmItemRecptLineMapper;
 import com.ktg.mes.wm.domain.WmItemRecptLine;
+import com.ktg.mes.wm.service.InventoryDocumentGuard;
+import org.springframework.transaction.annotation.Transactional;
 import com.ktg.mes.wm.service.IWmItemRecptLineService;
 
 /**
@@ -19,6 +21,7 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
 {
     @Autowired
     private WmItemRecptLineMapper wmItemRecptLineMapper;
+    @Autowired private InventoryDocumentGuard documentGuard;
 
     /**
      * 查询物料入库单行
@@ -51,10 +54,14 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
      * @return 结果
      */
     @Override
+    @Transactional
     public int insertWmItemRecptLine(WmItemRecptLine wmItemRecptLine)
     {
+        documentGuard.lockLineMutation("IR", wmItemRecptLine.getRecptId(), null);
         wmItemRecptLine.setCreateTime(DateUtils.getNowDate());
-        return wmItemRecptLineMapper.insertWmItemRecptLine(wmItemRecptLine);
+        int changed = wmItemRecptLineMapper.insertWmItemRecptLine(wmItemRecptLine);
+        documentGuard.bumpVersion("IR", wmItemRecptLine.getRecptId());
+        return changed;
     }
 
     /**
@@ -64,10 +71,18 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
      * @return 结果
      */
     @Override
+    @Transactional
     public int updateWmItemRecptLine(WmItemRecptLine wmItemRecptLine)
     {
+        Long parentId = documentGuard.lineParent("IR", wmItemRecptLine.getLineId());
+        documentGuard.lockLineMutation("IR", parentId, wmItemRecptLine.getLineId());
+        if (wmItemRecptLine.getRecptId() != null && !parentId.equals(wmItemRecptLine.getRecptId()))
+            throw InventoryDocumentGuard.conflict("不能更改单据行所属单据");
         wmItemRecptLine.setUpdateTime(DateUtils.getNowDate());
-        return wmItemRecptLineMapper.updateWmItemRecptLine(wmItemRecptLine);
+        int changed = wmItemRecptLineMapper.updateWmItemRecptLine(wmItemRecptLine);
+        if (changed != 1) throw InventoryDocumentGuard.conflict("单据行更新失败");
+        documentGuard.bumpVersion("IR", parentId);
+        return changed;
     }
 
     /**
@@ -77,9 +92,14 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmItemRecptLineByLineIds(Long[] lineIds)
     {
-        return wmItemRecptLineMapper.deleteWmItemRecptLineByLineIds(lineIds);
+        java.util.Set<Long> parents = documentGuard.lockLines("IR", lineIds);
+        int changed = wmItemRecptLineMapper.deleteWmItemRecptLineByLineIds(lineIds);
+        if (changed != lineIds.length) throw InventoryDocumentGuard.conflict("单据行删除冲突");
+        for (Long parent : parents) documentGuard.bumpVersion("IR", parent);
+        return changed;
     }
 
     /**
@@ -89,13 +109,21 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmItemRecptLineByLineId(Long lineId)
     {
-        return wmItemRecptLineMapper.deleteWmItemRecptLineByLineId(lineId);
+        Long parentId = documentGuard.lineParent("IR", lineId);
+        documentGuard.lockLineMutation("IR", parentId, lineId);
+        int changed = wmItemRecptLineMapper.deleteWmItemRecptLineByLineId(lineId);
+        if (changed != 1) throw InventoryDocumentGuard.conflict("单据行删除冲突");
+        documentGuard.bumpVersion("IR", parentId);
+        return changed;
     }
 
     @Override
+    @Transactional
     public int deleteByRecptId(Long recptId) {
+        documentGuard.requireDraft("IR", recptId);
         return wmItemRecptLineMapper.deleteByRecptId(recptId);
     }
 }

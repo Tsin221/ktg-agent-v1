@@ -57,9 +57,10 @@ export function delIssueheader(issueId) {
 }
 
 //执行出库
-export function execute(issueId) {
+export function execute(issueId, version) {
   return request({
     url: '/mes/wm/issueheader/' + issueId,
-    method: 'put'
+    method: 'put',
+    headers: version == null ? {} : { 'X-Document-Version': version }
   })
 }

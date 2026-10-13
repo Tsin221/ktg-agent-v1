@@ -72,12 +72,13 @@ public class InventoryOperationMapper {
 
     public Map<String, Object> lockDocument(String documentType, Long documentId) {
         String sql = "IR".equals(documentType)
-                ? "SELECT recpt_code AS document_code, status FROM wm_item_recpt WHERE recpt_id = ? FOR UPDATE"
-                : "SELECT issue_code AS document_code, status FROM wm_issue_header WHERE issue_id = ? FOR UPDATE";
+                ? "SELECT recpt_code AS document_code, status, version FROM wm_item_recpt WHERE recpt_id = ? FOR UPDATE"
+                : "SELECT issue_code AS document_code, status, version FROM wm_issue_header WHERE issue_id = ? FOR UPDATE";
         List<Map<String, Object>> rows = jdbc.query(sql, (rs, row) -> {
             Map<String, Object> document = new LinkedHashMap<>();
             document.put("document_code", rs.getString("document_code"));
             document.put("status", rs.getString("status"));
+            document.put("version", rs.getLong("version"));
             return document;
         }, documentId);
         return rows.isEmpty() ? null : rows.get(0);
@@ -85,8 +86,8 @@ public class InventoryOperationMapper {
 
     public int finishDocument(String documentType, Long documentId) {
         String sql = "IR".equals(documentType)
-                ? "UPDATE wm_item_recpt SET status = 'FINISHED' WHERE recpt_id = ? AND status = 'APPROVED'"
-                : "UPDATE wm_issue_header SET status = 'FINISHED' WHERE issue_id = ? AND status = 'APPROVED'";
+                ? "UPDATE wm_item_recpt SET status = 'FINISHED', version = version + 1 WHERE recpt_id = ? AND status = 'APPROVED'"
+                : "UPDATE wm_issue_header SET status = 'FINISHED', version = version + 1 WHERE issue_id = ? AND status = 'APPROVED'";
         return jdbc.update(sql, documentId);
     }
 

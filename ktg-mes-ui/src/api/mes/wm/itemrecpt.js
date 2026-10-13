@@ -45,10 +45,11 @@ export function confirmItemrecpt(data) {
 }
 
 //执行入库
-export function execute(recptId) {
+export function execute(recptId, version) {
   return request({
     url: '/mes/wm/itemrecpt/' + recptId,
-    method: 'put'
+    method: 'put',
+    headers: version == null ? {} : { 'X-Document-Version': version }
   })
 }
 

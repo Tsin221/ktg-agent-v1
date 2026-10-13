@@ -6,6 +6,8 @@ import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.DateUtils;
 import com.ktg.common.utils.StringUtils;
 import com.ktg.mes.wm.domain.tx.IssueTxBean;
+import com.ktg.mes.wm.service.InventoryDocumentGuard;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ktg.mes.wm.mapper.WmIssueHeaderMapper;
@@ -23,6 +25,7 @@ public class WmIssueHeaderServiceImpl implements IWmIssueHeaderService
 {
     @Autowired
     private WmIssueHeaderMapper wmIssueHeaderMapper;
+    @Autowired private InventoryDocumentGuard documentGuard;
 
     /**
      * 查询生产领料单头
@@ -78,10 +81,15 @@ public class WmIssueHeaderServiceImpl implements IWmIssueHeaderService
      * @return 结果
      */
     @Override
+    @Transactional
     public int updateWmIssueHeader(WmIssueHeader wmIssueHeader)
     {
+        documentGuard.lockHeaderUpdate("ISSUE", wmIssueHeader.getIssueId(), wmIssueHeader.getVersion(), wmIssueHeader.getStatus());
         wmIssueHeader.setUpdateTime(DateUtils.getNowDate());
-        return wmIssueHeaderMapper.updateWmIssueHeader(wmIssueHeader);
+        int changed = wmIssueHeaderMapper.updateWmIssueHeader(wmIssueHeader);
+        if (changed != 1) throw InventoryDocumentGuard.conflict("单据更新失败");
+        documentGuard.bumpVersion("ISSUE", wmIssueHeader.getIssueId());
+        return changed;
     }
 
     /**
@@ -91,8 +99,11 @@ public class WmIssueHeaderServiceImpl implements IWmIssueHeaderService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmIssueHeaderByIssueIds(Long[] issueIds)
     {
+        if (issueIds == null || issueIds.length == 0) throw InventoryDocumentGuard.conflict("单据 ID 无效");
+        for (Long id : new java.util.TreeSet<>(java.util.Arrays.asList(issueIds))) documentGuard.requireDraft("ISSUE", id);
         return wmIssueHeaderMapper.deleteWmIssueHeaderByIssueIds(issueIds);
     }
 
@@ -103,8 +114,10 @@ public class WmIssueHeaderServiceImpl implements IWmIssueHeaderService
      * @return 结果
      */
     @Override
+    @Transactional
     public int deleteWmIssueHeaderByIssueId(Long issueId)
     {
+        documentGuard.requireDraft("ISSUE", issueId);
         return wmIssueHeaderMapper.deleteWmIssueHeaderByIssueId(issueId);
     }
 

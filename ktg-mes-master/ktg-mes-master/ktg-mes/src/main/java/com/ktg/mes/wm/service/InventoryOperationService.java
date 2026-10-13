@@ -3,6 +3,7 @@ package com.ktg.mes.wm.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ktg.common.core.domain.AjaxResult;
+import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.SecurityUtils;
 import com.ktg.mes.wm.domain.InventoryOperationReceipt;
 import com.ktg.mes.wm.domain.tx.IssueTxBean;
@@ -17,11 +18,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.math.BigDecimal;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
@@ -45,14 +49,27 @@ public class InventoryOperationService {
     @Autowired private PlatformTransactionManager transactionManager;
 
     public AjaxResult executeReceipt(Long documentId, String operationId) {
-        return execute(RECEIPT, documentId, operationId, null);
+        return execute(RECEIPT, documentId, operationId, null, null);
+    }
+
+    public AjaxResult executeReceipt(Long documentId, String operationId, Long expectedVersion) {
+        return execute(RECEIPT, documentId, operationId, null, expectedVersion);
     }
 
     public AjaxResult executeIssue(Long documentId, String operationId) {
-        return execute(ISSUE, documentId, operationId, null);
+        return execute(ISSUE, documentId, operationId, null, null);
+    }
+
+    public AjaxResult executeIssue(Long documentId, String operationId, Long expectedVersion) {
+        return execute(ISSUE, documentId, operationId, null, expectedVersion);
     }
 
     public AjaxResult execute(String actionType, Long documentId, String operationId, String expectedStatus) {
+        return execute(actionType, documentId, operationId, expectedStatus, null);
+    }
+
+    public AjaxResult execute(String actionType, Long documentId, String operationId,
+                              String expectedStatus, Long expectedVersion) {
         final String normalizedExpectedStatus = expectedStatus == null || expectedStatus.trim().isEmpty()
                 ? null : expectedStatus.trim().toUpperCase(Locale.ROOT);
         if (!RECEIPT.equals(actionType) && !ISSUE.equals(actionType)) {
@@ -60,6 +77,9 @@ public class InventoryOperationService {
         }
         if (documentId == null || documentId <= 0) {
             return error(422, "INVALID_DOCUMENT_ID", "单据 ID 无效", null);
+        }
+        if (expectedVersion != null && expectedVersion < 0) {
+            return error(422, "INVALID_DOCUMENT_VERSION", "单据版本无效", null);
         }
         if (operationId == null || operationId.trim().isEmpty()) {
             operationId = UUID.randomUUID().toString();
@@ -76,7 +96,8 @@ public class InventoryOperationService {
         receipt.setActionType(actionType);
         receipt.setDocumentType(documentType);
         receipt.setDocumentId(documentId);
-        receipt.setRequestDigest(digest(actionType, documentType, documentId, normalizedExpectedStatus));
+        receipt.setRequestDigest(digest(actionType, documentType, documentId,
+                normalizedExpectedStatus, expectedVersion));
         receipt.setExecutedById(SecurityUtils.getUserId());
         receipt.setExecutedByName(SecurityUtils.getUsername());
 
@@ -92,7 +113,7 @@ public class InventoryOperationService {
 
         try {
             transaction().execute(status -> {
-                executeReserved(receipt, normalizedExpectedStatus);
+                executeReserved(receipt, normalizedExpectedStatus, expectedVersion);
                 return null;
             });
         } catch (DuplicateKeyException ex) {
@@ -104,7 +125,9 @@ public class InventoryOperationService {
             log.error("Inventory operation {} hit an unrelated unique-key conflict", stableOperationId, ex);
             return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
         } catch (InventoryOperationException ex) {
-            return persistFailure(receipt, "rejected", ex.code, ex.getMessage(), null);
+            return persistFailure(receipt,
+                    "LEDGER_MISMATCH".equals(ex.code) ? "failed" : "rejected",
+                    ex.code, ex.getMessage(), null);
         } catch (RuntimeException ex) {
             log.error("Inventory operation {} failed and was rolled back", stableOperationId, ex);
             return persistFailure(receipt, "failed", "EXECUTION_FAILED", "库存执行失败", null);
@@ -112,7 +135,7 @@ public class InventoryOperationService {
         return replayOrConflict(mapper.find(stableOperationId), receipt, false);
     }
 
-    private void executeReserved(InventoryOperationReceipt receipt, String expectedStatus) {
+    private void executeReserved(InventoryOperationReceipt receipt, String expectedStatus, Long expectedVersion) {
         InventoryOperationReceipt locked = mapper.lock(receipt.getOperationId());
         if (!"executing".equals(locked.getOperationStatus())) {
             throw new InventoryOperationException("RECEIPT_COMMIT_CONFLICT", "回执状态已改变");
@@ -126,11 +149,19 @@ public class InventoryOperationService {
         if (!"APPROVED".equals(status) || (expectedStatus != null && !expectedStatus.equals(status))) {
             throw new InventoryOperationException("DOCUMENT_STATE_CONFLICT", "单据状态不允许执行");
         }
+        if (expectedVersion != null && expectedVersion.longValue() != ((Number) document.get("version")).longValue()) {
+            throw new InventoryOperationException("DOCUMENT_VERSION_CONFLICT", "单据版本已变化，请重新预览");
+        }
+        if (blank((String) document.get("document_code"))) {
+            throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "单据编号不能为空");
+        }
         if (!mapper.transactions(receipt.getDocumentType(), receipt.getDocumentId()).isEmpty()) {
             throw new InventoryOperationException("DOCUMENT_ALREADY_EXECUTED", "已有库存流水的单据不能重新执行");
         }
 
         int expectedTransactionCount;
+        Map<Long, BigDecimal> expectedQuantities = new LinkedHashMap<>();
+        Map<Long, String> expectedUnits = new LinkedHashMap<>();
         if (RECEIPT.equals(receipt.getActionType())) {
             List<ItemRecptTxBean> lines = itemRecptService.getTxBeans(receipt.getDocumentId());
             if (lines == null || lines.isEmpty()) {
@@ -138,9 +169,16 @@ public class InventoryOperationService {
             }
             for (ItemRecptTxBean line : lines) {
                 if (line.getSourceDocLineId() == null || line.getTransactionQuantity() == null
-                        || line.getTransactionQuantity().signum() <= 0) {
+                        || line.getTransactionQuantity().signum() <= 0 || line.getItemId() == null
+                        || blank(line.getItemCode()) || blank(line.getUnitOfMeasure())
+                        || blank(line.getBatchCode()) || line.getWarehouseId() == null
+                        || line.getLocationId() == null || line.getAreaId() == null
+                        || !receipt.getDocumentId().equals(line.getSourceDocId())) {
                     throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "入库单明细无效");
                 }
+                if (expectedQuantities.put(line.getSourceDocLineId(), line.getTransactionQuantity()) != null)
+                    throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "入库单明细 ID 重复");
+                expectedUnits.put(line.getSourceDocLineId(), line.getUnitOfMeasure());
             }
             expectedTransactionCount = lines.size();
             storageCoreService.processItemRecpt(lines);
@@ -151,9 +189,16 @@ public class InventoryOperationService {
             }
             for (IssueTxBean line : lines) {
                 if (line.getSourceDocLineId() == null || line.getTransactionQuantity() == null
-                        || line.getTransactionQuantity().signum() <= 0) {
+                        || line.getTransactionQuantity().signum() <= 0 || line.getMaterialStockId() == null
+                        || line.getItemId() == null || blank(line.getItemCode())
+                        || blank(line.getUnitOfMeasure()) || blank(line.getBatchCode())
+                        || line.getWarehouseId() == null || line.getLocationId() == null
+                        || line.getAreaId() == null || !receipt.getDocumentId().equals(line.getSourceDocId())) {
                     throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单明细无效");
                 }
+                if (expectedQuantities.put(line.getSourceDocLineId(), line.getTransactionQuantity()) != null)
+                    throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "领料单明细 ID 重复");
+                expectedUnits.put(line.getSourceDocLineId(), line.getUnitOfMeasure());
             }
             expectedTransactionCount = lines.size() * 2;
             storageCoreService.processIssue(lines);
@@ -164,6 +209,7 @@ public class InventoryOperationService {
         if (transactions.size() != expectedTransactionCount) {
             throw new InventoryOperationException("LEDGER_MISMATCH", "库存流水数量与单据明细不符");
         }
+        verifyLedger(receipt.getActionType(), transactions, expectedQuantities, expectedUnits);
         if (mapper.finishDocument(receipt.getDocumentType(), receipt.getDocumentId()) != 1) {
             throw new InventoryOperationException("DOCUMENT_STATE_CONFLICT", "单据状态已改变");
         }
@@ -262,9 +308,47 @@ public class InventoryOperationService {
         }
     }
 
-    private String digest(String action, String type, Long id, String expectedStatus) {
+    private boolean blank(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private void verifyLedger(String actionType, List<Map<String, Object>> transactions,
+                              Map<Long, BigDecimal> quantities, Map<Long, String> units) {
+        Set<String> seen = new HashSet<>();
+        for (Map<String, Object> tx : transactions) {
+            Number sourceLineId = (Number) tx.get("sourceDocLineId");
+            if (sourceLineId == null) {
+                throw new InventoryOperationException("LEDGER_MISMATCH", "库存流水缺少来源行");
+            }
+            Long lineId = sourceLineId.longValue();
+            BigDecimal expected = quantities.get(lineId);
+            String type = (String) tx.get("transactionType");
+            BigDecimal actual = (BigDecimal) tx.get("transactionQuantity");
+            int flag = ((Number) tx.get("transactionFlag")).intValue();
+            boolean receipt = RECEIPT.equals(actionType);
+            boolean incoming = UserConstants.TRANSACTION_TYPE_ITEM_RECPT.equals(type)
+                    || UserConstants.TRANSACTION_TYPE_ITEM_ISSUE_IN.equals(type);
+            boolean typeValid = receipt ? UserConstants.TRANSACTION_TYPE_ITEM_RECPT.equals(type)
+                    : UserConstants.TRANSACTION_TYPE_ITEM_ISSUE_OUT.equals(type)
+                      || UserConstants.TRANSACTION_TYPE_ITEM_ISSUE_IN.equals(type);
+            if (expected == null || !typeValid || actual == null
+                    || flag != (incoming ? 1 : -1)
+                    || actual.compareTo(incoming ? expected : expected.negate()) != 0
+                    || !units.get(lineId).equals(tx.get("unitOfMeasure"))
+                    || !seen.add(lineId + ":" + type)) {
+                throw new InventoryOperationException("LEDGER_MISMATCH", "库存流水与单据明细不一致");
+            }
+        }
+        int legs = RECEIPT.equals(actionType) ? 1 : 2;
+        if (seen.size() != quantities.size() * legs) {
+            throw new InventoryOperationException("LEDGER_MISMATCH", "库存流水与单据明细不一致");
+        }
+    }
+
+    private String digest(String action, String type, Long id, String expectedStatus, Long expectedVersion) {
         String canonical = String.join("\n", Arrays.asList(action, type, id.toString(),
                 expectedStatus == null ? "" : expectedStatus.trim()));
+        if (expectedVersion != null) canonical += "\n" + expectedVersion;
         try {
             byte[] bytes = MessageDigest.getInstance("SHA-256")
                     .digest(canonical.getBytes(StandardCharsets.UTF_8));

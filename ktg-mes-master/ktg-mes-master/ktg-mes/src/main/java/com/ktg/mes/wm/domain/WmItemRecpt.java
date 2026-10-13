@@ -100,6 +100,10 @@ public class WmItemRecpt extends BaseEntity
     /** 单据状态 */
     @Excel(name = "单据状态")
     private String status;
+    private Long version;
+
+    public Long getVersion() { return version; }
+    public void setVersion(Long version) { this.version = version; }
 
     /** 预留字段1 */
     private String attr1;
