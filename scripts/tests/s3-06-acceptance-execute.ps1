@@ -35,7 +35,7 @@ try {
     $role = Api 'Post' '/system/role' $admin @{
         roleName = "S3-06 issue $suffix"; roleKey = $roleKey
         roleSort = '99'; dataScope = '1'; status = '0'
-        menuIds = @(2200, 2201); remark = 'S3-06 isolated issue acceptance'
+        menuIds = @(2157, 2158, 2200, 2201); remark = 'S3-06 isolated issue acceptance'
     }
     RequireCode $role 200 'create role'
     $roles = Api 'Get' "/system/role/list?roleKey=$roleKey" $admin
@@ -64,7 +64,9 @@ try {
     RequireCode $grant 200 'grant issue role'
     $authorized = Login $userName $password
     $info = Api 'Get' '/getInfo' $authorized
-    if ('mes:wm:issueheader:edit' -notin @($info.permissions)) { throw 'Edit permission missing' }
+    foreach ($permission in @('mes:wm:issueheader:query', 'mes:wm:issueheader:edit', 'mes:wm:wmstock:list')) {
+        if ($permission -notin @($info.permissions)) { throw "Missing permission: $permission" }
+    }
     $preview = Api 'Get' "/mes/wm/issueheader/$IssueId/execution-preview" $authorized
     RequireCode $preview 200 'authorized preview'
     if ($preview.data.movements.Count -ne 2 -or $preview.data.documentStatus -ne 'APPROVED') {

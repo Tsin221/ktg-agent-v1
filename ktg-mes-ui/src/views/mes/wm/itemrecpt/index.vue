@@ -114,7 +114,7 @@
       <el-table-column label="采购订单号" align="center" prop="poCode" />
       <el-table-column label="单据状态" align="center" prop="status" >
         <template slot-scope="scope">
-          <dict-tag :options="dict.type.mes_itemrecpt_status" :value="scope.row.status"/>
+          <span>{{ receiptStatusLabel(scope.row.status) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="操作" align="center" class-name="small-padding fixed-width">
@@ -349,8 +349,25 @@ export default {
   created() {
     this.getList();
     this.getWarehouseList();
+    this.inventoryChanged = event => {
+      if (event.detail && event.detail.outcome === 'succeeded' && event.detail.action_type === 'ITEM_RECEIPT_EXECUTE') this.getList();
+    };
+    window.addEventListener('ktg:inventory-changed', this.inventoryChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:inventory-changed', this.inventoryChanged);
   },
   methods: {
+    receiptStatusLabel(status) {
+      return {
+        PREPARE: '草稿',
+        APPROVING: '待上架',
+        APPROVED: '已审批',
+        FINISHED: '已完成',
+        CANCELED: '已取消',
+        CONFIRMED: '已确认'
+      }[status] || status || '-'
+    },
     /** 查询物料入库单列表 */
     getList() {
       this.loading = true;

@@ -8,8 +8,10 @@ import os
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.ktg import KTGClient, KTGError
+from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -23,6 +25,9 @@ class Settings:
     ktg_base_url: str
     host: str = "127.0.0.1"
     port: int = 8001
+    inventory_db_path: str = ""
+    enable_item_receipt: bool = False
+    enable_production_issue: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -60,6 +65,9 @@ class Settings:
             ktg_base_url=ktg_base_url,
             host=host,
             port=port,
+            inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
+            enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
+            enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
         )
 
 
@@ -75,6 +83,14 @@ def create_service(settings: Settings) -> QueryService:
             authorization=authorization,
         )
 
+    actions = frozenset(
+        action for action, enabled in (
+            (RECEIPT, settings.enable_item_receipt),
+            (ISSUE, settings.enable_production_issue),
+        ) if enabled
+    )
+    if actions and not Path(settings.inventory_db_path).is_absolute():
+        raise RuntimeError("AGENT_INVENTORY_DB must be an absolute path when inventory actions are enabled")
     return QueryService(
         provider=provider,
         model_config=ModelConfig(
@@ -82,6 +98,8 @@ def create_service(settings: Settings) -> QueryService:
             max_output_tokens=1024,
         ),
         ktg_client_factory=client_factory,
+        inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
+        inventory_actions=actions,
     )
 
 
@@ -97,15 +115,31 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
     server: AgentHTTPServer
 
     def do_GET(self) -> None:
-        if self.path != "/health":
-            self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
+        if self.path.startswith("/agent-api/v1/inventory-operations/"):
+            operation_id = self.path.rsplit("/", 1)[-1]
+            try:
+                response = asyncio.run(self.server.query_service.get_inventory_result(
+                    operation_id=operation_id,
+                    authorization=self.headers.get("Authorization", ""),
+                ))
+            except KTGError as exc:
+                self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+                return
+            except ValueError as exc:
+                self._write_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
+                return
+            self._write_json(HTTPStatus.OK, response)
             return
-        self._write_json(HTTPStatus.OK, {"status": "ok"})
+        if self.path == "/health":
+            self._write_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
 
     def do_POST(self) -> None:
         if self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
+            "/agent-api/v1/inventory-operations/confirm",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
             return
@@ -136,7 +170,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                         authorization=authorization,
                     )
                 )
-            else:
+            elif self.path == "/agent-api/v1/workorder-drafts/confirm":
                 preview_id = payload.get("preview_id")
                 if not isinstance(preview_id, str):
                     raise ValueError("preview_id 必须是文本。")
@@ -146,6 +180,13 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                         authorization=authorization,
                     )
                 )
+            else:
+                operation_id = payload.get("operation_id")
+                if not isinstance(operation_id, str):
+                    raise ValueError("operation_id 必须是文本。")
+                response = asyncio.run(self.server.query_service.confirm_inventory(
+                    operation_id=operation_id, authorization=authorization,
+                ))
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return

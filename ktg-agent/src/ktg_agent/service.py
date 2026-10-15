@@ -22,6 +22,9 @@ from ktg_agent.ktg import (
     build_query_tools,
     build_workorder_tools,
 )
+from ktg_agent.ktg.inventory import (
+    ISSUE, RECEIPT, InventoryStore, build_inventory_tools, inventory_result,
+)
 from ktg_agent.providers.base import ModelConfig, Provider
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
 
@@ -35,6 +38,7 @@ SYSTEM_PROMPT = """你是 KTG MES 的业务助手。
 允许查询产品资料、分仓库存和生产工单，也可以为用户明确要求的工单草稿创建或编辑生成预览。
 创建或编辑前必须调用对应预览工具；产品不唯一时必须让用户按编码选择，不能自行猜测。
 预览工具不会写入。实际写入只能由网页上的确认操作触发，不能要求用户在对话中提供确认令牌，不能声称自己已经写入。
+对于已准备的物料入库单和生产领料单，可以按准确单据编号或 ID 生成只读执行预览；执行只能由网页确认触发，结果必须以持久回执为准。
 库存结果要说明仓库、数量和单位；分页结果必须说明当前返回条数与总数，不能把当前页合计称为全部库存。
 回答使用简洁中文。"""
 
@@ -46,13 +50,18 @@ class QueryService:
         provider: Provider,
         model_config: ModelConfig,
         ktg_client_factory: KTGClientFactory,
+        inventory_store: InventoryStore | None = None,
+        inventory_actions: frozenset[str] = frozenset(),
     ) -> None:
         self._provider = provider
         self._model_config = model_config
         self._ktg_client_factory = ktg_client_factory
         self._preview_store = PreviewStore(ttl_seconds=600)
+        self._inventory_store = inventory_store
+        self._inventory_actions = inventory_actions
         self._registry = ToolRegistry(
-            (*build_query_tools(), *build_workorder_tools(self._preview_store))
+            (*build_query_tools(), *build_workorder_tools(self._preview_store),
+             *(build_inventory_tools(inventory_store, inventory_actions) if inventory_store else ()))
         )
 
     async def query(self, *, message: str, authorization: str) -> JsonObject:
@@ -161,6 +170,38 @@ class QueryService:
             "current_user": username if isinstance(username, str) else "",
             "result": details,
         }
+
+    async def confirm_inventory(self, *, operation_id: str, authorization: str) -> JsonObject:
+        if self._inventory_store is None:
+            raise ValueError("库存操作未启用。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        row = self._inventory_store.get(operation_id, self._identity_key(identity))
+        if row is None or row["action"] not in self._inventory_actions:
+            raise ValueError("库存预览不存在或当前动作未启用。")
+        action = row["action"]
+        name = "ktg_execute_item_receipt" if action == RECEIPT else "ktg_execute_production_issue"
+        call_id = str(uuid4())
+        result = await ToolRunner(self._registry).run(
+            ToolCall(call_id, name, {"operation_id": operation_id}),
+            ToolContext(run_id=str(uuid4()), tool_call_id=call_id, operation_id=operation_id,
+                        identity=identity, ktg_client=client),
+        )
+        return {"result": result.details or {"kind": "inventory_result", "operation_id": operation_id,
+                                               "outcome": "unknown", "label": "库存结果待核实。"}}
+
+    async def get_inventory_result(self, *, operation_id: str, authorization: str) -> JsonObject:
+        if self._inventory_store is None:
+            raise ValueError("库存操作未启用。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        result = await inventory_result(
+            self._inventory_store,
+            ToolContext(run_id=str(uuid4()), tool_call_id=str(uuid4()),
+                        operation_id=operation_id, identity=identity, ktg_client=client),
+            operation_id,
+        )
+        return {"result": result}
 
     @staticmethod
     def _identity_key(identity: JsonObject) -> str:

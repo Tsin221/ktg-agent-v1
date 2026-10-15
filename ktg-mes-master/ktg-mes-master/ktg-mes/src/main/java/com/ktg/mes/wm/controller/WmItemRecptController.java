@@ -98,7 +98,7 @@ public class WmItemRecptController extends BaseController
         return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 
-    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:query') and (@ss.hasPermi('mes:wm:wmstock:list') or @ss.hasPermi('mes:wm:wmstock:query'))")
     @GetMapping("/{recptId}/operations/{operationId}")
     public ResponseEntity<AjaxResult> executionResult(@PathVariable Long recptId,
                                                        @PathVariable String operationId) {

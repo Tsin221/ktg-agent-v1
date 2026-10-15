@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from http.client import HTTPException
 from typing import cast
@@ -95,6 +96,49 @@ class KTGClient:
     async def put(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
         return await self._write("PUT", path, body)
 
+    async def inventory_operation_result(self, operation_id: str) -> dict[str, object]:
+        """Read the durable result using the caller's existing operation ID."""
+        normalized = str(uuid.UUID(operation_id))
+        payload = await self._transport(
+            f"{self._base_url}/mes/wm/inventory-operations/{normalized}",
+            self._headers, {}, self._timeout_seconds,
+        )
+        if not isinstance(payload, dict):
+            raise KTGError("KTG_INVALID_RESPONSE", "库存回执无效，结果待核实。")
+        if payload.get("code") in {401, 403}:
+            self._raise_for_business_error(payload)
+        data = payload.get("data")
+        if not isinstance(data, dict) or data.get("operationId") != normalized:
+            raise KTGError("KTG_INVALID_RESPONSE", "库存回执无效，结果待核实。")
+        if isinstance(payload.get("errorCode"), str):
+            data["errorCode"] = payload["errorCode"]
+        return cast(dict[str, object], data)
+
+    async def execute_inventory_operation(
+        self, command: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Submit once, then confirm from storage. Never generate a replacement ID."""
+        raw_id = command.get("operationId")
+        if not isinstance(raw_id, str):
+            raise ValueError("Inventory execution requires an operationId")
+        operation_id = str(uuid.UUID(raw_id))
+        try:
+            await self.post("/mes/wm/inventory-operations", command)
+        except KTGError as exc:
+            if exc.code in {"AUTH_EXPIRED", "PERMISSION_DENIED"}:
+                raise
+        try:
+            result = await self.inventory_operation_result(operation_id)
+        except KTGError as exc:
+            if exc.code in {"AUTH_EXPIRED", "PERMISSION_DENIED"}:
+                raise
+            return {"operationId": operation_id, "operationStatus": "unknown", "safeToRetry": False}
+        if (result.get("actionType") != command.get("actionType")
+                or result.get("documentId") != command.get("documentId")
+                or result.get("operationStatus") not in {"succeeded", "failed", "rejected", "reconciling", "unknown"}):
+            return {"operationId": operation_id, "operationStatus": "unknown", "safeToRetry": False}
+        return result
+
     async def _write(
         self, method: str, path: str, body: Mapping[str, object]
     ) -> dict[str, object]:
@@ -171,6 +215,8 @@ class KTGClient:
                     "登录状态已过期。" if exc.code == 401 else "当前用户没有该查询权限。",
                     status=exc.code,
                 ) from exc
+            if exc.code in {202, 404, 409, 422, 500} and "/mes/wm/inventory-operations/" in url:
+                return KTGClient._decode_payload(exc.read())
             raise KTGError("KTG_HTTP_ERROR", f"KTG 接口返回 HTTP {exc.code}。") from exc
         except (OSError, HTTPException) as exc:
             raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc

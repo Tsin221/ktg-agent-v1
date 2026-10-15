@@ -2,7 +2,7 @@
   <div class="app-container">
 
     <el-table v-loading="loading" :data="issuelineList" @selection-change="handleSelectionChange">
-      <el-table-column type="expand" style="overflow-x: auto; width: 100%;">
+      <el-table-column v-if="optType != 'view'" type="expand" style="overflow-x: auto; width: 100%;">
         <template slot-scope="props">
           <el-table :data="props.row.details" class="child-table" style="margin-left: 60px;">            
             <el-table-column label="批次号" width="120px" align="center" prop="batchCode" />
@@ -34,8 +34,12 @@
       <el-table-column label="产品物料编码" width="120px" align="center" prop="itemCode" />
       <el-table-column label="产品物料名称" width="120px"  align="center" prop="itemName" :show-overflow-tooltip="true"/>
       <el-table-column label="规格型号" align="center" prop="specification" :show-overflow-tooltip="true"/>
-      <el-table-column label="单位" align="center" prop="unitName" />
+      <el-table-column label="单位" align="center" prop="unitOfMeasure" />
       <el-table-column label="领料数量" align="center" prop="quantityIssued" />
+      <el-table-column v-if="optType == 'view'" label="批次号" align="center" prop="batchCode" />
+      <el-table-column v-if="optType == 'view'" label="来源仓库" align="center" prop="warehouseName" />
+      <el-table-column v-if="optType == 'view'" label="来源库位" align="center" prop="locationName" />
+      <el-table-column v-if="optType == 'view'" label="来源库区" align="center" prop="areaName" />
       <el-table-column label="备注" align="center" prop="remark" :show-overflow-tooltip="true"/>
       <el-table-column label="操作" align="center" v-if="optType != 'view'" width="100px" class-name="small-padding fixed-width">
         <template slot-scope="scope">
@@ -129,7 +133,7 @@
 
 <script>
 import { listIssuedetail, getIssuedetail, delIssuedetail, addIssuedetail, updateIssuedetail } from "@/api/mes/wm/issuedetail";
-import { listWithDetail } from "@/api/mes/wm/issueline";
+import { listIssueline, listWithDetail } from "@/api/mes/wm/issueline";
 import StockSelect from "@/components/stockSelect/single.vue"
 export default {
   name: "Issuedetail",
@@ -181,7 +185,7 @@ export default {
     /** 查询生产领料单明细列表 */
     getListWithDetail() {
       this.loading = true;
-      listWithDetail(this.queryParams).then(response => {
+      (this.optType === 'view' ? listIssueline(this.queryParams) : listWithDetail(this.queryParams)).then(response => {
         this.issuelineList = response.rows;
         this.total = response.total;
         this.loading = false;

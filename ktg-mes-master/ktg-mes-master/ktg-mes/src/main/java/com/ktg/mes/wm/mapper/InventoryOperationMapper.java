@@ -52,6 +52,15 @@ public class InventoryOperationMapper {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    public InventoryOperationReceipt findByDocument(String actionType, String documentType, Long documentId) {
+        List<InventoryOperationReceipt> rows = jdbc.query(
+                "SELECT o.* FROM wm_inventory_executed_document d "
+                + "JOIN wm_inventory_operation o ON o.operation_id = d.operation_id "
+                + "WHERE d.action_type = ? AND d.document_type = ? AND d.document_id = ?",
+                receiptMapper, actionType, documentType, documentId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
     public InventoryOperationReceipt lock(String operationId) {
         return jdbc.queryForObject("SELECT * FROM wm_inventory_operation WHERE operation_id = ? FOR UPDATE",
                 receiptMapper, operationId);
@@ -161,6 +170,12 @@ public class InventoryOperationMapper {
     public int linkedTransactionCount(String operationId) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM wm_inventory_operation_transaction WHERE operation_id = ?",
                 Integer.class, operationId);
+    }
+
+    public List<Long> linkedTransactionIds(String operationId) {
+        return jdbc.queryForList(
+                "SELECT transaction_id FROM wm_inventory_operation_transaction WHERE operation_id = ?",
+                Long.class, operationId);
     }
 
     public int complete(String operationId, String status, String errorCode, String resultJson) {

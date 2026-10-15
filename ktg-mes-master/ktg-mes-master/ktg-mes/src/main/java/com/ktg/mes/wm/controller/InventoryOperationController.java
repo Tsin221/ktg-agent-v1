@@ -7,6 +7,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -17,6 +19,37 @@ import org.springframework.web.bind.annotation.RestController;
 public class InventoryOperationController {
     @Autowired private InventoryOperationService service;
     @Autowired private PermissionService permissions;
+
+    @PreAuthorize("@ss.hasPermi('mes:wm:wmstock:list') or @ss.hasPermi('mes:wm:wmstock:query')")
+    @GetMapping("/{operationId}")
+    public ResponseEntity<AjaxResult> result(@PathVariable String operationId) {
+        AjaxResult result = service.operationResult(operationId);
+        if (result.get("data") instanceof java.util.Map) {
+            Object action = ((java.util.Map<?, ?>) result.get("data")).get("actionType");
+            if (!canRead(action)) result = forbidden();
+        }
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
+    @PreAuthorize("@ss.hasPermi('mes:wm:wmstock:list') or @ss.hasPermi('mes:wm:wmstock:query')")
+    @GetMapping("/documents/{actionType}/{documentId}")
+    public ResponseEntity<AjaxResult> documentFact(@PathVariable String actionType,
+                                                     @PathVariable Long documentId) {
+        AjaxResult result = canRead(actionType)
+                ? service.documentExecutionFact(actionType, documentId) : forbidden();
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
+    private boolean canRead(Object actionType) {
+        return ("ITEM_RECEIPT_EXECUTE".equals(actionType)
+                && permissions.hasPermi("mes:wm:itemrecpt:query"))
+                || ("PRODUCTION_ISSUE_EXECUTE".equals(actionType)
+                && permissions.hasPermi("mes:wm:issueheader:query"));
+    }
+
+    private AjaxResult forbidden() {
+        return AjaxResult.error(403, "没有单据读取权限").put("errorCode", "FORBIDDEN");
+    }
 
     @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit') or @ss.hasPermi('mes:wm:issueheader:edit')")
     @PostMapping

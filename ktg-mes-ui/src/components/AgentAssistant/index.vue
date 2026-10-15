@@ -4,17 +4,17 @@
       v-if="!open"
       class="agent-launcher"
       type="button"
-      aria-label="打开 KTG 智能查询助手"
+      aria-label="打开 KTG 智能助手"
       @click="openPanel"
     >
       <i class="el-icon-chat-dot-round" aria-hidden="true" />
-      <span>智能查询</span>
+      <span>智能助手</span>
     </button>
 
-    <section v-else class="agent-panel" role="dialog" aria-label="KTG 智能查询助手">
+    <section v-else class="agent-panel" role="dialog" aria-label="KTG 智能助手">
       <header class="agent-panel__header">
         <div>
-          <h2>KTG 智能查询</h2>
+          <h2>KTG 智能助手</h2>
           <p>{{ currentUser ? `当前用户：${currentUser}` : '使用当前登录账号权限' }}</p>
         </div>
         <button ref="closeButton" type="button" aria-label="收起智能查询助手" @click="closePanel">
@@ -24,7 +24,7 @@
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <div class="agent-message agent-message--assistant">
-          我可以查询产品、分仓库存和生产工单。所有结果都按你当前账号的权限读取。
+          我可以查询产品、分仓库存和生产工单。启用库存操作后，还可预览已准备的物料入库单和生产领料单。
         </div>
         <button
           v-for="example in examples"
@@ -50,11 +50,20 @@
               @select-product="selectProduct($event, message.sourceText)"
               @view-workorder="viewWorkorder"
             />
+            <agent-inventory-card
+              v-else-if="isInventoryResult(result)"
+              :result="result"
+              :confirming="confirmingInventoryId === result.operation_id"
+              :completed="completedInventoryIds.includes(result.operation_id)"
+              @confirm="confirmInventory"
+              @refresh="refreshInventory"
+              @view="viewInventory"
+            />
             <agent-result-card v-else :result="result" />
           </div>
         </div>
         <div v-if="loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
-          正在按当前用户权限查询…
+          正在按当前用户权限处理…
         </div>
       </div>
 
@@ -80,14 +89,15 @@
 </template>
 
 <script>
-import { confirmWorkorderDraft, queryAgent } from '@/api/agent'
+import { confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation, queryAgent } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
+import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentWorkorderDraftCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard },
   data() {
     return {
       open: false,
@@ -95,6 +105,8 @@ export default {
       draft: '',
       currentUser: '',
       confirmingPreviewId: '',
+      confirmingInventoryId: '',
+      completedInventoryIds: [],
       completedPreviewIds: [],
       messageId: 0,
       messages: [],
@@ -103,8 +115,11 @@ export default {
   },
   computed: {
     busy() {
-      return this.loading || Boolean(this.confirmingPreviewId)
+      return this.loading || Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId)
     }
+  },
+  mounted() {
+    this.restoreInventoryResults()
   },
   methods: {
     openPanel() {
@@ -128,12 +143,14 @@ export default {
       try {
         const response = await queryAgent(text)
         this.currentUser = response.current_user || this.currentUser
+        const results = response.results || []
+        results.filter(this.isInventoryResult).forEach(result => this.rememberInventory(result.operation_id))
         this.messages.push({
           id: ++this.messageId,
           role: 'assistant',
           text: response.answer,
           sourceText: text,
-          results: response.results || []
+          results
         })
       } catch (error) {
         const data = error && error.response && error.response.data
@@ -151,6 +168,69 @@ export default {
     },
     isWorkorderResult(result) {
       return isWorkorderAssistantResult(result)
+    },
+    isInventoryResult(result) {
+      return result && ['inventory_preview', 'inventory_result'].includes(result.kind)
+    },
+    rememberInventory(operationId) {
+      if (!operationId) return
+      try {
+        const ids = JSON.parse(window.localStorage.getItem('ktg-agent-inventory-ids') || '[]')
+        window.localStorage.setItem('ktg-agent-inventory-ids', JSON.stringify([operationId, ...ids.filter(id => id !== operationId)].slice(0, 20)))
+      } catch (_) { /* Storage can be unavailable; current session still works. */ }
+    },
+    async restoreInventoryResults() {
+      let ids = []
+      try { ids = JSON.parse(window.localStorage.getItem('ktg-agent-inventory-ids') || '[]') } catch (_) { return }
+      if (!Array.isArray(ids)) return
+      for (const id of ids.slice(0, 20)) {
+        try {
+          const response = await getInventoryOperation(id)
+          if (response.result && response.result.error_code !== 'OPERATION_NOT_FOUND') this.showInventoryResult(response.result)
+        } catch (_) { /* Another user's operation is not visible. */ }
+      }
+    },
+    showInventoryResult(result) {
+      this.messages.push({ id: ++this.messageId, role: 'assistant', text: '', results: [result] })
+      if (result.kind === 'inventory_result' && !this.completedInventoryIds.includes(result.operation_id)) {
+        this.completedInventoryIds.push(result.operation_id)
+      }
+      if (result.outcome === 'succeeded') {
+        window.dispatchEvent(new CustomEvent('ktg:inventory-changed', { detail: result }))
+      }
+      this.scrollToBottom()
+    },
+    async refreshInventory(operationId) {
+      if (this.confirmingInventoryId) return
+      this.confirmingInventoryId = operationId
+      try {
+        const response = await getInventoryOperation(operationId)
+        this.showInventoryResult(response.result)
+      } catch (_) {
+        this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '回执暂时无法读取，请稍后查询。' })
+      } finally { this.confirmingInventoryId = '' }
+    },
+    async confirmInventory(operationId) {
+      if (!operationId || this.confirmingInventoryId || this.completedInventoryIds.includes(operationId)) return
+      this.confirmingInventoryId = operationId
+      this.completedInventoryIds.push(operationId)
+      this.rememberInventory(operationId)
+      try {
+        const response = await confirmInventoryOperation(operationId)
+        this.showInventoryResult(response.result)
+      } catch (_) {
+        try {
+          const response = await getInventoryOperation(operationId)
+          this.showInventoryResult(response.result)
+        } catch (_) {
+          this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '请求结果待核实，请查询同一操作回执。' })
+        }
+      } finally { this.confirmingInventoryId = '' }
+    },
+    viewInventory(result) {
+      const isReceipt = result.action_type === 'ITEM_RECEIPT_EXECUTE'
+      this.$router.push({ path: isReceipt ? '/mes/wm/itemrecpt' : '/mes/wm/issue',
+        query: isReceipt ? { recptId: result.document_id } : { issueId: result.document_id }}).catch(() => {})
     },
     async confirmPreview(previewId) {
       if (!previewId || this.confirmingPreviewId) return

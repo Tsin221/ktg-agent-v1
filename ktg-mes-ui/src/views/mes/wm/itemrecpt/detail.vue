@@ -6,7 +6,7 @@
       </el-col>
     </el-row>
     <el-table v-loading="loading" :data="itemreceptlineList" style="overflow-x: auto; width: 100%;" @selection-change="handleSelectionChange">
-      <el-table-column type="expand" style="overflow-x: auto; width: 100%;">
+      <el-table-column v-if="optType != 'view'" type="expand" style="overflow-x: auto; width: 100%;">
         <template slot-scope="props">
           <el-table :data="props.row.details" class="child-table" style="margin-left: 60px;">
             <el-table-column label="仓库名称" width="120px" align="center" prop="warehouseName" />
@@ -45,9 +45,12 @@
       </el-table-column>
       <el-table-column label="物资名称" align="center" prop="itemName" :show-overflow-tooltip="true"/>
       <el-table-column label="规格型号" align="center" prop="specification" :show-overflow-tooltip="true"/>
-      <el-table-column label="单位" align="center" prop="unitName" />
+      <el-table-column label="单位" align="center" prop="unitOfMeasure" />
       <el-table-column label="入库数量" align="center" prop="quantityRecived" />
       <el-table-column label="批次号" align="center" prop="batchCode" />
+      <el-table-column v-if="optType == 'view'" label="目标仓库" align="center" prop="warehouseName" />
+      <el-table-column v-if="optType == 'view'" label="目标库位" align="center" prop="locationName" />
+      <el-table-column v-if="optType == 'view'" label="目标库区" align="center" prop="areaName" />
       <el-table-column label="操作" align="center" width="100px" v-if="optType != 'view'" class-name="small-padding fixed-width">
         <template slot-scope="scope">
           <el-button
@@ -309,7 +312,7 @@ export default {
     /** 查询物料入库单明细列表 */
     getListWithDetail() {
       this.loading = true;
-      listWithDetail(this.queryParams).then(response => {
+      (this.optType === 'view' ? listItemrecptline(this.queryParams) : listWithDetail(this.queryParams)).then(response => {
         this.itemreceptlineList = response.rows;
         this.total = response.total;
         this.loading = false;

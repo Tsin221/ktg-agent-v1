@@ -99,6 +99,32 @@ class InventoryOperationServiceTest {
     }
 
     @Test
+    void orphanedReservationIsReconcilingAndNeverSafeToRetry() {
+        String id = "77777777-7777-4777-8777-777777777777";
+        jdbc.update("INSERT INTO wm_inventory_operation(operation_id, action_type, document_type, "
+                + "document_id, request_digest, executed_by_id, executed_by_name, operation_status, created_at) "
+                + "VALUES (?, 'ITEM_RECEIPT_EXECUTE', 'IR', 1, 'digest', 7, 'operator', 'executing', CURRENT_TIMESTAMP)", id);
+        AjaxResult result = service.operationResult(id);
+        assertEquals(200, result.get("code"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) result.get("data");
+        assertEquals("reconciling", data.get("operationStatus"));
+        assertEquals(Boolean.FALSE, data.get("safeToRetry"));
+        assertEquals("APPROVED", data.get("documentStatus"));
+        authenticate(8L, "other");
+        assertEquals(404, service.operationResult(id).get("code"));
+    }
+
+    @Test
+    void documentWithoutClaimDoesNotAuthorizeRetry() {
+        AjaxResult result = service.documentExecutionFact("ITEM_RECEIPT_EXECUTE", 1L);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) result.get("data");
+        assertEquals("unknown", data.get("operationStatus"));
+        assertEquals(Boolean.FALSE, data.get("safeToRetry"));
+    }
+
+    @Test
     void mismatchedLedgerQuantityRollsBackBalanceAndDocument() {
         Mockito.when(receipts.getTxBeans(1L)).thenReturn(Collections.singletonList(receiptLine()));
         Mockito.doAnswer(call -> {
@@ -226,6 +252,8 @@ class InventoryOperationServiceTest {
         String id = "2fd58fc8-148d-4bde-9083-86b6c7a46c5b";
         AjaxResult first = service.executeReceipt(1L, id);
         AjaxResult queried = service.receiptResult(1L, id);
+        AjaxResult byId = service.operationResult(id);
+        AjaxResult byDocument = service.documentExecutionFact("ITEM_RECEIPT_EXECUTE", 1L);
         AjaxResult replay = service.executeReceipt(1L, id);
         AjaxResult explicitReplay = service.execute("ITEM_RECEIPT_EXECUTE", 1L, id, null);
         AjaxResult another = service.executeReceipt(1L, "2fd58fc8-148d-4bde-9083-86b6c7a46c5c");
@@ -234,6 +262,10 @@ class InventoryOperationServiceTest {
         assertEquals(200, first.get("code"));
         assertEquals(200, queried.get("code"));
         assertEquals("succeeded", data(queried).get("operationStatus"));
+        assertEquals("succeeded", data(byId).get("operationStatus"));
+        assertEquals("FINISHED", data(byId).get("documentStatus"));
+        assertEquals(id, data(byDocument).get("operationId"));
+        assertEquals(Boolean.FALSE, data(byId).get("safeToRetry"));
         assertEquals(200, replay.get("code"));
         assertEquals(200, explicitReplay.get("code"));
         assertEquals(Boolean.TRUE, data(replay).get("replayed"));
@@ -249,6 +281,14 @@ class InventoryOperationServiceTest {
                 "SELECT status FROM wm_item_recpt WHERE recpt_id = 1", String.class));
         assertNotNull(jdbc.queryForObject("SELECT result_json FROM wm_inventory_operation WHERE operation_id = ?",
                 String.class, id));
+        jdbc.update("INSERT INTO wm_transaction(transaction_type, transaction_flag, transaction_quantity, "
+                + "source_doc_type, source_doc_id, source_doc_line_id, unit_of_measure) "
+                + "VALUES ('ITEM_RECPT', 1, 1, 'OTHER', 99, 99, 'pcs')");
+        Long unrelated = jdbc.queryForObject("SELECT MAX(transaction_id) FROM wm_transaction", Long.class);
+        jdbc.update("UPDATE wm_inventory_operation_transaction SET transaction_id = ? WHERE operation_id = ?",
+                unrelated, id);
+        AjaxResult inconsistent = service.operationResult(id);
+        assertEquals("unknown", data(inconsistent).get("operationStatus"));
     }
 
     @Test

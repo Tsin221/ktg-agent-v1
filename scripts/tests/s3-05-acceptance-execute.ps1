@@ -35,7 +35,7 @@ try {
     $role = Api 'Post' '/system/role' $admin @{
         roleName = "S3-05 receipt $suffix"; roleKey = $roleKey
         roleSort = '99'; dataScope = '1'; status = '0'
-        menuIds = @(2152, 2153, 2155); remark = 'S3-05 isolated receipt acceptance'
+        menuIds = @(2152, 2153, 2155, 2157, 2158); remark = 'S3-05 isolated receipt acceptance'
     }
     RequireCode $role 200 'create role'
     $roles = Api 'Get' "/system/role/list?roleKey=$roleKey" $admin
@@ -64,7 +64,9 @@ try {
     RequireCode $grant 200 'grant receipt role'
     $authorized = Login $userName $password
     $info = Api 'Get' '/getInfo' $authorized
-    if ('mes:wm:itemrecpt:edit' -notin @($info.permissions)) { throw 'Edit permission missing' }
+    foreach ($permission in @('mes:wm:itemrecpt:query', 'mes:wm:itemrecpt:edit', 'mes:wm:wmstock:list')) {
+        if ($permission -notin @($info.permissions)) { throw "Missing permission: $permission" }
+    }
     $preview = Api 'Get' "/mes/wm/itemrecpt/$ReceiptId/execution-preview" $authorized
     RequireCode $preview 200 'authorized preview'
     if ($preview.data.additions.Count -ne 2 -or $preview.data.documentStatus -ne 'APPROVED') {

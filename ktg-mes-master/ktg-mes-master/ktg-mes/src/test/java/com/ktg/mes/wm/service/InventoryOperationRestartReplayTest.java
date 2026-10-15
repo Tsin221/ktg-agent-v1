@@ -37,10 +37,15 @@ class InventoryOperationRestartReplayTest {
                 new UsernamePasswordAuthenticationToken(login, null, Collections.emptyList()));
 
         AjaxResult replay = service.executeReceipt(1L, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        AjaxResult queried = service.operationResult("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
         assertEquals(200, replay.get("code"));
+        assertEquals(200, queried.get("code"));
         @SuppressWarnings("unchecked")
         Map<String, Object> data = (Map<String, Object>) replay.get("data");
         assertEquals(Boolean.TRUE, data.get("replayed"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> queriedData = (Map<String, Object>) queried.get("data");
+        assertEquals("succeeded", queriedData.get("operationStatus"));
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM wm_transaction", Integer.class));
         assertEquals(1, jdbc.queryForObject(
                 "SELECT COUNT(*) FROM wm_inventory_operation_transaction", Integer.class));

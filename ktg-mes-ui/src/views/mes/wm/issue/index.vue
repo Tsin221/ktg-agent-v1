@@ -118,7 +118,7 @@
       </el-table-column>
       <el-table-column label="单据状态" align="center" prop="status">
         <template slot-scope="scope">
-          <dict-tag :options="dict.type.mes_issue_status" :value="scope.row.status"/>
+          <span>{{ issueStatusLabel(scope.row.status) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="操作" align="center" class-name="small-padding fixed-width">
@@ -357,8 +357,25 @@ export default {
   created() {
     this.getList();
     this.getWarehouseList();
+    this.inventoryChanged = event => {
+      if (event.detail && event.detail.outcome === 'succeeded' && event.detail.action_type === 'PRODUCTION_ISSUE_EXECUTE') this.getList();
+    };
+    window.addEventListener('ktg:inventory-changed', this.inventoryChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:inventory-changed', this.inventoryChanged);
   },
   methods: {
+    issueStatusLabel(status) {
+      return {
+        PREPARE: '草稿',
+        APPROVING: '待拣货',
+        APPROVED: '已审批',
+        FINISHED: '已完成',
+        CANCELED: '已取消',
+        CONFIRMED: '已确认'
+      }[status] || status || '-'
+    },
     /** 查询生产领料单头列表 */
     getList() {
       this.loading = true;

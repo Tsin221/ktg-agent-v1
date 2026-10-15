@@ -97,7 +97,7 @@ public class WmIssueHeaderController extends BaseController
         return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 
-    @PreAuthorize("@ss.hasPermi('mes:wm:issueheader:edit')")
+    @PreAuthorize("@ss.hasPermi('mes:wm:issueheader:query') and (@ss.hasPermi('mes:wm:wmstock:list') or @ss.hasPermi('mes:wm:wmstock:query'))")
     @GetMapping("/{issueId}/operations/{operationId}")
     public ResponseEntity<AjaxResult> executionResult(@PathVariable Long issueId,
                                                        @PathVariable String operationId) {

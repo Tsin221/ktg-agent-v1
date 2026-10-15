@@ -23,6 +23,8 @@ import java.math.BigDecimal;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
@@ -167,35 +169,111 @@ public class InventoryOperationService {
         return documentResult(ISSUE, "ISSUE", documentId, operationId);
     }
 
+    /** Read a committed receipt by ID. A caller cannot use a guessed ID to inspect another actor's work. */
+    public AjaxResult operationResult(String operationId) {
+        InventoryOperationReceipt receipt = findVisible(operationId);
+        if (receipt == null) return error(404, "OPERATION_NOT_FOUND", "库存操作不存在", null);
+        AjaxResult checked = documentResult(receipt.getActionType(), receipt.getDocumentType(),
+                receipt.getDocumentId(), operationId);
+        Object value = checked.get("data");
+        if (!(value instanceof Map)) return checked;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = new LinkedHashMap<>((Map<String, Object>) value);
+        if ("executing".equals(data.get("operationStatus"))) {
+            data.put("operationStatus", "reconciling");
+        }
+        data.put("safeToRetry", false);
+        data.put("verifiedAt", OffsetDateTime.now().toString());
+        Map<String, Object> document = RECEIPT.equals(receipt.getActionType())
+                ? mapper.readReceiptDocument(receipt.getDocumentId())
+                : mapper.readIssueDocument(receipt.getDocumentId());
+        data.put("documentStatus", document == null ? null : document.get("status"));
+        LocalDateTime end = receipt.getCompletedAt() == null ? LocalDateTime.now() : receipt.getCompletedAt();
+        long elapsedMs = receipt.getCreatedAt() == null ? -1L
+                : Duration.between(receipt.getCreatedAt(), end).toMillis();
+        log.info("Inventory result operationId={} documentType={} documentId={} transactionIds={} "
+                        + "initiatorId={} elapsedMs={} classification={}",
+                operationId, receipt.getDocumentType(), receipt.getDocumentId(),
+                transactionIds(data), receipt.getExecutedById(), elapsedMs, data.get("operationStatus"));
+        return AjaxResult.success(data);
+    }
+
+    private List<Object> transactionIds(Map<String, Object> data) {
+        List<Object> ids = new java.util.ArrayList<>();
+        Object value = data.get("transactions");
+        if (value instanceof List) {
+            for (Object item : (List<?>) value) {
+                if (item instanceof Map) ids.add(((Map<?, ?>) item).get("transactionId"));
+            }
+        }
+        return ids;
+    }
+
+    /** The one-time claim is authoritative; absence of a claim is not proof that retry is safe. */
+    public AjaxResult documentExecutionFact(String actionType, Long documentId) {
+        if ((!RECEIPT.equals(actionType) && !ISSUE.equals(actionType))
+                || documentId == null || documentId <= 0) {
+            return error(422, "INVALID_DOCUMENT_ID", "单据或动作无效", null);
+        }
+        String type = RECEIPT.equals(actionType) ? "IR" : "ISSUE";
+        Map<String, Object> document = RECEIPT.equals(actionType)
+                ? mapper.readReceiptDocument(documentId) : mapper.readIssueDocument(documentId);
+        if (document == null) return error(404, "DOCUMENT_NOT_FOUND", "单据不存在", null);
+        InventoryOperationReceipt owner = mapper.findByDocument(actionType, type, documentId);
+        if (owner != null) return operationResult(owner.getOperationId());
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("actionType", actionType);
+        data.put("documentType", type);
+        data.put("documentId", documentId);
+        data.put("documentStatus", document.get("status"));
+        data.put("operationStatus", "unknown");
+        data.put("safeToRetry", false);
+        data.put("verifiedAt", OffsetDateTime.now().toString());
+        return AjaxResult.success(data);
+    }
+
+    private InventoryOperationReceipt findVisible(String operationId) {
+        if (operationId == null || operationId.length() > 36) return null;
+        InventoryOperationReceipt receipt = mapper.find(operationId);
+        return receipt != null && SecurityUtils.getUserId().equals(receipt.getExecutedById())
+                ? receipt : null;
+    }
+
     private AjaxResult documentResult(String actionType, String documentType, Long documentId, String operationId) {
         if (documentId == null || operationId == null) {
             return error(422, "INVALID_OPERATION_ID", "操作 ID 无效", null);
         }
-        InventoryOperationReceipt receipt = mapper.find(operationId);
+        InventoryOperationReceipt receipt = findVisible(operationId);
         if (receipt == null || !actionType.equals(receipt.getActionType())
                 || !documentId.equals(receipt.getDocumentId())) {
             return error(404, "OPERATION_NOT_FOUND", "库存操作不存在", null);
         }
         if ("succeeded".equals(receipt.getOperationStatus())) {
-            Map<String, Object> document = RECEIPT.equals(actionType)
-                    ? mapper.readReceiptDocument(documentId) : mapper.readIssueDocument(documentId);
-            List<Map<String, Object>> transactions = mapper.transactions(documentType, documentId);
-            List<?> recorded = receipt.getResultJson() == null ? null
-                    : (List<?>) parse(receipt.getResultJson()).get("transactions");
-            Set<Long> actualIds = new HashSet<>();
-            for (Map<String, Object> transaction : transactions) {
-                actualIds.add(((Number) transaction.get("transactionId")).longValue());
-            }
-            Set<Long> recordedIds = new HashSet<>();
-            if (recorded != null) {
-                for (Object item : recorded) {
-                    recordedIds.add(((Number) ((Map<?, ?>) item).get("transactionId")).longValue());
+            try {
+                Map<String, Object> document = RECEIPT.equals(actionType)
+                        ? mapper.readReceiptDocument(documentId) : mapper.readIssueDocument(documentId);
+                List<Map<String, Object>> transactions = mapper.transactions(documentType, documentId);
+                List<?> recorded = receipt.getResultJson() == null ? null
+                        : (List<?>) parse(receipt.getResultJson()).get("transactions");
+                Set<Long> actualIds = new HashSet<>();
+                for (Map<String, Object> transaction : transactions) {
+                    actualIds.add(((Number) transaction.get("transactionId")).longValue());
                 }
-            }
-            if (document == null || !"FINISHED".equals(document.get("status"))
-                    || recorded == null || transactions.isEmpty()
-                    || transactions.size() != mapper.linkedTransactionCount(operationId)
-                    || transactions.size() != recorded.size() || !actualIds.equals(recordedIds)) {
+                Set<Long> recordedIds = new HashSet<>();
+                if (recorded != null) {
+                    for (Object item : recorded) {
+                        recordedIds.add(((Number) ((Map<?, ?>) item).get("transactionId")).longValue());
+                    }
+                }
+                if (document == null || !"FINISHED".equals(document.get("status"))
+                        || recorded == null || transactions.isEmpty()
+                        || transactions.size() != mapper.linkedTransactionCount(operationId)
+                        || transactions.size() != recorded.size() || !actualIds.equals(recordedIds)
+                        || !actualIds.equals(new HashSet<>(mapper.linkedTransactionIds(operationId)))) {
+                    return error(202, "RESULT_UNKNOWN", "库存结果待核实", baseResult(receipt, "unknown"));
+                }
+            } catch (RuntimeException ex) {
+                log.error("Inventory receipt {} could not be verified", operationId, ex);
                 return error(202, "RESULT_UNKNOWN", "库存结果待核实", baseResult(receipt, "unknown"));
             }
         }
@@ -267,6 +345,9 @@ public class InventoryOperationService {
                     executeReserved(receipt, normalizedExpectedStatus, expectedVersion);
                     return null;
                 });
+                log.info("Inventory execution operationId={} documentType={} documentId={} "
+                                + "initiatorId={} classification=succeeded",
+                        stableOperationId, documentType, documentId, receipt.getExecutedById());
                 return replayOrConflict(mapper.find(stableOperationId), receipt, false);
             } catch (PessimisticLockingFailureException ex) {
                 if (attempt == 3) {
@@ -403,6 +484,10 @@ public class InventoryOperationService {
             }
             return null;
         });
+        log.info("Inventory execution operationId={} documentType={} documentId={} "
+                        + "initiatorId={} classification={} errorCode={}",
+                receipt.getOperationId(), receipt.getDocumentType(), receipt.getDocumentId(),
+                receipt.getExecutedById(), status, code);
         return error(httpCode, code, message, result);
     }
 
@@ -415,8 +500,14 @@ public class InventoryOperationService {
             return error(409, "OPERATION_ID_CONFLICT", "操作 ID 对应另一请求",
                     baseResult(existing, "rejected"));
         }
-        Map<String, Object> result = existing.getResultJson() == null
-                ? baseResult(existing, existing.getOperationStatus()) : parse(existing.getResultJson());
+        Map<String, Object> result;
+        try {
+            result = existing.getResultJson() == null
+                    ? baseResult(existing, existing.getOperationStatus()) : parse(existing.getResultJson());
+        } catch (RuntimeException ex) {
+            log.error("Inventory receipt {} has unreadable result", existing.getOperationId(), ex);
+            return error(202, "RESULT_UNKNOWN", "库存结果待核实", baseResult(existing, "unknown"));
+        }
         result.put("replayed", replayed);
         if ("succeeded".equals(existing.getOperationStatus())) {
             return AjaxResult.success(result);
