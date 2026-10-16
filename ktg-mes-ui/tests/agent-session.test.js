@@ -85,6 +85,10 @@ async function main() {
   assert.strictEqual(snapshots[0].run.status, 'completed')
   assert.deepStrictEqual(snapshots[0].messages.items.map(item => item.message_id), [1, 2])
   assert.strictEqual(client.getState().seq, 3)
+  client.setRun('r2')
+  assert.strictEqual(client.getState().runId, 'r2')
+  assert.strictEqual(client.getState().seq, 0)
+  client.setRun('r1')
   assert.deepStrictEqual(Object.keys(JSON.parse(saved.values().next().value)).sort(), ['runId', 'seq', 'sessionId'])
 
   const restored = createAgentSessionClient({ api, storage, getIdentity: () => auth,

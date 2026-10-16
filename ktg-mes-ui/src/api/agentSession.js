@@ -121,6 +121,16 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     save()
   }
 
+  function setRun(runId) {
+    requireIdentity()
+    if (!pointer) throw new Error('请先选择会话。')
+    if (pointer.runId === runId) return
+    close()
+    pointer.runId = runId
+    pointer.seq = 0
+    save()
+  }
+
   async function createRun({ requestId, message, pageContext }) {
     requireIdentity()
     if (!pointer || !requestId || !message) throw new Error('缺少会话、请求 ID 或消息。')
@@ -233,5 +243,5 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     }
   }
 
-  return { checkIdentity, getState, restoreSession, setSession, createRun, subscribeRun, close, clear }
+  return { checkIdentity, getState, restoreSession, setSession, setRun, createRun, subscribeRun, close, clear }
 }

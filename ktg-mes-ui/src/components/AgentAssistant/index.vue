@@ -15,12 +15,21 @@
       <header class="agent-panel__header">
         <div>
           <h2>KTG 智能助手</h2>
-          <p>{{ currentUser ? `当前用户：${currentUser}` : '使用当前登录账号权限' }}</p>
+          <p>使用当前登录账号权限</p>
         </div>
         <button ref="closeButton" type="button" aria-label="收起智能查询助手" @click="closePanel">
           <i class="el-icon-minus" aria-hidden="true" />
         </button>
       </header>
+
+      <div class="agent-panel__sessions">
+        <label for="agent-session-select">会话</label>
+        <select id="agent-session-select" :value="sessionId" :disabled="sessionLoading" @change="selectSession($event.target.value)">
+          <option value="">选择会话</option>
+          <option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.title || '未命名会话' }}</option>
+        </select>
+        <button type="button" :disabled="sessionLoading" @click="newSession">新会话</button>
+      </div>
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <div class="agent-message agent-message--assistant">
@@ -62,9 +71,20 @@
             <agent-result-card v-else :result="result" />
           </div>
         </div>
-        <div v-if="loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
-          正在按当前用户权限处理…
+        <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
+          <div class="agent-message">{{ pendingQuestion }}</div>
         </div>
+        <div v-if="progress.text || Object.keys(progress.tools).length" class="agent-progress" aria-label="本轮临时进度">
+          <div v-if="progress.text" class="agent-message">{{ progress.text }}</div>
+          <div v-for="(tool, id) in progress.tools" :key="id" class="agent-progress__tool">
+            {{ tool.name }}：{{ tool.message || (tool.status === 'running' ? '执行中' : tool.status) }}
+          </div>
+        </div>
+        <div v-if="activeRun || loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
+          {{ loading ? '正在提交问题…' : runStatusText(activeRun) }}
+          <button v-if="streamError && activeRun && !isTerminalRun(activeRun.status)" type="button" @click="followRun">重新连接</button>
+        </div>
+        <div v-if="panelError" class="agent-message agent-message--error" role="alert">{{ panelError }}</div>
       </div>
 
       <form class="agent-panel__composer" @submit.prevent="send">
@@ -89,11 +109,27 @@
 </template>
 
 <script>
-import { confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation, queryAgent } from '@/api/agent'
+import { agentSession, createAgentSession, listAgentSessions, getAgentSession, listAgentMessages,
+  getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
+import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText } from './sessionPresentation'
+
+const requestId = () => (window.crypto && window.crypto.randomUUID)
+  ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+async function allMessages(sessionId) {
+  const items = []
+  let cursor
+  do {
+    const page = await listAgentMessages(sessionId, cursor ? { cursor } : undefined)
+    items.push(...page.items)
+    cursor = page.next_cursor
+  } while (cursor)
+  return items
+}
 
 export default {
   name: 'AgentAssistant',
@@ -102,26 +138,188 @@ export default {
     return {
       open: false,
       loading: false,
+      sessionLoading: false,
       draft: '',
-      currentUser: '',
+      sessions: [],
+      sessionId: '',
+      activeRunId: '',
+      activeRun: null,
+      pendingQuestion: '',
+      pendingSubmission: null,
+      progress: { text: '', tools: {}},
+      panelError: '',
+      streamError: false,
+      epoch: 0,
+      unsubscribeStore: null,
       confirmingPreviewId: '',
       confirmingInventoryId: '',
       completedInventoryIds: [],
       completedPreviewIds: [],
-      messageId: 0,
       messages: [],
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
   },
   computed: {
     busy() {
-      return this.loading || Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId)
+      return this.loading || this.sessionLoading || (this.activeRun && !isTerminalRun(this.activeRun.status)) ||
+        Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId)
     }
   },
   mounted() {
-    this.restoreInventoryResults()
+    this.unsubscribeStore = this.$store.subscribe(mutation => {
+      if (mutation.type === 'SET_TOKEN' || mutation.type === 'SET_ID') {
+        this.resetIdentity()
+        this.bootstrap()
+      }
+    })
+    this.bootstrap()
+  },
+  beforeDestroy() {
+    this.epoch++
+    agentSession.close()
+    if (this.unsubscribeStore) this.unsubscribeStore()
   },
   methods: {
+    isTerminalRun,
+    runStatusText,
+    resetIdentity() {
+      this.epoch++
+      agentSession.checkIdentity()
+      agentSession.close()
+      this.sessions = []
+      this.sessionId = ''
+      this.activeRunId = ''
+      this.activeRun = null
+      this.pendingQuestion = ''
+      this.pendingSubmission = null
+      this.progress = { text: '', tools: {}}
+      this.messages = []
+      this.draft = ''
+      this.panelError = ''
+      this.streamError = false
+      this.loading = false
+      this.sessionLoading = false
+      this.completedInventoryIds = []
+      this.completedPreviewIds = []
+      this.confirmingInventoryId = ''
+      this.confirmingPreviewId = ''
+    },
+    async bootstrap() {
+      if (!agentSession.checkIdentity()) return
+      const epoch = this.epoch
+      this.sessionLoading = true
+      try {
+        const page = await listAgentSessions({ limit: 50 })
+        if (epoch !== this.epoch) return
+        this.sessions = page.items || []
+        let pointer
+        try { pointer = await agentSession.restoreSession() } catch (_) { /* Saved session may have expired. */ }
+        if (epoch !== this.epoch) return
+        const sessionId = pointer && pointer.sessionId || (this.sessions[0] && this.sessions[0].session_id)
+        if (sessionId) await this.loadSession(sessionId, epoch)
+      } catch (error) {
+        if (epoch === this.epoch) this.panelError = this.errorText(error, '会话读取失败，请稍后重试。')
+      } finally {
+        if (epoch === this.epoch) this.sessionLoading = false
+      }
+    },
+    async loadSession(sessionId, epoch = ++this.epoch) {
+      agentSession.close()
+      this.sessionLoading = true
+      this.panelError = ''
+      this.streamError = false
+      this.pendingQuestion = ''
+      this.pendingSubmission = null
+      this.progress = { text: '', tools: {}}
+      this.activeRun = null
+      this.activeRunId = ''
+      this.messages = []
+      try {
+        const session = await getAgentSession(sessionId)
+        if (epoch !== this.epoch) return
+        if (!this.sessions.some(item => item.session_id === sessionId)) this.sessions.unshift(session)
+        if (!agentSession.getState() || agentSession.getState().sessionId !== sessionId) agentSession.setSession(sessionId)
+        this.sessionId = sessionId
+        const items = await allMessages(sessionId)
+        if (epoch !== this.epoch) return
+        this.messages = presentMessages(items)
+        const pointer = agentSession.getState()
+        const runId = session.active_run_id || pointer && pointer.runId
+        if (runId) {
+          agentSession.setRun(runId)
+          this.activeRunId = runId
+          const run = await getAgentRun(runId)
+          if (epoch !== this.epoch) return
+          this.activeRun = run
+          if (isTerminalRun(run.status)) {
+            const finalItems = await allMessages(sessionId)
+            if (epoch !== this.epoch) return
+            this.messages = presentMessages(finalItems)
+          } else this.followRun(epoch)
+        }
+        this.scrollToBottom()
+      } catch (error) {
+        if (epoch === this.epoch) this.panelError = this.errorText(error, '会话读取失败，请重新选择。')
+      } finally {
+        if (epoch === this.epoch) this.sessionLoading = false
+      }
+    },
+    selectSession(sessionId) {
+      if (sessionId && sessionId !== this.sessionId) this.loadSession(sessionId)
+    },
+    async newSession() {
+      const epoch = ++this.epoch
+      agentSession.close()
+      this.sessionLoading = true
+      try {
+        const session = await createAgentSession()
+        if (epoch !== this.epoch) return
+        this.sessions.unshift(session)
+        agentSession.setSession(session.session_id)
+        await this.loadSession(session.session_id, epoch)
+        this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
+      } catch (error) {
+        if (epoch === this.epoch) this.panelError = this.errorText(error, '新建会话失败。')
+      } finally {
+        if (epoch === this.epoch) this.sessionLoading = false
+      }
+    },
+    async followRun(epoch = this.epoch) {
+      if (!this.activeRunId) return
+      this.streamError = false
+      try {
+        await agentSession.subscribeRun({
+          onEvent: event => {
+            if (epoch !== this.epoch || event.run_id !== this.activeRunId) return
+            if (event.type !== 'run_settled') this.progress = progressFromEvent(this.progress, event)
+          },
+          onSnapshot: snapshot => {
+            if (epoch !== this.epoch || snapshot.run.run_id !== this.activeRunId) return
+            this.activeRun = snapshot.run
+            this.messages = presentMessages(snapshot.messages.items)
+            if (isTerminalRun(snapshot.run.status)) {
+              this.pendingQuestion = ''
+              this.progress = { text: '', tools: {}}
+            }
+            this.scrollToBottom()
+          }
+        })
+        if (epoch === this.epoch && this.activeRun && !isTerminalRun(this.activeRun.status)) {
+          window.setTimeout(() => {
+            if (epoch === this.epoch && this.activeRun && !isTerminalRun(this.activeRun.status)) this.followRun(epoch)
+          }, 1000)
+        }
+      } catch (error) {
+        if (epoch === this.epoch) {
+          this.streamError = true
+          this.panelError = this.errorText(error, '进度连接中断，请重新连接。')
+        }
+      }
+    },
+    errorText(error, fallback) {
+      const data = error && error.response && error.response.data
+      return data && data.error && data.error.message || error && error.message || fallback
+    },
     openPanel() {
       this.open = true
       this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
@@ -136,34 +334,46 @@ export default {
     async send() {
       const text = this.draft.trim()
       if (!text || this.busy) return
-      this.messages.push({ id: ++this.messageId, role: 'user', text })
       this.draft = ''
       this.loading = true
+      this.activeRun = null
+      this.activeRunId = ''
+      this.progress = { text: '', tools: {}}
+      this.pendingQuestion = text
+      this.panelError = ''
+      const epoch = this.epoch
       this.scrollToBottom()
       try {
-        const response = await queryAgent(text)
-        this.currentUser = response.current_user || this.currentUser
-        const results = response.results || []
-        results.filter(this.isInventoryResult).forEach(result => this.rememberInventory(result.operation_id))
-        this.messages.push({
-          id: ++this.messageId,
-          role: 'assistant',
-          text: response.answer,
-          sourceText: text,
-          results
-        })
+        if (!this.sessionId) {
+          const session = await createAgentSession(text.slice(0, 60))
+          if (epoch !== this.epoch) return
+          this.sessions.unshift(session)
+          agentSession.setSession(session.session_id)
+          this.sessionId = session.session_id
+        }
+        const submission = this.pendingSubmission && this.pendingSubmission.message === text &&
+          this.pendingSubmission.sessionId === this.sessionId
+          ? this.pendingSubmission
+          : { sessionId: this.sessionId, requestId: requestId(), message: text, pageContext: pageContext(this.$route) }
+        this.pendingSubmission = submission
+        const run = await agentSession.createRun(submission)
+        if (epoch !== this.epoch || !run) return
+        this.pendingSubmission = null
+        this.activeRunId = run.run_id
+        this.activeRun = { run_id: run.run_id, status: run.status }
+        this.followRun(epoch)
       } catch (error) {
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        this.messages.push({
-          id: ++this.messageId,
-          role: 'assistant',
-          text: message || '查询失败，请确认 Agent 服务与模型配置后重试。'
-        })
+        if (epoch === this.epoch) {
+          this.panelError = this.errorText(error, '提交状态未确认；再次发送相同问题会沿用同一请求。')
+          this.draft = text
+          this.pendingQuestion = ''
+        }
       } finally {
-        this.loading = false
-        this.scrollToBottom()
-        this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
+        if (epoch === this.epoch) {
+          this.loading = false
+          this.scrollToBottom()
+          if (this.open && !this.busy) this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
+        }
       }
     },
     isWorkorderResult(result) {
@@ -172,26 +382,8 @@ export default {
     isInventoryResult(result) {
       return result && ['inventory_preview', 'inventory_result'].includes(result.kind)
     },
-    rememberInventory(operationId) {
-      if (!operationId) return
-      try {
-        const ids = JSON.parse(window.localStorage.getItem('ktg-agent-inventory-ids') || '[]')
-        window.localStorage.setItem('ktg-agent-inventory-ids', JSON.stringify([operationId, ...ids.filter(id => id !== operationId)].slice(0, 20)))
-      } catch (_) { /* Storage can be unavailable; current session still works. */ }
-    },
-    async restoreInventoryResults() {
-      let ids = []
-      try { ids = JSON.parse(window.localStorage.getItem('ktg-agent-inventory-ids') || '[]') } catch (_) { return }
-      if (!Array.isArray(ids)) return
-      for (const id of ids.slice(0, 20)) {
-        try {
-          const response = await getInventoryOperation(id)
-          if (response.result && response.result.error_code !== 'OPERATION_NOT_FOUND') this.showInventoryResult(response.result)
-        } catch (_) { /* Another user's operation is not visible. */ }
-      }
-    },
     showInventoryResult(result) {
-      this.messages.push({ id: ++this.messageId, role: 'assistant', text: '', results: [result] })
+      this.messages.push({ id: `inventory-${Date.now()}-${Math.random()}`, role: 'assistant', text: '', results: [result] })
       if (result.kind === 'inventory_result' && !this.completedInventoryIds.includes(result.operation_id)) {
         this.completedInventoryIds.push(result.operation_id)
       }
@@ -202,30 +394,31 @@ export default {
     },
     async refreshInventory(operationId) {
       if (this.confirmingInventoryId) return
+      const epoch = this.epoch
       this.confirmingInventoryId = operationId
       try {
         const response = await getInventoryOperation(operationId)
-        this.showInventoryResult(response.result)
+        if (epoch === this.epoch) this.showInventoryResult(response.result)
       } catch (_) {
-        this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '回执暂时无法读取，请稍后查询。' })
-      } finally { this.confirmingInventoryId = '' }
+        if (epoch === this.epoch) this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '回执暂时无法读取，请稍后查询。' })
+      } finally { if (epoch === this.epoch) this.confirmingInventoryId = '' }
     },
     async confirmInventory(operationId) {
       if (!operationId || this.confirmingInventoryId || this.completedInventoryIds.includes(operationId)) return
+      const epoch = this.epoch
       this.confirmingInventoryId = operationId
       this.completedInventoryIds.push(operationId)
-      this.rememberInventory(operationId)
       try {
         const response = await confirmInventoryOperation(operationId)
-        this.showInventoryResult(response.result)
+        if (epoch === this.epoch) this.showInventoryResult(response.result)
       } catch (_) {
         try {
           const response = await getInventoryOperation(operationId)
-          this.showInventoryResult(response.result)
+          if (epoch === this.epoch) this.showInventoryResult(response.result)
         } catch (_) {
-          this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '请求结果待核实，请查询同一操作回执。' })
+          if (epoch === this.epoch) this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '请求结果待核实，请查询同一操作回执。' })
         }
-      } finally { this.confirmingInventoryId = '' }
+      } finally { if (epoch === this.epoch) this.confirmingInventoryId = '' }
     },
     viewInventory(result) {
       const isReceipt = result.action_type === 'ITEM_RECEIPT_EXECUTE'
@@ -234,13 +427,15 @@ export default {
     },
     async confirmPreview(previewId) {
       if (!previewId || this.confirmingPreviewId) return
+      const epoch = this.epoch
       this.confirmingPreviewId = previewId
       try {
         const response = await confirmWorkorderDraft(previewId)
+        if (epoch !== this.epoch) return
         const result = response.result
         this.completedPreviewIds.push(previewId)
         this.messages.push({
-          id: ++this.messageId,
+          id: `preview-${Date.now()}-${Math.random()}`,
           role: 'assistant',
           text: result.outcome === 'succeeded' ? '工单草稿已写入并完成回读核验。' : (result.label || '工单操作未完成。'),
           results: [result]
@@ -249,16 +444,19 @@ export default {
           window.dispatchEvent(new CustomEvent('ktg:workorder-changed', { detail: result }))
         }
       } catch (error) {
+        if (epoch !== this.epoch) return
         const data = error && error.response && error.response.data
         const message = data && data.error && data.error.message
         this.messages.push({
-          id: ++this.messageId,
+          id: `preview-error-${Date.now()}-${Math.random()}`,
           role: 'assistant',
           text: message || '确认请求失败。系统不会自动重新提交，请先核对工单列表。'
         })
       } finally {
-        this.confirmingPreviewId = ''
-        this.scrollToBottom()
+        if (epoch === this.epoch) {
+          this.confirmingPreviewId = ''
+          this.scrollToBottom()
+        }
       }
     },
     selectProduct(candidate, sourceText) {
@@ -341,6 +539,20 @@ export default {
 .agent-panel__header p { margin-top: 4px; font-size: 12px; color: #909399; }
 .agent-panel__header button { border: 0; background: transparent; color: #606266; cursor: pointer; font-size: 18px; }
 
+.agent-panel__sessions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
+  color: #606266;
+  font-size: 12px;
+}
+.agent-panel__sessions select { flex: 1; min-width: 0; padding: 6px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
+.agent-panel__sessions button,
+.agent-message--loading button { border: 0; background: transparent; color: #409eff; cursor: pointer; }
+
 .agent-panel__messages {
   flex: 1;
   overflow-y: auto;
@@ -365,6 +577,9 @@ export default {
 
 .agent-entry--user .agent-message { background: var(--current-color, #409eff); color: #fff; }
 .agent-message--loading { margin-top: 12px; color: #606266; }
+.agent-message--error { margin-top: 12px; color: #c45656; }
+.agent-progress { margin-top: 12px; }
+.agent-progress__tool { margin-top: 6px; padding: 7px 10px; border-left: 3px solid #a0cfff; background: #fff; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
 
 .agent-example {
   display: block;
