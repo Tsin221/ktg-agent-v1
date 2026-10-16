@@ -344,6 +344,21 @@ ktg-mes-ui/dist/
 
 生产环境需要由 Nginx 等 Web 服务器托管 `dist`，并把 `/prod-api/` 反向代理到后端 `8080`，代理时去掉 `/prod-api` 前缀；`/ureport/` 也应代理到后端。智能查询还要求把同源 `/agent-api/` 反向代理到 Agent `8001`，不要把模型 API Key 放进前端或 Nginx 配置。
 
+会话事件 SSE 需要在反向代理上关闭缓冲、延长读取超时，并原样转发 `Authorization` 请求头。例如 Nginx 的 `/agent-api/` 路由可配置：
+
+```nginx
+location /agent-api/ {
+    proxy_pass http://127.0.0.1:8001;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 60s;
+}
+```
+
+Agent 也会对 SSE 响应发送 `X-Accel-Buffering: no`，每 15 秒发送心跳。部署后应通过代理发起运行中的订阅，确认每个事件和心跳及时到达，而不是等连接结束后一次性返回。
+
 ## 10. 常见问题
 
 ### 后端编译提示 `org.omg.CORBA` 不存在

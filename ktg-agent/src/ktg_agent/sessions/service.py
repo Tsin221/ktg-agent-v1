@@ -126,7 +126,19 @@ class SessionService:
 
     async def events(self, authorization: str, run_id: str, *,
                      after_seq: int = 0, limit: int = 50) -> JsonObject:
+        owner = await self.authorize_run(authorization, run_id)
+        return self.read_event_batch(owner, run_id, after_seq=after_seq, limit=limit)[0]
+
+    async def authorize_run(self, authorization: str, run_id: str) -> str:
+        """Authenticate once before opening a long-lived event connection."""
         owner = await self._owner(authorization)
+        if self._repository.get_run(owner, run_id) is None:
+            raise KeyError("run not found")
+        return owner
+
+    def read_event_batch(self, owner: str, run_id: str, *, after_seq: int,
+                         limit: int = 100) -> tuple[JsonObject, bool]:
+        """Read durable events and the run state without executing the run."""
         run = self._repository.get_run(owner, run_id)
         if run is None:
             raise KeyError("run not found")
@@ -135,11 +147,14 @@ class SessionService:
         ):
             self._repository.prune_events()
         page = self._repository.list_events(owner, run_id, after=after_seq, limit=limit)
-        return {"items": [{"schema_version": 1, "session_id": run.session_id,
+        response: JsonObject = {"items": [{"schema_version": 1, "session_id": run.session_id,
                            "run_id": event.run_id, "seq": event.seq,
                            "type": event.type, "timestamp": event.created_at,
                            "payload": _public_value(event.payload)} for event in page.items],
                 "next_cursor": page.next_cursor}
+        return response, run.status in {
+            "completed", "needs_input", "failed", "cancelled", "needs_reconciliation",
+        }
 
     @staticmethod
     def _page_context(value: object) -> JsonObject | None:

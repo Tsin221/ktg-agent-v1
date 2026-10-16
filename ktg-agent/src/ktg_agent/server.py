@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import select
+import socket
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import BoundedSemaphore, Event
+from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from ktg_agent.core.events import EventSink
 from ktg_agent.core.loop import AgentRunResult
@@ -20,7 +24,7 @@ from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.coordinator import RunCoordinator
-from ktg_agent.sessions.repository import RunBusyError, RunConflictError
+from ktg_agent.sessions.repository import EventHistoryExpiredError, RunBusyError, RunConflictError
 from ktg_agent.sessions.service import SessionService
 
 
@@ -143,14 +147,23 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
 
 class AgentHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    sse_poll_seconds = 0.5
+    sse_heartbeat_seconds = 15.0
 
     def __init__(self, address: tuple[str, int], service: QueryService,
                  session_service: SessionService) -> None:
         super().__init__(address, AgentRequestHandler)
         self.query_service = service
         self.session_service = session_service
+        self.sse_slots = BoundedSemaphore(32)
+        self.closing = Event()
+
+    def shutdown(self) -> None:
+        self.closing.set()
+        super().shutdown()
 
     def server_close(self) -> None:
+        self.closing.set()
         self.session_service.close()
         super().server_close()
 
@@ -161,7 +174,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path.startswith("/agent-api/v1/runs/"):
-            self._get_run(path)
+            if path.endswith("/events"):
+                self._get_events(path)
+            else:
+                self._get_run(path)
             return
         if path == "/agent-api/v1/sessions" or path.startswith("/agent-api/v1/sessions/"):
             self._get_session(path)
@@ -300,6 +316,96 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(HTTPStatus.OK, response)
 
+    def _get_events(self, path: str) -> None:
+        run_id = path.removeprefix("/agent-api/v1/runs/").removesuffix("/events")
+        if not run_id or "/" in run_id:
+            self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
+            return
+        try:
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True,
+                              strict_parsing=True)
+            if any(key != "after_seq" or len(values) != 1 for key, values in params.items()):
+                raise ValueError("事件游标无效。")
+            raw = params.get("after_seq", ["0"])[0]
+            if not raw.isascii() or not raw.isdecimal():
+                raise ValueError("after_seq 必须是非负整数。")
+            after_seq = int(raw)
+        except ValueError as exc:
+            self._write_error(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", str(exc))
+            return
+        if not self.server.sse_slots.acquire(blocking=False):
+            self._write_error(HTTPStatus.SERVICE_UNAVAILABLE, "SSE_CAPACITY_EXCEEDED",
+                              "事件订阅已达到上限，请稍后重试。")
+            return
+        try:
+            try:
+                owner = asyncio.run(self.server.session_service.authorize_run(
+                    self.headers.get("Authorization", ""), run_id,
+                ))
+                batch, settled = self.server.session_service.read_event_batch(
+                    owner, run_id, after_seq=after_seq,
+                )
+            except KTGError as exc:
+                self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+                return
+            except KeyError:
+                self._write_error(HTTPStatus.NOT_FOUND, "RUN_NOT_FOUND", "运行不存在。")
+                return
+            except EventHistoryExpiredError:
+                self._write_error(HTTPStatus.GONE, "EVENT_HISTORY_EXPIRED", "事件历史已过期。")
+                return
+            except Exception:
+                self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR",
+                                  "Agent 请求失败，请稍后重试。")
+                return
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            last_heartbeat = monotonic()
+            try:
+                while not self.server.closing.is_set():
+                    if self._client_disconnected():
+                        return
+                    items = batch["items"]
+                    assert isinstance(items, list)
+                    for item in items:
+                        assert isinstance(item, dict)
+                        self.wfile.write(_sse_event(item))
+                        self.wfile.flush()
+                        seq = item["seq"]
+                        assert isinstance(seq, int)
+                        after_seq = seq
+                        if item["type"] == "run_settled":
+                            return
+                    if settled and batch["next_cursor"] is None:
+                        return
+                    if monotonic() - last_heartbeat >= self.server.sse_heartbeat_seconds:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = monotonic()
+                    if self.server.closing.wait(self.server.sse_poll_seconds):
+                        return
+                    batch, settled = self.server.session_service.read_event_batch(
+                        owner, run_id, after_seq=after_seq,
+                    )
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+        finally:
+            self.server.sse_slots.release()
+
+    def _client_disconnected(self) -> bool:
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
+
     def _get_session(self, path: str) -> None:
         segments = path.removeprefix("/agent-api/v1/sessions").strip("/").split("/")
         authorization = self.headers.get("Authorization", "")
@@ -348,6 +454,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         # Keep request logs free of headers, tokens and prompt bodies.
         super().log_message(format, *args)
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        # BaseHTTPRequestHandler normally logs the full request line, including query values.
+        self.log_message("%s %s", self.command, code)
+
     def _write_error(self, status: HTTPStatus, code: str, message: str) -> None:
         self._write_json(status, {"error": {"code": code, "message": message}})
 
@@ -364,6 +474,13 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+
+def _sse_event(event: JsonObject) -> bytes:
+    encoded = json.dumps(event, ensure_ascii=False, allow_nan=False, indent=2)
+    return (f"id: {event['seq']}\nevent: {event['type']}\n" +
+            "".join(f"data: {line}\n" for line in encoded.splitlines()) +
+            "\n").encode("utf-8")
 
 
 def main() -> None:
