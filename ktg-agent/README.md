@@ -63,6 +63,8 @@ uv run --locked mypy
 
 2026-10-09 在新建的独立目录和虚拟环境中使用锁文件离线复验：包版本为 `0.1.0`，示例产生 2 次 Provider 请求和 1 次工具调用，测试结果为 `92 passed`，类型检查结果为 `Success: no issues found in 33 source files`。
 
+2026-10-16 本工作区执行 `uv run --locked pytest -q`：`132 passed`；执行 `uv run --locked mypy`：`Success: no issues found in 46 source files`。其中临时 SQLite 与 FakeProvider 的 HTTP 测试覆盖两轮会话、重启读回、遗留 run 不重放及第三轮历史输入；这不是外部模型或 MES 的联调结果。
+
 ## 真实模型与网页查询
 
 下面的代码与启动入口已经具备，但单元测试和 `/health` 只能证明本地链路可启动，不能证明外部模型或当前用户下的三个业务接口已经实际查询成功。只有配置真实模型、网页登录，并从悬浮窗分别完成产品、库存和工单查询后，才算端到端验收通过。
@@ -88,13 +90,17 @@ AGENT_ENABLE_PRODUCTION_ISSUE=true
 
 模型只获得两类单据的只读预览工具，参数限准确编号或 ID。确认由网页发送 `operation_id` 到 `POST /agent-api/v1/inventory-operations/confirm`；刷新或断线后通过 `GET /agent-api/v1/inventory-operations/{operation_id}` 查询。两条链路都使用当前登录用户身份。预览和操作绑定保存在 SQLite 文件中，需随服务备份和保留；Java 持久回执是执行成功的判据。没有真实业务单据与权限账号时，仅代表假 KTG 契约验证通过。
 
-T01 新增独立的会话 SQLite 存储。后续会话 HTTP 接口启用时设置另一个持久化绝对路径；不能指向 `AGENT_INVENTORY_DB`：
+会话接口使用独立的持久化 SQLite 文件。启动 Agent 前设置绝对路径，且不能指向 `AGENT_INVENTORY_DB`：
 
 ```dotenv
 AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 ```
 
-`create_session_repository(Settings.from_env())` 首次打开空文件时建立 `sessions`、`runs`、`messages`、`events` 和索引，并将 SQLite `user_version` 设为 1；重新打开版本 1 时保留数据。未知已有表或更新版本会被拒绝，不会自动迁移库存库。以后升级需在 `sessions/repository.py` 中增加显式版本迁移，并在备份数据库后部署。T01 仅提供存储接口，现有 `/query` 不会自动创建或写入会话库。
+启动时会创建或打开该库，并在对外服务前收束上次进程留下的活动 run：`queued` 变为 `cancelled`，`running/cancelling` 变为 `needs_reconciliation`。`GET /runs/{rid}` 返回 `SERVICE_RESTARTED` 原因和摘要，持久事件以 `run_settled` 收尾；服务绝不自动重放模型或工具调用。已经完成的消息和事件保留，用户可继续新一轮。`needs_reconciliation` 表示外部写入结果可能未知，必须先核验业务回执。
+
+当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs` 和 `GET /agent-api/v1/runs/{rid}`。请求均使用当前 KTG Bearer token；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
+
+首次打开空文件时建立 `sessions`、`runs`、`messages`、`events` 和索引，SQLite `user_version` 为 1；未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 
@@ -122,7 +128,8 @@ src/ktg_agent/
   tools/      工具定义、白名单注册表和受控执行器
   ktg/        带身份验证的 KTG 客户端和三个固定只读查询工具
   service.py  无状态查询服务，负责身份验证与 Agent 组装
-  server.py   本地 health/query HTTP 入口和环境配置
+  sessions/  会话存储、身份隔离、运行调度与重启收束
+  server.py   本地 HTTP 入口、启动配置和会话装配
 examples/     无网络可执行示例
 tests/        单元与回归测试
 docs/         核心契约和阶段交接说明
@@ -134,6 +141,6 @@ docs/         核心契约和阶段交接说明
 - `Agent` 保证单实例同一时刻只有一个活动 run；并发普通 `prompt` 返回 `RUN_BUSY`。
 - `abort()` 只阻止尚未开始的后续动作，不回滚已经执行的工具或外部操作。
 - 只有完整且最终停止原因为 `tool_call` 的工具调用会执行；截断输出不会执行流中出现的调用。
-- 阶段 A 的 `agent_end` 是低层循环结束事件，`Agent` 随后在 `prompt` 的 `finally` 中转为 idle。未来阶段 B 的 `run_settled` 必须等最终状态、消息、事件和必要操作记录持久化后再由 SessionService 发布，三者不能互相替代。
+- 阶段 A 的 `agent_end` 是低层循环结束事件；会话运行的 `run_settled` 在最终状态和消息落库时一并提交。两者不能互相替代。
 
-现有 `/agent-api/v1/query` 是无状态、只读的单次查询入口，并已通过 `/getInfo` 验证当前用户；它不等同于完整的阶段 B 服务。阶段 B 尚需实现会话存储与幂等 admission、会话所有权和权限校验、sessions/runs/inputs/cancel API、SSE 与事件回放，以及外部写入结果未知时的持久化和核验流程。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
+会话接口已实现持久化、用户隔离、幂等准入、多轮历史和重启收束；仍未提供 SSE、事件回放 HTTP 入口、inputs/cancel 接口以及会话运行中的业务写工具。这里只完成离线 FakeProvider 和 HTTP 验证，真实模型及 MES 联调需要另行验收。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。

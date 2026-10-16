@@ -351,6 +351,43 @@ class SessionRepository:
             ).fetchone()
         return _run(row) if row else None
 
+    def recover_interrupted_runs(self) -> int:
+        """Settle runs orphaned by a previous process before accepting requests.
+
+        A running tool may already have written externally, so its outcome stays
+        unknown. This method is deliberately never called by a live coordinator.
+        """
+        now = _now()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT id,session_id,status FROM runs "
+                "WHERE status IN ('queued','running','cancelling')"
+            ).fetchall()
+            for row in rows:
+                status = "cancelled" if row["status"] == "queued" else "needs_reconciliation"
+                summary: JsonObject = {
+                    "error": "SERVICE_RESTARTED",
+                    "message": "服务重启中断运行；请核验已发出的业务操作。" if status == "needs_reconciliation"
+                               else "服务重启前运行尚未开始，请重新提交。",
+                    "outcome_unknown": status == "needs_reconciliation",
+                }
+                db.execute(
+                    "UPDATE runs SET status=?,ended_at=?,stop_reason=?,result_summary_json=? WHERE id=?",
+                    (status, now, "SERVICE_RESTARTED", _safe_json(summary), row["id"]),
+                )
+                db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, row["session_id"]))
+                seq = int(db.execute(
+                    "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?", (row["id"],),
+                ).fetchone()[0])
+                payload = _safe_json({"status": status, "stop_reason": "SERVICE_RESTARTED",
+                                      "result_summary": summary})
+                db.execute(
+                    "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
+                    (row["id"], seq, "run_settled", payload, now),
+                )
+        return len(rows)
+
     def update_run_status(
         self, owner_user_id: str, run_id: str, status: str, *,
         stop_reason: str | None = None, result_summary: JsonObject | None = None,

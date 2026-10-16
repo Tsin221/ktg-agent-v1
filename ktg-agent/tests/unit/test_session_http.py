@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Event, Lock, Thread
+from time import monotonic, sleep
 from typing import cast
 
 from ktg_agent.core.messages import AssistantMessage, JsonObject, StopReason, TextBlock, UserMessage
@@ -18,7 +19,7 @@ from ktg_agent.core.events import EventSink
 from ktg_agent.core.loop import AgentRunResult
 from ktg_agent.core.messages import Message
 from ktg_agent.ktg import KTGClient, KTGError
-from ktg_agent.server import AgentHTTPServer, Settings, create_service
+from ktg_agent.server import AgentHTTPServer, Settings, create_service, create_session_service
 from ktg_agent.service import QueryService
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
@@ -238,3 +239,83 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
     saved = repo.get_run("id:7", rid)
     assert saved is not None and saved.status == "completed" and saved.stop_reason == "completed"
     assert saved.result_summary is not None and saved.result_summary["answer"] == "完成"
+
+
+def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
+    tmp_path: Path, monkeypatch: object,
+) -> None:
+    import ktg_agent.server as server_module
+    from pytest import MonkeyPatch
+    assert isinstance(monkeypatch, MonkeyPatch)
+    monkeypatch.setattr(server_module, "KTGClient", lambda **kwargs: FakeClient(kwargs["authorization"]))
+    path = tmp_path / "sessions.sqlite3"
+    settings = Settings("key", "http://localhost", "model", "http://localhost",
+                        session_db_path=str(path))
+
+    @contextmanager
+    def served(provider: FakeProvider) -> Iterator[AgentHTTPServer]:
+        query_service = QueryService(
+            provider=provider, model_config=ModelConfig("fake", 128),
+            ktg_client_factory=lambda token: cast(KTGClient, FakeClient(token)),
+        )
+        session_service = create_session_service(settings, query_service)
+        server = AgentHTTPServer(("127.0.0.1", 0), query_service, session_service)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def submit_and_wait(server: AgentHTTPServer, sid: str, number: int) -> str:
+        status, body = request(server, "POST", f"/agent-api/v1/sessions/{sid}/runs",
+                               body={"request_id": f"r{number}", "message": f"question {number}"})
+        assert status == 202
+        rid = cast(str, body["run_id"])
+        deadline = monotonic() + 3
+        while monotonic() < deadline:
+            snapshot = request(server, "GET", f"/agent-api/v1/runs/{rid}")[1]
+            if snapshot["status"] == "completed":
+                assert snapshot["result_summary"] is not None
+                return rid
+            sleep(0.01)
+        raise AssertionError("run did not complete")
+
+    first_provider = FakeProvider((ScriptedTurn((ResponseCompleted(FinalResponse(
+        AssistantMessage((TextBlock(f"answer {number}"),)), StopReason.COMPLETED, Usage(1, 1),
+    )),)) for number in (1, 2)))
+    with served(first_provider) as server:
+        sid = cast(str, request(server, "POST", "/agent-api/v1/sessions", body={})[1]["session_id"])
+        completed_ids = [submit_and_wait(server, sid, number) for number in (1, 2)]
+        messages = request(server, "GET", f"/agent-api/v1/sessions/{sid}/messages")[1]
+        assert [item["role"] for item in cast(list[dict[str, object]], messages["items"])] == [
+            "user", "assistant", "user", "assistant",
+        ]
+
+    repo = SessionRepository(path)
+    orphan, _ = repo.admit_run("id:7", sid, "interrupted", "interrupted", {})
+    repo.update_run_status("id:7", orphan.id, "running")
+    repo.append_event("id:7", orphan.id, 1, "tool_execution_start", {"tool_name": "write"})
+    third_provider = FakeProvider((ScriptedTurn((ResponseCompleted(FinalResponse(
+        AssistantMessage((TextBlock("answer 3"),)), StopReason.COMPLETED, Usage(1, 1),
+    )),)),))
+    with served(third_provider) as server:
+        orphan_snapshot = request(server, "GET", f"/agent-api/v1/runs/{orphan.id}")[1]
+        assert orphan_snapshot["status"] == "needs_reconciliation"
+        assert orphan_snapshot["stop_reason"] == "SERVICE_RESTARTED"
+        assert orphan_snapshot["last_seq"] == 2
+        assert len(third_provider.requests) == 0
+        for rid in completed_ids:
+            assert request(server, "GET", f"/agent-api/v1/runs/{rid}")[1]["status"] == "completed"
+        assert request(server, "GET", f"/agent-api/v1/sessions/{sid}")[1]["active_run_id"] is None
+        third = submit_and_wait(server, sid, 3)
+        assert third != orphan.id
+        assert len(third_provider.requests) == 1
+        assert [item.content[0].text for item in third_provider.requests[0].messages
+                if isinstance(item.content[0], TextBlock)][-5:] == [
+                    "question 1", "answer 1", "question 2", "answer 2", "question 3",
+                ]
+        assert request(server, "POST", f"/agent-api/v1/sessions/{sid}/runs",
+                       body={"request_id": "interrupted", "message": "different"})[0] == 409

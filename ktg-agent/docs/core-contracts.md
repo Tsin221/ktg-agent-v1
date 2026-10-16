@@ -1,6 +1,6 @@
 # 阶段 A 核心契约与阶段 B 交接
 
-本文描述当前代码已经实现并由测试约束的公开接口。阶段 A 核心之外，仓库还提供了 OpenAI 兼容 Provider、无状态 HTTP 查询入口，以及按当前 KTG 用户身份执行的三个固定只读工具。它们是可用的查询扩展，不代表阶段 B 的会话服务、持久化、SSE 或写操作恢复已经实现。
+本文描述核心契约和阶段 B 后续工作。仓库已提供 OpenAI 兼容 Provider、无状态查询入口、按当前 KTG 用户身份执行的三个固定只读工具，以及持久会话、运行准入、多轮历史与启动恢复。SSE、inputs/cancel 和会话运行中的业务写入恢复仍待实现。
 
 ## 公开模块
 
@@ -77,18 +77,18 @@
 
 `GET /health` 用于检查本地进程，`POST /agent-api/v1/query` 接受一次查询。每个查询请求必须携带当前网页用户的 Bearer token；`QueryService` 先调用 KTG `/getInfo` 验证当前身份，再创建短期客户端和 Agent。token 不写入消息、工具参数或持久化存储。
 
-模型只能选择 `ktg_search_items`、`ktg_query_stock` 和 `ktg_list_workorders` 三个白名单工具；工具分别映射到固定的产品、库存和工单 GET 接口。模型不能指定 KTG 基址、HTTP 方法或任意路径。当前入口不保存会话和历史，不提供 run/input/cancel API，也没有 SSE、事件回放或写工具，因此不能当作阶段 B SessionService 使用。
+模型只能选择 `ktg_search_items`、`ktg_query_stock` 和 `ktg_list_workorders` 三个白名单工具；工具分别映射到固定的产品、库存和工单 GET 接口。模型不能指定 KTG 基址、HTTP 方法或任意路径。`/query` 本身不保存会话和历史；另有 `/sessions`、`/runs` 入口负责持久多轮会话。
 
 ## 当前已知限制
 
 - 真实模型仅提供 OpenAI 兼容 chat completions 适配；当前适配器把完整响应转换为核心事件，不提供模型侧实时增量流。尚无重试编排或 token 用量预算。
 - 真实 KTG 工具仅限三个固定只读查询；尚无写工具、细粒度工具权限策略或业务操作恢复。
-- 没有 SessionService、Repository、数据库迁移、会话所有权或跨进程单写者保证。
-- 事件只含 `run_id`、`seq`、`type` 和 payload；没有 `schema_version`、`session_id`、持久化时间、回放或保留期。
+- SessionRepository 已持久保存会话、运行、消息和事件；运行协调器仅保证单 Python 进程内的调度，尚无跨进程单写者保证。
+- 持久事件有 run_id、seq、type、payload 和时间，但尚无 SSE 回放 HTTP 入口、保留期与完整事件信封。
 - 取消信号是进程内布尔 token；工具和 Provider 必须主动观察它，已开始的外部副作用不会自动撤销。
-- `identity` 与 `ktg_client` 在核心层仍是不透明对象；当前无状态查询入口会调用 `/getInfo` 验证当前用户，但尚未实现会话所有权、长期凭据生命周期和完整权限编排。
+- `identity` 与 `ktg_client` 在核心层仍是不透明对象；会话 HTTP 入口每次调用 `/getInfo` 并检查所有权，长期凭据生命周期和完整权限编排仍待实现。
 - `ToolStatus.UNKNOWN` 和 operation 字段已有数据形状，但持久化意图、幂等键、回读核验与恢复状态机尚未实现。
-- 当前只保证单个 `Agent` 实例单 run；阶段 B 仍要按会话管理实例、锁和 admission，不能依赖调用方自律。
+- SessionRepository 以 SQLite 唯一索引和原子准入保证单会话单活动 run；该保证以单 Python 进程部署为前提。
 
 ## 阶段 B 注入边界
 

@@ -126,3 +126,38 @@ def test_multi_statement_write_rolls_back_on_later_failure(tmp_path: Path) -> No
         with pytest.raises(sqlite3.IntegrityError, match="touch failed"):
             repo.append_message("alice", run.id, UserMessage((TextBlock("hello"),)))
         assert repo.list_messages("alice", session.id).items == ()
+
+
+def test_restart_settles_only_orphaned_runs_once(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    runs = []
+    for status in ("queued", "running", "cancelling"):
+        session = repo.create_session("alice")
+        run = repo.create_run("alice", session.id, status, status, {})
+        if status != "queued":
+            repo.update_run_status("alice", run.id, status)
+            repo.append_event("alice", run.id, 1, "tool_execution_start", {"tool_name": "write"})
+        runs.append(run)
+    completed_session = repo.create_session("alice")
+    completed = repo.create_run("alice", completed_session.id, "done", "done", {})
+    repo.settle_run("alice", completed.id, "completed", "completed", {"answer": "saved"},
+                    (UserMessage((TextBlock("hello"),)),
+                     AssistantMessage((TextBlock("saved"),))))
+
+    reopened = SessionRepository(path)
+    assert reopened.recover_interrupted_runs() == 3
+    assert reopened.recover_interrupted_runs() == 0
+    for run, status in zip(runs, ("cancelled", "needs_reconciliation", "needs_reconciliation")):
+        saved = reopened.get_run("alice", run.id)
+        assert saved is not None and saved.status == status
+        assert saved.stop_reason == "SERVICE_RESTARTED"
+        assert saved.result_summary is not None
+        assert saved.result_summary["error"] == "SERVICE_RESTARTED"
+        events = reopened.list_events("alice", run.id).items
+        assert [event.seq for event in events] == list(range(1, len(events) + 1))
+        assert events[-1].type == "run_settled"
+        assert events[-1].payload["status"] == status
+        assert reopened.get_active_run("alice", run.session_id) is None
+    assert reopened.get_run("alice", completed.id).status == "completed"  # type: ignore[union-attr]
+    assert len(reopened.list_messages("alice", completed_session.id).items) == 2

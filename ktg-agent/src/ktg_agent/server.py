@@ -127,6 +127,7 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
         return KTGClient(base_url=settings.ktg_base_url, authorization=authorization)
 
     repository = create_session_repository(settings)
+    repository.recover_interrupted_runs()
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       authorization: str, event_sink: EventSink) -> AgentRunResult:
         return await service.run_session(
