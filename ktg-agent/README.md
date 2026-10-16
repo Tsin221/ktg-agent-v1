@@ -88,6 +88,14 @@ AGENT_ENABLE_PRODUCTION_ISSUE=true
 
 模型只获得两类单据的只读预览工具，参数限准确编号或 ID。确认由网页发送 `operation_id` 到 `POST /agent-api/v1/inventory-operations/confirm`；刷新或断线后通过 `GET /agent-api/v1/inventory-operations/{operation_id}` 查询。两条链路都使用当前登录用户身份。预览和操作绑定保存在 SQLite 文件中，需随服务备份和保留；Java 持久回执是执行成功的判据。没有真实业务单据与权限账号时，仅代表假 KTG 契约验证通过。
 
+T01 新增独立的会话 SQLite 存储。后续会话 HTTP 接口启用时设置另一个持久化绝对路径；不能指向 `AGENT_INVENTORY_DB`：
+
+```dotenv
+AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
+```
+
+`create_session_repository(Settings.from_env())` 首次打开空文件时建立 `sessions`、`runs`、`messages`、`events` 和索引，并将 SQLite `user_version` 设为 1；重新打开版本 1 时保留数据。未知已有表或更新版本会被拒绝，不会自动迁移库存库。以后升级需在 `sessions/repository.py` 中增加显式版本迁移，并在备份数据库后部署。T01 仅提供存储接口，现有 `/query` 不会自动创建或写入会话库。
+
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 
 加载根目录环境变量后启动查询服务：

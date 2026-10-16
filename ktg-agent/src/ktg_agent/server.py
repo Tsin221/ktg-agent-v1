@@ -15,6 +15,7 @@ from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
+from ktg_agent.sessions import SessionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8001
     inventory_db_path: str = ""
+    session_db_path: str = ""
     enable_item_receipt: bool = False
     enable_production_issue: bool = False
 
@@ -66,9 +68,20 @@ class Settings:
             host=host,
             port=port,
             inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
+            session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
         )
+
+
+def create_session_repository(settings: Settings) -> SessionRepository:
+    """Open the separately configured, versioned conversation database."""
+    session_path = Path(settings.session_db_path)
+    if not settings.session_db_path or not session_path.is_absolute():
+        raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
+    if settings.inventory_db_path and session_path.resolve() == Path(settings.inventory_db_path).resolve():
+        raise RuntimeError("AGENT_SESSION_DB must differ from AGENT_INVENTORY_DB")
+    return SessionRepository(session_path)
 
 
 def create_service(settings: Settings) -> QueryService:

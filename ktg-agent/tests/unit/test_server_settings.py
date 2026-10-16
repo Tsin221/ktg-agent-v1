@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from ktg_agent.server import Settings, create_service
+from ktg_agent.server import Settings, create_service, create_session_repository
 
 
 def _set_valid_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,3 +42,23 @@ def test_service_does_not_force_optional_temperature(
     service = create_service(Settings.from_env())
 
     assert service._model_config.temperature is None
+
+
+def test_session_database_uses_separate_absolute_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _set_valid_environment(monkeypatch)
+    session_path = tmp_path / "sessions.sqlite3"
+    monkeypatch.setenv("AGENT_SESSION_DB", str(session_path))
+    monkeypatch.setenv("AGENT_INVENTORY_DB", str(tmp_path / "inventory.sqlite3"))
+    settings = Settings.from_env()
+    assert create_session_repository(settings).path == session_path
+    assert session_path.exists()
+
+    monkeypatch.setenv("AGENT_INVENTORY_DB", str(session_path))
+    with pytest.raises(RuntimeError, match="must differ"):
+        create_session_repository(Settings.from_env())
+
+    monkeypatch.setenv("AGENT_SESSION_DB", "relative.sqlite3")
+    with pytest.raises(RuntimeError, match="absolute"):
+        create_session_repository(Settings.from_env())
