@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Generic, TypeVar, cast
 from uuid import uuid4
@@ -27,10 +27,15 @@ ACTIVE = frozenset({"queued", "running", "cancelling"})
 TERMINAL = frozenset({
     "completed", "needs_input", "failed", "cancelled", "needs_reconciliation",
 })
+EVENT_RETENTION_DAYS = 30
 STATUSES = ACTIVE | TERMINAL
-_SECRET_KEY = re.compile(r"(?:authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret)", re.I)
+_SECRET_KEY = re.compile(
+    r"(?:authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
+    r"headers?|cookies?|traceback|stack[_-]?trace|exception[_-]?stack)", re.I,
+)
 _SECRET_VALUE = re.compile(
-    r"\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}\b|\bapi[_ -]?key\s*[:=]\s*\S+",
+    r"\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}\b|\bapi[_ -]?key\s*[:=]\s*\S+|"
+    r"Traceback \(most recent call last\):|\bFile \"[^\"]+\", line \d+",
     re.I,
 )
 
@@ -92,6 +97,10 @@ class RunBusyError(ValueError):
     code = "RUN_BUSY"
 
 
+class EventHistoryExpiredError(ValueError):
+    code = "EVENT_HISTORY_EXPIRED"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -149,9 +158,13 @@ class SessionRepository:
     def _migrate(self) -> None:
         with self._connect() as db:
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version > 1:
+            if version > 2:
                 raise RuntimeError("session database has a newer schema version")
+            if version == 2:
+                return
             if version == 1:
+                db.execute("ALTER TABLE runs ADD COLUMN replay_floor_seq INTEGER NOT NULL DEFAULT 1")
+                db.execute("PRAGMA user_version=2")
                 return
             tables = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -184,6 +197,7 @@ class SessionRepository:
                     ended_at TEXT,
                     stop_reason TEXT,
                     result_summary_json TEXT,
+                    replay_floor_seq INTEGER NOT NULL DEFAULT 1,
                     UNIQUE(owner_user_id, session_id, request_id)
                 );
                 CREATE UNIQUE INDEX runs_one_active_per_session ON runs(session_id)
@@ -206,7 +220,7 @@ class SessionRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(run_id, seq)
                 );
-                PRAGMA user_version=1;
+                PRAGMA user_version=2;
                 COMMIT;
             """)
 
@@ -319,10 +333,10 @@ class SessionRepository:
     def last_event_seq(self, owner_user_id: str, run_id: str) -> int:
         with self._connect() as db:
             row = db.execute(
-                "SELECT COALESCE(MAX(e.seq),0) AS last_seq FROM runs r "
+                "SELECT MAX(COALESCE(MAX(e.seq),0),r.replay_floor_seq-1) AS last_seq FROM runs r "
                 "JOIN sessions s ON s.id=r.session_id "
                 "LEFT JOIN events e ON e.run_id=r.id "
-                "WHERE r.id=? AND s.owner_user_id=?",
+                "WHERE r.id=? AND s.owner_user_id=? GROUP BY r.id",
                 (run_id, owner_user_id),
             ).fetchone()
         if row is None:
@@ -506,6 +520,19 @@ class SessionRepository:
         _safe_json({"event_type": event_type})
         encoded, now = _safe_json(payload), _now()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT COALESCE(MAX(e.seq),r.replay_floor_seq-1)+1 AS next_seq "
+                "FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "LEFT JOIN events e ON e.run_id=r.id "
+                "WHERE r.id=? AND s.owner_user_id=? AND r.status IN "
+                "('queued','running','cancelling') GROUP BY r.id",
+                (run_id, owner_user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("run not found")
+            if seq != int(row["next_seq"]):
+                raise sqlite3.IntegrityError("event sequence must be consecutive")
             cursor = db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) "
                 "SELECT r.id,?,?,?,? FROM runs r JOIN sessions s ON s.id=r.session_id "
@@ -517,8 +544,19 @@ class SessionRepository:
         return EventRecord(run_id, seq, event_type, _read_json(encoded), now)
 
     def list_events(self, owner_user_id: str, run_id: str, *, after: int | None = None, limit: int = 50) -> Page[EventRecord]:
-        _page_args(after, limit)
+        if after is not None and (not isinstance(after, int) or isinstance(after, bool) or after < 0):
+            raise ValueError("after_seq must be a nonnegative integer")
+        _page_args(None, limit)
         with self._connect() as db:
+            db.execute("BEGIN")
+            floor = db.execute(
+                "SELECT r.replay_floor_seq FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "WHERE r.id=? AND s.owner_user_id=?", (run_id, owner_user_id),
+            ).fetchone()
+            if floor is None:
+                raise KeyError("run not found")
+            if (after or 0) < int(floor["replay_floor_seq"]) - 1:
+                raise EventHistoryExpiredError("event history has expired")
             rows = db.execute(
                 "SELECT e.* FROM events e JOIN runs r ON r.id=e.run_id "
                 "JOIN sessions s ON s.id=r.session_id WHERE e.run_id=? AND s.owner_user_id=? "
@@ -527,6 +565,26 @@ class SessionRepository:
             ).fetchall()
         return Page(tuple(_event(row) for row in rows[:limit]),
                     int(rows[limit - 1]["seq"]) if len(rows) > limit else None)
+
+    def prune_events(self, *, now: datetime | None = None) -> int:
+        """Discard events of runs settled over 30 days ago; keep snapshots and messages."""
+        instant = now or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            raise ValueError("now must have a timezone")
+        cutoff = (instant.astimezone(timezone.utc) - timedelta(days=EVENT_RETENTION_DAYS)).isoformat(timespec="microseconds")
+        removed = 0
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT r.id,MAX(e.seq) AS last_seq FROM runs r JOIN events e ON e.run_id=r.id "
+                "WHERE r.status IN ('completed','needs_input','failed','cancelled','needs_reconciliation') "
+                "AND r.ended_at<? GROUP BY r.id", (cutoff,),
+            ).fetchall()
+            for row in rows:
+                db.execute("UPDATE runs SET replay_floor_seq=MAX(replay_floor_seq,?) WHERE id=?",
+                           (int(row["last_seq"]) + 1, row["id"]))
+                removed += int(db.execute("DELETE FROM events WHERE run_id=?", (row["id"],)).rowcount)
+        return removed
 
     def _session_id(self, run_id: str) -> str:
         with self._connect() as db:

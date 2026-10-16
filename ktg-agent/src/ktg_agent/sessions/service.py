@@ -3,13 +3,36 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 
-from ktg_agent.core.messages import JsonObject, _json_object, message_to_dict
+from ktg_agent.core.messages import JsonObject, JsonValue, _json_object, message_to_dict
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.sessions.coordinator import RunCoordinator
-from ktg_agent.sessions.repository import Page, SessionRecord, SessionRepository
+from ktg_agent.sessions.repository import EVENT_RETENTION_DAYS, Page, SessionRecord, SessionRepository
+
+_PRIVATE_FIELD = re.compile(
+    r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
+    r"headers?|cookies?|traceback|stack[_-]?trace|exception[_-]?stack", re.I,
+)
+_PRIVATE_TEXT = re.compile(
+    r"\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}\b|\bapi[_ -]?key\s*[:=]\s*\S+|"
+    r"Traceback \(most recent call last\):|\bFile \"[^\"]+\", line \d+", re.I,
+)
+
+
+def _public_value(value: JsonValue) -> JsonValue:
+    """Defend reads of events written before the current storage checks."""
+    if isinstance(value, dict):
+        return {key: _public_value(item) for key, item in value.items()
+                if not _PRIVATE_FIELD.search(key)}
+    if isinstance(value, list):
+        return [_public_value(item) for item in value]
+    if isinstance(value, str) and _PRIVATE_TEXT.search(value):
+        return "[redacted]"
+    return value
 
 
 class SessionService:
@@ -100,6 +123,23 @@ class SessionService:
                 "stop_reason": run.stop_reason,
                 "last_seq": self._repository.last_event_seq(owner, run_id),
                 "result_summary": run.result_summary}
+
+    async def events(self, authorization: str, run_id: str, *,
+                     after_seq: int = 0, limit: int = 50) -> JsonObject:
+        owner = await self._owner(authorization)
+        run = self._repository.get_run(owner, run_id)
+        if run is None:
+            raise KeyError("run not found")
+        if run.ended_at is not None and datetime.fromisoformat(run.ended_at) < (
+            datetime.now(timezone.utc) - timedelta(days=EVENT_RETENTION_DAYS)
+        ):
+            self._repository.prune_events()
+        page = self._repository.list_events(owner, run_id, after=after_seq, limit=limit)
+        return {"items": [{"schema_version": 1, "session_id": run.session_id,
+                           "run_id": event.run_id, "seq": event.seq,
+                           "type": event.type, "timestamp": event.created_at,
+                           "payload": _public_value(event.payload)} for event in page.items],
+                "next_cursor": page.next_cursor}
 
     @staticmethod
     def _page_context(value: object) -> JsonObject | None:

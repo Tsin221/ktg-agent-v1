@@ -2,6 +2,7 @@
 
 from ktg_agent.sessions.repository import (
     EventRecord,
+    EventHistoryExpiredError,
     MessageRecord,
     Page,
     RunRecord,
@@ -10,6 +11,6 @@ from ktg_agent.sessions.repository import (
 )
 
 __all__ = [
-    "EventRecord", "MessageRecord", "Page", "RunRecord", "SessionRecord",
+    "EventHistoryExpiredError", "EventRecord", "MessageRecord", "Page", "RunRecord", "SessionRecord",
     "SessionRepository",
 ]
