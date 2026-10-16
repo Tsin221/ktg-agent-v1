@@ -129,10 +129,12 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
     repository = create_session_repository(settings)
     repository.recover_interrupted_runs()
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
-                      authorization: str, event_sink: EventSink) -> AgentRunResult:
+                      page_context: JsonObject | None, authorization: str,
+                      event_sink: EventSink) -> AgentRunResult:
         return await service.run_session(
             run_id=run_id, message=message, history=history,
-            authorization=authorization, event_sink=event_sink,
+            page_context=page_context, authorization=authorization,
+            event_sink=event_sink,
         )
 
     return SessionService(repository, client_factory, RunCoordinator(repository, execute))

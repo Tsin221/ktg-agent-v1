@@ -100,6 +100,8 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs` 和 `GET /agent-api/v1/runs/{rid}`。请求均使用当前 KTG Bearer token；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
 
+创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手仍调用单次 `/query`，尚未接入会话接口和页面上下文采集。
+
 首次打开空文件时建立 `sessions`、`runs`、`messages`、`events` 和索引，SQLite `user_version` 为 1；未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。

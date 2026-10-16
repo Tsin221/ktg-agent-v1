@@ -37,7 +37,7 @@ class FakeClient:
 
 
 type RunCoordinatorExecutor = Callable[
-    [str, str, tuple[Message, ...], str, EventSink], Awaitable[AgentRunResult],
+    [str, str, tuple[Message, ...], JsonObject | None, str, EventSink], Awaitable[AgentRunResult],
 ]
 
 
@@ -48,10 +48,11 @@ def query_executor(provider: FakeProvider) -> RunCoordinatorExecutor:
     )
 
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
-                      authorization: str, sink: EventSink) -> AgentRunResult:
+                      page_context: JsonObject | None, authorization: str,
+                      sink: EventSink) -> AgentRunResult:
         return await service.run_session(
             run_id=run_id, message=message, history=history,
-            authorization=authorization, event_sink=sink,
+            page_context=page_context, authorization=authorization, event_sink=sink,
         )
 
     return execute
@@ -116,7 +117,8 @@ def test_tool_audit_is_durable_but_projection_uses_summary(tmp_path: Path) -> No
     ),))
 
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
-                      authorization: str, sink: EventSink) -> AgentRunResult:
+                      page_context: JsonObject | None, authorization: str,
+                      sink: EventSink) -> AgentRunResult:
         loop = AgentLoop(provider=provider, tool_registry=registry,
                          tool_runner=ToolRunner(registry),
                          model_config=ModelConfig("fake", 128), event_sink=sink)

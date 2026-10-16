@@ -179,10 +179,12 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
         ktg_client_factory=lambda token: cast(KTGClient, FakeClient(token)),
     )
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
-                      authorization: str, event_sink: EventSink) -> AgentRunResult:
+                      page_context: JsonObject | None, authorization: str,
+                      event_sink: EventSink) -> AgentRunResult:
         return await query_service.run_session(
             run_id=run_id, message=message, history=history,
-            authorization=authorization, event_sink=event_sink,
+            page_context=page_context, authorization=authorization,
+            event_sink=event_sink,
         )
 
     session_service = SessionService(
@@ -239,6 +241,17 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
     saved = repo.get_run("id:7", rid)
     assert saved is not None and saved.status == "completed" and saved.stop_reason == "completed"
     assert saved.result_summary is not None and saved.result_summary["answer"] == "完成"
+    contextual_request = next(request for request in provider.requests
+                              if request.messages[-1].content[0] == TextBlock("查库存"))
+    other_request = next(request for request in provider.requests
+                         if request.messages[-1].content[0] == TextBlock("other session"))
+    first_block = contextual_request.messages[0].content[0]
+    assert isinstance(first_block, TextBlock)
+    first_prompt = first_block.text
+    assert '"itemCode":"A"' in first_prompt
+    assert '"filters"' in first_prompt
+    assert "页面上下文仅供定位" in first_prompt
+    assert '"itemCode":"A"' not in str(other_request.messages)
 
 
 def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
@@ -269,9 +282,13 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
             thread.join()
             server.server_close()
 
-    def submit_and_wait(server: AgentHTTPServer, sid: str, number: int) -> str:
+    def submit_and_wait(server: AgentHTTPServer, sid: str, number: int,
+                        page_context: JsonObject | None = None) -> str:
+        request_body: JsonObject = {"request_id": f"r{number}", "message": f"question {number}"}
+        if page_context is not None:
+            request_body["page_context"] = page_context
         status, body = request(server, "POST", f"/agent-api/v1/sessions/{sid}/runs",
-                               body={"request_id": f"r{number}", "message": f"question {number}"})
+                               body=request_body)
         assert status == 202
         rid = cast(str, body["run_id"])
         deadline = monotonic() + 3
@@ -288,11 +305,18 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
     )),)) for number in (1, 2)))
     with served(first_provider) as server:
         sid = cast(str, request(server, "POST", "/agent-api/v1/sessions", body={})[1]["session_id"])
-        completed_ids = [submit_and_wait(server, sid, number) for number in (1, 2)]
+        completed_ids = [
+            submit_and_wait(server, sid, 1, {"route_name": "WmStock",
+                                            "filters": {"itemCode": "A"}}),
+            submit_and_wait(server, sid, 2),
+        ]
+        assert '"itemCode":"A"' in str(first_provider.requests[0].messages[0])
+        assert '"itemCode":"A"' not in str(first_provider.requests[1].messages)
         messages = request(server, "GET", f"/agent-api/v1/sessions/{sid}/messages")[1]
         assert [item["role"] for item in cast(list[dict[str, object]], messages["items"])] == [
             "user", "assistant", "user", "assistant",
         ]
+        assert '"itemCode":"A"' not in str(messages)
 
     repo = SessionRepository(path)
     orphan, _ = repo.admit_run("id:7", sid, "interrupted", "interrupted", {})

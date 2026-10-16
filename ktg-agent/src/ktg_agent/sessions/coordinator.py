@@ -11,7 +11,7 @@ from ktg_agent.core.loop import AgentRunResult
 from ktg_agent.core.messages import JsonObject, JsonValue, Message, StopReason, TextBlock, ToolResultMessage
 from ktg_agent.sessions.repository import RunRecord, SessionRepository
 
-RunExecutor = Callable[[str, str, tuple[Message, ...], str, EventSink], Awaitable[AgentRunResult]]
+RunExecutor = Callable[[str, str, tuple[Message, ...], JsonObject | None, str, EventSink], Awaitable[AgentRunResult]]
 
 
 class RunCoordinator:
@@ -36,6 +36,9 @@ class RunCoordinator:
         try:
             self._repository.update_run_status(run.owner_user_id, run.id, "running")
             history = self._repository.completed_history(run.owner_user_id, run.session_id)
+            page_context = run.request_summary.get("page_context")
+            if page_context is not None and not isinstance(page_context, dict):
+                raise ValueError("stored page_context is invalid")
 
             def persist_event(event: AgentEvent) -> None:
                 self._repository.append_event(
@@ -43,7 +46,8 @@ class RunCoordinator:
                 )
 
             async def invoke() -> AgentRunResult:
-                return await self._executor(run.id, message, history, authorization, persist_event)
+                return await self._executor(run.id, message, history, page_context,
+                                            authorization, persist_event)
 
             result = asyncio.run(invoke())
             status = ("completed" if result.stop_reason is StopReason.COMPLETED else
