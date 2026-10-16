@@ -14,6 +14,9 @@ from threading import Event, Lock, Thread
 from typing import cast
 
 from ktg_agent.core.messages import AssistantMessage, JsonObject, StopReason, TextBlock, UserMessage
+from ktg_agent.core.events import EventSink
+from ktg_agent.core.loop import AgentRunResult
+from ktg_agent.core.messages import Message
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.server import AgentHTTPServer, Settings, create_service
 from ktg_agent.service import QueryService
@@ -174,8 +177,12 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
         provider=provider, model_config=ModelConfig("fake", 128),
         ktg_client_factory=lambda token: cast(KTGClient, FakeClient(token)),
     )
-    async def execute(message: str, authorization: str) -> JsonObject:
-        return await query_service.query(message=message, authorization=authorization)
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      authorization: str, event_sink: EventSink) -> AgentRunResult:
+        return await query_service.run_session(
+            run_id=run_id, message=message, history=history,
+            authorization=authorization, event_sink=event_sink,
+        )
 
     session_service = SessionService(
         repo, lambda token: cast(KTGClient, FakeClient(token)),
@@ -213,7 +220,7 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
         assert request(server, "GET", f"/agent-api/v1/runs/{rid}", token="Bearer bob")[0] == 404
         assert request(server, "GET", f"/agent-api/v1/runs/{rid}", token="Bearer expired")[0] == 401
         snapshot = request(server, "GET", f"/agent-api/v1/runs/{rid}")[1]
-        assert snapshot["status"] == "running" and snapshot["last_seq"] == 0
+        assert snapshot["status"] == "running" and cast(int, snapshot["last_seq"]) >= 1
         assert snapshot["stop_reason"] is None and snapshot["result_summary"] is None
         other_sid = cast(str, request(server, "POST", "/agent-api/v1/sessions", body={})[1]["session_id"])
         assert request(server, "POST", f"/agent-api/v1/sessions/{other_sid}/runs",

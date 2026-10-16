@@ -10,7 +10,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from ktg_agent.core.messages import JsonObject
+from ktg_agent.core.events import EventSink
+from ktg_agent.core.loop import AgentRunResult
+from ktg_agent.core.messages import JsonObject, Message
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.providers import OpenAICompatibleProvider
@@ -125,8 +127,12 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
         return KTGClient(base_url=settings.ktg_base_url, authorization=authorization)
 
     repository = create_session_repository(settings)
-    async def execute(message: str, authorization: str) -> JsonObject:
-        return await service.query(message=message, authorization=authorization)
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      authorization: str, event_sink: EventSink) -> AgentRunResult:
+        return await service.run_session(
+            run_id=run_id, message=message, history=history,
+            authorization=authorization, event_sink=event_sink,
+        )
 
     return SessionService(repository, client_factory, RunCoordinator(repository, execute))
 

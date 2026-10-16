@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import uuid4
 
-from ktg_agent.core.loop import AgentLoop, RunLimits
+from ktg_agent.core.events import EventSink
+from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
 from ktg_agent.core.messages import (
     JsonObject,
     JsonValue,
+    Message,
     SystemMessage,
     TextBlock,
     ToolCall,
@@ -119,6 +121,30 @@ class QueryService:
             "current_user": username if isinstance(username, str) else "",
             "results": business_results,
         }
+
+    async def run_session(
+        self, *, run_id: str, message: str, history: tuple[Message, ...],
+        authorization: str, event_sink: EventSink,
+    ) -> AgentRunResult:
+        """Run an authenticated turn with durable session history."""
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        loop = AgentLoop(
+            provider=self._provider,
+            tool_registry=self._registry,
+            tool_runner=ToolRunner(self._registry),
+            model_config=self._model_config,
+            event_sink=event_sink,
+            limits=RunLimits(max_model_turns=8, max_tool_calls=12,
+                             max_run_seconds=90, max_parallel_reads=3),
+        )
+        return await loop.run(
+            run_id=run_id,
+            messages=(SystemMessage((TextBlock(SYSTEM_PROMPT),)), *history,
+                      UserMessage((TextBlock(message),))),
+            identity=identity,
+            ktg_client=client,
+        )
 
     async def confirm(self, *, preview_id: str, authorization: str) -> JsonObject:
         clean_preview_id = preview_id.strip()

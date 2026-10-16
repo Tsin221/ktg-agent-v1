@@ -406,6 +406,62 @@ class SessionRepository:
         return Page(tuple(_message(row) for row in rows[:limit]),
                     int(rows[limit - 1]["id"]) if len(rows) > limit else None)
 
+    def completed_history(self, owner_user_id: str, session_id: str) -> tuple[Message, ...]:
+        """Load canonical messages from completed runs in session order."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT m.* FROM messages m JOIN runs r ON r.id=m.run_id "
+                "JOIN sessions s ON s.id=m.session_id WHERE s.id=? AND s.owner_user_id=? "
+                "AND r.status='completed' ORDER BY m.id",
+                (session_id, owner_user_id),
+            ).fetchall()
+        return tuple(_message(row).message for row in rows)
+
+    def settle_run(
+        self, owner_user_id: str, run_id: str, status: str, stop_reason: str,
+        result_summary: JsonObject, messages: tuple[Message, ...],
+    ) -> RunRecord:
+        """Commit final messages, outcome and the last event as one unit."""
+        if status not in TERMINAL:
+            raise ValueError("run status must be terminal")
+        _required_text(stop_reason, "stop reason")
+        encoded_summary = _safe_json(result_summary)
+        encoded_messages = tuple((message.role.value, _safe_json(message_to_dict(message)))
+                                 for message in messages)
+        now = _now()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT r.session_id FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "WHERE r.id=? AND s.owner_user_id=? AND r.status IN ('queued','running','cancelling')",
+                (run_id, owner_user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("active run not found")
+            session_id = str(row["session_id"])
+            for role, payload in encoded_messages:
+                db.execute(
+                    "INSERT INTO messages(session_id,run_id,role,content_json,created_at) "
+                    "VALUES(?,?,?,?,?)", (session_id, run_id, role, payload, now),
+                )
+            db.execute(
+                "UPDATE runs SET status=?,ended_at=?,stop_reason=?,result_summary_json=? WHERE id=?",
+                (status, now, stop_reason, encoded_summary, run_id),
+            )
+            db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
+            seq = int(db.execute(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?", (run_id,),
+            ).fetchone()[0])
+            settled = _safe_json({"status": status, "stop_reason": stop_reason,
+                                  "result_summary": result_summary})
+            db.execute(
+                "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (run_id, seq, "run_settled", settled, now),
+            )
+        result = self.get_run(owner_user_id, run_id)
+        assert result is not None
+        return result
+
     def append_event(self, owner_user_id: str, run_id: str, seq: int, event_type: str, payload: JsonObject) -> EventRecord:
         if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
             raise ValueError("event sequence must be a positive integer")
