@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
@@ -16,6 +17,9 @@ from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
 from ktg_agent.sessions import SessionRepository
+from ktg_agent.sessions.coordinator import RunCoordinator
+from ktg_agent.sessions.repository import RunBusyError, RunConflictError
+from ktg_agent.sessions.service import SessionService
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,18 +120,42 @@ def create_service(settings: Settings) -> QueryService:
     )
 
 
+def create_session_service(settings: Settings, service: QueryService) -> SessionService:
+    def client_factory(authorization: str) -> KTGClient:
+        return KTGClient(base_url=settings.ktg_base_url, authorization=authorization)
+
+    repository = create_session_repository(settings)
+    async def execute(message: str, authorization: str) -> JsonObject:
+        return await service.query(message=message, authorization=authorization)
+
+    return SessionService(repository, client_factory, RunCoordinator(repository, execute))
+
+
 class AgentHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], service: QueryService) -> None:
+    def __init__(self, address: tuple[str, int], service: QueryService,
+                 session_service: SessionService) -> None:
         super().__init__(address, AgentRequestHandler)
         self.query_service = service
+        self.session_service = session_service
+
+    def server_close(self) -> None:
+        self.session_service.close()
+        super().server_close()
 
 
 class AgentRequestHandler(BaseHTTPRequestHandler):
     server: AgentHTTPServer
 
     def do_GET(self) -> None:
+        path = urlsplit(self.path).path
+        if path.startswith("/agent-api/v1/runs/"):
+            self._get_run(path)
+            return
+        if path == "/agent-api/v1/sessions" or path.startswith("/agent-api/v1/sessions/"):
+            self._get_session(path)
+            return
         if self.path.startswith("/agent-api/v1/inventory-operations/"):
             operation_id = self.path.rsplit("/", 1)[-1]
             try:
@@ -149,10 +177,16 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
 
     def do_POST(self) -> None:
-        if self.path not in {
+        path = urlsplit(self.path).path
+        run_segments = path.removeprefix("/agent-api/v1/sessions/").split("/")
+        is_run_create = (path.startswith("/agent-api/v1/sessions/")
+                         and len(run_segments) == 2 and bool(run_segments[0])
+                         and run_segments[1] == "runs" and not urlsplit(self.path).query)
+        if not is_run_create and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
+            "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
             return
@@ -173,7 +207,17 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         authorization = self.headers.get("Authorization", "")
         try:
-            if self.path == "/agent-api/v1/query":
+            if self.path == "/agent-api/v1/sessions":
+                title = payload.get("title")
+                if title is not None and (not isinstance(title, str) or not title.strip()):
+                    raise ValueError("title 必须是非空文本。")
+                response = asyncio.run(self.server.session_service.create(authorization, title))
+            elif is_run_create:
+                response = asyncio.run(self.server.session_service.create_run(
+                    authorization, run_segments[0], payload.get("request_id"),
+                    payload.get("message"), payload.get("page_context"),
+                ))
+            elif self.path == "/agent-api/v1/query":
                 message = payload.get("message")
                 if not isinstance(message, str):
                     raise ValueError("message 必须是文本。")
@@ -203,6 +247,12 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return
+        except (RunBusyError, RunConflictError) as exc:
+            self._write_error(HTTPStatus.CONFLICT, exc.code, str(exc))
+            return
+        except KeyError:
+            self._write_error(HTTPStatus.NOT_FOUND, "SESSION_NOT_FOUND", "会话不存在。")
+            return
         except ProviderError as exc:
             self._write_error(HTTPStatus.BAD_GATEWAY, exc.code, str(exc))
             return
@@ -216,7 +266,73 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 "Agent 请求失败，请稍后重试。",
             )
             return
+        status = (HTTPStatus.CREATED if self.path == "/agent-api/v1/sessions"
+                  else HTTPStatus.ACCEPTED if is_run_create else HTTPStatus.OK)
+        self._write_json(status, response)
+
+    def _get_run(self, path: str) -> None:
+        run_id = path.removeprefix("/agent-api/v1/runs/")
+        if not run_id or "/" in run_id or urlsplit(self.path).query:
+            self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
+            return
+        try:
+            response = asyncio.run(self.server.session_service.get_run(
+                self.headers.get("Authorization", ""), run_id,
+            ))
+        except KTGError as exc:
+            self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+            return
+        except KeyError:
+            self._write_error(HTTPStatus.NOT_FOUND, "RUN_NOT_FOUND", "运行不存在。")
+            return
+        except Exception:
+            self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Agent 请求失败，请稍后重试。")
+            return
         self._write_json(HTTPStatus.OK, response)
+
+    def _get_session(self, path: str) -> None:
+        segments = path.removeprefix("/agent-api/v1/sessions").strip("/").split("/")
+        authorization = self.headers.get("Authorization", "")
+        try:
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True,
+                              strict_parsing=True)
+            if any(key not in {"cursor", "limit"} or len(values) != 1
+                   for key, values in params.items()):
+                raise ValueError("分页参数无效。")
+            cursor = self._positive_int(params["cursor"][0]) if "cursor" in params else None
+            limit = self._positive_int(params["limit"][0]) if "limit" in params else 50
+            limit = min(limit, 100)
+            if segments == [""]:
+                response = asyncio.run(self.server.session_service.list(
+                    authorization, cursor=cursor, limit=limit))
+            elif len(segments) == 1 and segments[0]:
+                response = asyncio.run(self.server.session_service.get(
+                    authorization, segments[0]))
+            elif len(segments) == 2 and segments[0] and segments[1] == "messages":
+                response = asyncio.run(self.server.session_service.messages(
+                    authorization, segments[0], cursor=cursor, limit=limit))
+            else:
+                self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
+                return
+        except KTGError as exc:
+            self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+            return
+        except KeyError:
+            self._write_error(HTTPStatus.NOT_FOUND, "SESSION_NOT_FOUND", "会话不存在。")
+            return
+        except ValueError as exc:
+            self._write_error(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", str(exc))
+            return
+        except Exception:
+            self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Agent 请求失败，请稍后重试。")
+            return
+        self._write_json(HTTPStatus.OK, response)
+
+    @staticmethod
+    def _positive_int(value: str) -> int:
+        if not value.isascii() or not value.isdecimal() or int(value) <= 0:
+            raise ValueError("分页参数必须是正整数。")
+        return int(value)
 
     def log_message(self, format: str, *args: object) -> None:
         # Keep request logs free of headers, tokens and prompt bodies.
@@ -242,7 +358,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     settings = Settings.from_env()
-    server = AgentHTTPServer((settings.host, settings.port), create_service(settings))
+    service = create_service(settings)
+    server = AgentHTTPServer((settings.host, settings.port), service,
+                             create_session_service(settings, service))
     print(f"KTG Agent listening on http://{settings.host}:{settings.port}")
     try:
         server.serve_forever()

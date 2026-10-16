@@ -84,6 +84,14 @@ class EventRecord:
     created_at: str
 
 
+class RunConflictError(ValueError):
+    code = "REQUEST_ID_CONFLICT"
+
+
+class RunBusyError(ValueError):
+    code = "RUN_BUSY"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -258,6 +266,48 @@ class SessionRepository:
         return RunRecord(run_id, session_id, owner_user_id, request_id, request_hash,
                          _read_json(summary), "queued", now, None, None, None, None)
 
+    def admit_run(
+        self, owner_user_id: str, session_id: str, request_id: str,
+        request_hash: str, request_summary: JsonObject,
+    ) -> tuple[RunRecord, bool]:
+        """Atomically return an idempotent run or reserve the session for one new run."""
+        _required_text(request_id, "request id")
+        _required_text(request_hash, "request hash")
+        _safe_json({"request_id": request_id, "request_hash": request_hash})
+        summary = _safe_json(request_summary)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute(
+                "SELECT id FROM sessions WHERE id=? AND owner_user_id=?",
+                (session_id, owner_user_id),
+            ).fetchone()
+            if session is None:
+                raise KeyError("session not found")
+            existing = db.execute(
+                "SELECT * FROM runs WHERE owner_user_id=? AND session_id=? AND request_id=?",
+                (owner_user_id, session_id, request_id),
+            ).fetchone()
+            if existing is not None:
+                run = _run(existing)
+                if run.request_hash != request_hash:
+                    raise RunConflictError("request_id 已用于不同请求。")
+                return run, False
+            busy = db.execute(
+                "SELECT 1 FROM runs WHERE session_id=? AND status IN ('queued','running','cancelling')",
+                (session_id,),
+            ).fetchone()
+            if busy is not None:
+                raise RunBusyError("会话已有活动运行。")
+            run_id, now = str(uuid4()), _now()
+            db.execute(
+                "INSERT INTO runs(id,session_id,owner_user_id,request_id,request_hash,"
+                "request_summary_json,status,created_at) VALUES(?,?,?,?,?,?,'queued',?)",
+                (run_id, session_id, owner_user_id, request_id, request_hash, summary, now),
+            )
+            db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
+        return RunRecord(run_id, session_id, owner_user_id, request_id, request_hash,
+                         _read_json(summary), "queued", now, None, None, None, None), True
+
     def get_run(self, owner_user_id: str, run_id: str) -> RunRecord | None:
         with self._connect() as db:
             row = db.execute(
@@ -265,6 +315,19 @@ class SessionRepository:
                 "WHERE r.id=? AND s.owner_user_id=?", (run_id, owner_user_id),
             ).fetchone()
         return _run(row) if row else None
+
+    def last_event_seq(self, owner_user_id: str, run_id: str) -> int:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT COALESCE(MAX(e.seq),0) AS last_seq FROM runs r "
+                "JOIN sessions s ON s.id=r.session_id "
+                "LEFT JOIN events e ON e.run_id=r.id "
+                "WHERE r.id=? AND s.owner_user_id=?",
+                (run_id, owner_user_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError("run not found")
+        return int(row["last_seq"])
 
     def list_runs(self, owner_user_id: str, session_id: str, *, after: int | None = None, limit: int = 50) -> Page[RunRecord]:
         _page_args(after, limit)
@@ -277,6 +340,16 @@ class SessionRepository:
             ).fetchall()
         return Page(tuple(_run(row) for row in rows[:limit]),
                     int(rows[limit - 1]["position"]) if len(rows) > limit else None)
+
+    def get_active_run(self, owner_user_id: str, session_id: str) -> RunRecord | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT r.* FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "WHERE s.id=? AND s.owner_user_id=? AND r.status IN "
+                "('queued','running','cancelling')",
+                (session_id, owner_user_id),
+            ).fetchone()
+        return _run(row) if row else None
 
     def update_run_status(
         self, owner_user_id: str, run_id: str, status: str, *,
