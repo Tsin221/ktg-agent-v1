@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any, cast
 
 from ktg_agent.core.events import EventSink
+from ktg_agent.core.agent import Agent
 from ktg_agent.core.loop import AgentLoop, AgentRunResult
 from ktg_agent.core.messages import (
     AssistantMessage, JsonObject, Message, StopReason, TextBlock, ToolCall, ToolResultMessage,
@@ -21,10 +22,10 @@ from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, Pro
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent, RunPhase
-from ktg_agent.sessions.repository import RunRecord, SessionRepository
+from ktg_agent.sessions.repository import ControlStateError, RunRecord, SessionRepository
 from ktg_agent.tools import (
     ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolRegistry,
-    ToolResult, ToolRunner,
+    ToolResult, ToolRunner, ToolStatus,
 )
 
 
@@ -293,3 +294,137 @@ def test_queued_cancel_settles_without_starting_provider(tmp_path: Path) -> None
     assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]
     assert [item.type for item in repo.list_events("id:7", run.id).items] == [
         "cancel_requested", "run_settled"]
+
+
+def test_cancel_before_schedule_never_starts_provider(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    repo.admit_control("id:7", run.id, "cancel-1", "cancel", {}, accepting=False)
+    provider = FakeProvider((turn("must not run"),))
+    coordinator = RunCoordinator(repo, query_executor(provider))
+    coordinator.schedule(run, "question", "Bearer test")
+    coordinator.close()
+    assert provider.requests == ()
+    assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]
+
+
+def test_cancel_waits_for_started_write_and_preserves_outcome(tmp_path: Path) -> None:
+    for outcome in (ToolStatus.SUCCEEDED, ToolStatus.FAILED, ToolStatus.UNKNOWN):
+        started, release = Event(), Event()
+        writes: list[str] = []
+
+        async def fake_write(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+            writes.append(context.tool_call_id)
+            started.set()
+            await asyncio.to_thread(release.wait)
+            return ToolResult(
+                "write checked", details={"outcome": outcome.value, "operation_id": "op-1"},
+                status=outcome,
+                error_code=None if outcome is ToolStatus.SUCCEEDED else "WRITE_FAILED" if outcome is ToolStatus.FAILED else "RESULT_UNKNOWN",
+                operation_id="op-1", verification={"checked": True},
+            )
+
+        call = ToolCall("write-1", "test.write", {})
+        provider = FakeProvider((
+            ScriptedTurn((ResponseCompleted(FinalResponse(
+                AssistantMessage((call,)), StopReason.TOOL_CALL, Usage(1, 1),
+            )),)),
+            turn("must not continue"),
+        ))
+        registry = ToolRegistry((ToolDefinition(
+            name="test.write", version="1.0", description="write", label="write",
+            input_schema={"type": "object", "properties": {}}, output_schema=None,
+            required_permissions=(), effect=ToolEffect.WRITE,
+            execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=0.01,
+            execute=fake_write,
+        ),))
+        repo = SessionRepository(tmp_path / f"{outcome.value}.sqlite3")
+        session = repo.create_session("id:7")
+        run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+
+        async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                          page_context: JsonObject | None, authorization: str,
+                          sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+            loop = AgentLoop(provider=provider, tool_registry=registry,
+                             tool_runner=ToolRunner(registry),
+                             model_config=ModelConfig("fake", 128), event_sink=sink)
+            agent = Agent(loop)
+            close_inputs = register_agent(agent)
+            return await agent.prompt(message, run_id=run_id, history=history,
+                                      on_inputs_closed=close_inputs)
+
+        coordinator = RunCoordinator(repo, execute)
+        try:
+            coordinator.schedule(run, "write", "Bearer test")
+            assert started.wait(5)
+            receipt = coordinator.admit_cancel("id:7", run.id, "cancel-1")
+            assert receipt.status == "accepted"
+            assert repo.get_run("id:7", run.id).status == "cancelling"  # type: ignore[union-attr]
+            release.set()
+        finally:
+            release.set()
+            coordinator.close()
+        saved = repo.get_run("id:7", run.id)
+        assert saved is not None and saved.result_summary is not None
+        assert saved.status == ("needs_reconciliation" if outcome is ToolStatus.UNKNOWN else "cancelled")
+        steps = saved.result_summary["steps"]
+        assert isinstance(steps, dict)
+        bucket = "completed" if outcome is ToolStatus.SUCCEEDED else "failed" if outcome is ToolStatus.FAILED else "unknown"
+        assert steps[bucket] == [{
+            "tool_call_id": "write-1", "tool_name": "test.write", "operation_id": "op-1",
+            "verification": {"checked": True},
+            **({} if outcome is ToolStatus.SUCCEEDED else
+               {"error_code": "WRITE_FAILED" if outcome is ToolStatus.FAILED else "RESULT_UNKNOWN"}),
+            "result": {"outcome": outcome.value, "operation_id": "op-1"},
+        }]
+        assert writes == ["write-1"]
+        assert len(provider.requests) == 1
+        assert repo.list_events("id:7", run.id).items[-1].type == "run_settled"
+
+
+def test_cancel_and_completion_commit_order(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    before, _ = repo.admit_run("id:7", session.id, "before", "h1", {})
+    repo.update_run_status("id:7", before.id, "running")
+    repo.admit_control("id:7", before.id, "cancel", "cancel", {}, accepting=False)
+    settled = repo.settle_run("id:7", before.id, "completed", "completed",
+                              {"answer": "model finished", "steps": {"completed": [], "failed": [], "unknown": []}}, ())
+    assert settled.status == "cancelled"
+    assert settled.result_summary is not None and settled.result_summary["stop_reason"] == "cancelled"
+
+    after, _ = repo.admit_run("id:7", session.id, "after", "h2", {})
+    repo.update_run_status("id:7", after.id, "running")
+    repo.settle_run("id:7", after.id, "completed", "completed", {"answer": "done"}, ())
+    before_seq = repo.last_event_seq("id:7", after.id)
+    no_op, created = repo.admit_control("id:7", after.id, "late", "cancel", {}, accepting=False)
+    assert created and no_op.reason == "already_settled"
+    assert repo.last_event_seq("id:7", after.id) == before_seq
+    assert repo.get_run("id:7", after.id).status == "completed"  # type: ignore[union-attr]
+
+
+def test_input_accepted_before_cancel_is_resolved_and_later_input_is_rejected(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    repo.update_run_status("id:7", run.id, "running")
+    accepted, _ = repo.admit_control(
+        "id:7", run.id, "input-1", "follow_up",
+        {"mode": "follow_up", "message": "next"}, accepting=True,
+    )
+    assert accepted.status == "queued"
+    repo.admit_control("id:7", run.id, "cancel-1", "cancel", {}, accepting=False)
+    with pytest.raises(ControlStateError, match="RUN_NOT_ACTIVE"):
+        repo.admit_control(
+            "id:7", run.id, "input-2", "follow_up",
+            {"mode": "follow_up", "message": "later"}, accepting=True,
+        )
+    repo.settle_run("id:7", run.id, "cancelled", "cancelled", {}, ())
+    inputs = repo.list_inputs("id:7", run.id).items
+    assert [(item.request_id, item.status, item.reason) for item in inputs] == [
+        ("input-1", "not_consumed", "cancelled")]

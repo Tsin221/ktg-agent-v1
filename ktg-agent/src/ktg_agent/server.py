@@ -24,7 +24,8 @@ from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
-from ktg_agent.sessions.repository import EventHistoryExpiredError, RunBusyError, RunConflictError
+from ktg_agent.sessions.repository import (ControlConflictError, ControlStateError,
+                                           EventHistoryExpiredError, RunBusyError, RunConflictError)
 from ktg_agent.sessions.service import SessionService
 
 
@@ -209,7 +210,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_run_create = (path.startswith("/agent-api/v1/sessions/")
                          and len(run_segments) == 2 and bool(run_segments[0])
                          and run_segments[1] == "runs" and not urlsplit(self.path).query)
-        if not is_run_create and self.path not in {
+        cancel_segments = path.removeprefix("/agent-api/v1/runs/").split("/")
+        is_cancel = (path.startswith("/agent-api/v1/runs/")
+                     and len(cancel_segments) == 2 and bool(cancel_segments[0])
+                     and cancel_segments[1] == "cancel" and not urlsplit(self.path).query)
+        if not is_run_create and not is_cancel and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
@@ -244,6 +249,12 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     authorization, run_segments[0], payload.get("request_id"),
                     payload.get("message"), payload.get("page_context"),
                 ))
+            elif is_cancel:
+                if set(payload) != {"request_id"}:
+                    raise ValueError("取消请求仅允许 request_id。")
+                response = asyncio.run(self.server.session_service.cancel_run(
+                    authorization, cancel_segments[0], payload["request_id"],
+                ))
             elif self.path == "/agent-api/v1/query":
                 message = payload.get("message")
                 if not isinstance(message, str):
@@ -274,11 +285,12 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return
-        except (RunBusyError, RunConflictError) as exc:
+        except (RunBusyError, RunConflictError, ControlConflictError, ControlStateError) as exc:
             self._write_error(HTTPStatus.CONFLICT, exc.code, str(exc))
             return
         except KeyError:
-            self._write_error(HTTPStatus.NOT_FOUND, "SESSION_NOT_FOUND", "会话不存在。")
+            code = "RUN_NOT_FOUND" if is_cancel else "SESSION_NOT_FOUND"
+            self._write_error(HTTPStatus.NOT_FOUND, code, "运行不存在。" if is_cancel else "会话不存在。")
             return
         except ProviderError as exc:
             self._write_error(HTTPStatus.BAD_GATEWAY, exc.code, str(exc))
@@ -294,7 +306,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             )
             return
         status = (HTTPStatus.CREATED if self.path == "/agent-api/v1/sessions"
-                  else HTTPStatus.ACCEPTED if is_run_create else HTTPStatus.OK)
+                  else HTTPStatus.ACCEPTED if is_run_create or
+                  (is_cancel and response["cancel_status"] == "accepted") else HTTPStatus.OK)
         self._write_json(status, response)
 
     def _get_run(self, path: str) -> None:

@@ -11,7 +11,7 @@ import re
 from ktg_agent.core.messages import JsonObject, JsonValue, _json_object, message_to_dict
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.sessions.coordinator import RunCoordinator
-from ktg_agent.sessions.repository import ControlStateError, EVENT_RETENTION_DAYS, Page, SessionRecord, SessionRepository
+from ktg_agent.sessions.repository import EVENT_RETENTION_DAYS, Page, SessionRecord, SessionRepository
 
 _PRIVATE_FIELD = re.compile(
     r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -147,13 +147,12 @@ class SessionService:
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
             raise ValueError("request_id 必须是 1–128 个字符。")
         owner = await self.authorize_run(authorization, run_id)
-        try:
-            record = self._coordinator.admit_cancel(owner, run_id, request_id.strip())
-        except ControlStateError as exc:
-            if exc.code == "RUN_ALREADY_SETTLED":
-                return {"request_id": request_id.strip(), "cancel_status": "already_settled"}
-            raise
-        return {"request_id": record.request_id, "cancel_status": record.status}
+        record = self._coordinator.admit_cancel(owner, run_id, request_id.strip())
+        run = self._repository.get_run(owner, run_id)
+        assert run is not None
+        return {"run_id": run_id, "request_id": record.request_id,
+                "status": "cancelling" if record.reason is None else run.status,
+                "cancel_status": record.reason or record.status}
 
     async def inputs(self, authorization: str, run_id: str, *,
                      cursor: int | None, limit: int) -> JsonObject:

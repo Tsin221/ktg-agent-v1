@@ -203,7 +203,10 @@ def test_follow_up_enters_only_when_the_run_would_otherwise_finish() -> None:
     asyncio.run(scenario())
 
 
-def test_abort_during_tool_allows_tool_to_finish_but_starts_no_next_step() -> None:
+@pytest.mark.parametrize("effect", (ToolEffect.READ, ToolEffect.WRITE))
+def test_abort_during_tool_allows_tool_to_finish_but_starts_no_next_step(
+    effect: ToolEffect,
+) -> None:
     tool_started = asyncio.Event()
     release_tool = asyncio.Event()
     completed_calls: list[str] = []
@@ -217,20 +220,20 @@ def test_abort_during_tool_allows_tool_to_finish_but_starts_no_next_step() -> No
         return ToolResult(content="committed result")
 
     tool = ToolDefinition(
-        name="test.write",
+        name="test.controlled",
         version="1.0",
         description="controlled write",
         label="controlled write",
         input_schema=SCHEMA,
         output_schema=None,
         required_permissions=(),
-        effect=ToolEffect.WRITE,
+        effect=effect,
         execution_mode=ExecutionMode.SEQUENTIAL,
         timeout_seconds=2,
         execute=controlled_tool,
     )
-    first_call = ToolCall("call-1", "test.write", {})
-    second_call = ToolCall("call-2", "test.write", {})
+    first_call = ToolCall("call-1", "test.controlled", {})
+    second_call = ToolCall("call-2", "test.controlled", {})
     provider = ControlledProvider(
         (
             response(first_call, second_call, reason=StopReason.TOOL_CALL),

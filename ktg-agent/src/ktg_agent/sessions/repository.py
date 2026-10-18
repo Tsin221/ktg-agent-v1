@@ -408,7 +408,16 @@ class SessionRepository:
             status = str(run["status"])
             if kind == "cancel":
                 if status in TERMINAL:
-                    raise ControlStateError("RUN_ALREADY_SETTLED")
+                    now = _now()
+                    cursor = db.execute(
+                        "INSERT INTO control_commands(run_id,owner_user_id,request_id,kind,request_json,"
+                        "status,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (run_id, owner, request_id, kind, encoded, "accepted", "already_settled", now, now),
+                    )
+                    row = db.execute("SELECT * FROM control_commands WHERE position=?",
+                                     (cursor.lastrowid,)).fetchone()
+                    assert row is not None
+                    return _control(row), True
                 command_status = "accepted"
                 event_type = "cancel_requested"
             else:
@@ -433,6 +442,8 @@ class SessionRepository:
             payload: JsonObject = {"request_id": request_id}
             if kind != "cancel":
                 payload["mode"] = kind
+            else:
+                payload["status"] = "cancelling"
             db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                 (run_id, self._next_seq(db, run_id), event_type, _safe_json(payload), now),
@@ -621,13 +632,18 @@ class SessionRepository:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT r.session_id FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "SELECT r.session_id,r.status FROM runs r JOIN sessions s ON s.id=r.session_id "
                 "WHERE r.id=? AND s.owner_user_id=? AND r.status IN ('queued','running','cancelling')",
                 (run_id, owner_user_id),
             ).fetchone()
             if row is None:
                 raise KeyError("active run not found")
             session_id = str(row["session_id"])
+            if row["status"] == "cancelling" and status == "completed":
+                status = "cancelled"
+                stop_reason = "cancelled"
+                result_summary = {**result_summary, "stop_reason": "cancelled"}
+                encoded_summary = _safe_json(result_summary)
             for role, payload in encoded_messages:
                 db.execute(
                     "INSERT INTO messages(session_id,run_id,role,content_json,created_at) "

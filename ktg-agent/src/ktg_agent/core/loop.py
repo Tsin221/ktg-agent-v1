@@ -39,6 +39,7 @@ from ktg_agent.tools import (
     ToolRegistry,
     ToolResult,
     ToolRunner,
+    ToolEffect,
     ToolStatus,
 )
 
@@ -359,6 +360,10 @@ class AgentLoop:
 
         async def execute(call: ToolCall) -> ToolResult:
             nonlocal started_count
+            try:
+                tool = self._tool_registry.get(call.name)
+            except KeyError:
+                tool = None
             started_count += 1
             await publisher.emit(
                 AgentEventType.TOOL_EXECUTION_START,
@@ -366,6 +371,7 @@ class AgentLoop:
                     "turn": turn,
                     "tool_call_id": call.id,
                     "tool_name": call.name,
+                    "effect": tool.effect.value if tool is not None else "unavailable",
                 },
             )
             progress = ToolProgressPublisher(
@@ -374,7 +380,8 @@ class AgentLoop:
                 tool_name=call.name,
             )
             try:
-                result = await self._tool_runner.run(
+                result = (self._cancelled_tool_result() if cancellation is not None
+                          and cancellation.is_cancelled else await self._tool_runner.run(
                     call,
                     ToolContext(
                         run_id=run_id,
@@ -384,7 +391,7 @@ class AgentLoop:
                         progress_publisher=progress,
                         ktg_client=ktg_client,
                     ),
-                )
+                ))
             except BaseException as exc:
                 await publisher.emit(
                     AgentEventType.TOOL_EXECUTION_END,
@@ -392,7 +399,8 @@ class AgentLoop:
                         "turn": turn,
                         "tool_call_id": call.id,
                         "tool_name": call.name,
-                        "status": "failed",
+                        "effect": tool.effect.value if tool is not None else "unavailable",
+                        "status": "unknown" if tool is not None and tool.effect is ToolEffect.WRITE else "failed",
                         "error_type": type(exc).__name__,
                     },
                 )
@@ -401,10 +409,17 @@ class AgentLoop:
                 "turn": turn,
                 "tool_call_id": call.id,
                 "tool_name": call.name,
+                "effect": tool.effect.value if tool is not None else "unavailable",
                 "status": result.status.value,
             }
             if result.error_code is not None:
                 end_payload["error_code"] = result.error_code
+            if result.operation_id is not None:
+                end_payload["operation_id"] = result.operation_id
+            if result.verification is not None:
+                end_payload["verification"] = result.verification
+            if result.details is not None:
+                end_payload["result"] = result.details
             await publisher.emit(AgentEventType.TOOL_EXECUTION_END, end_payload)
             return result
 

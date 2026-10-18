@@ -44,6 +44,45 @@ class RunNotActiveError(RuntimeError):
     code = "RUN_NOT_ACTIVE"
 
 
+def _write_steps(events: list[AgentEvent], messages: tuple[Message, ...]) -> JsonObject:
+    starts: dict[str, JsonObject] = {
+        str(event.payload["tool_call_id"]): event.payload
+        for event in events
+        if event.type.value == "tool_execution_start" and event.payload.get("effect") == "write"
+    }
+    ends: dict[str, JsonObject] = {
+        str(event.payload["tool_call_id"]): event.payload
+        for event in events
+        if event.type.value == "tool_execution_end" and event.payload.get("effect") == "write"
+    }
+    details = {
+        item.tool_call_id: item.details for item in messages
+        if isinstance(item, ToolResultMessage) and item.details is not None
+    }
+    steps: JsonObject = {"completed": [], "failed": [], "unknown": []}
+    for call_id, start in starts.items():
+        end = ends.get(call_id, {})
+        if end.get("error_code") == "RUN_CANCELLED":
+            continue
+        outcome = end.get("status", "unknown")
+        if outcome == "failed" and end.get("error_code") == "TOOL_EXECUTION_ERROR":
+            outcome = "unknown"
+        bucket = ("completed" if outcome == "succeeded" else
+                  "failed" if outcome == "failed" else "unknown")
+        step: JsonObject = {"tool_call_id": call_id, "tool_name": start["tool_name"]}
+        for field in ("operation_id", "verification", "error_code"):
+            if field in end:
+                step[field] = end[field]
+        if call_id in details:
+            step["result"] = details[call_id]
+        elif "result" in end:
+            step["result"] = end["result"]
+        entries = steps[bucket]
+        assert isinstance(entries, list)
+        entries.append(step)
+    return steps
+
+
 class RunCoordinator:
     """Owns run tasks beyond the lifetime of each HTTP request event loop."""
 
@@ -56,7 +95,11 @@ class RunCoordinator:
 
     def schedule(self, run: RunRecord, message: str, authorization: str) -> None:
         with self._lock:
-            self._handles[run.id] = RunHandle(run.id)
+            current = self._repository.get_run(run.owner_user_id, run.id)
+            assert current is not None
+            self._handles[run.id] = RunHandle(
+                run.id, cancel_requested=current.status == "cancelling",
+            )
         try:
             self._workers.submit(self._execute, run, message, authorization)
         except RuntimeError:
@@ -69,6 +112,7 @@ class RunCoordinator:
             raise
 
     def _execute(self, run: RunRecord, message: str, authorization: str) -> None:
+        write_events: list[AgentEvent] = []
         try:
             with self._lock:
                 handle = self._handles[run.id]
@@ -87,6 +131,8 @@ class RunCoordinator:
                 self._repository.append_event(
                     run.owner_user_id, run.id, event.seq, event.type.value, event.payload,
                 )
+                if event.type.value in {"tool_execution_start", "tool_execution_end"}:
+                    write_events.append(event)
 
             async def invoke() -> AgentRunResult:
                 owner_loop = asyncio.get_running_loop()
@@ -124,10 +170,14 @@ class RunCoordinator:
                 item.details for item in new_messages
                 if isinstance(item, ToolResultMessage) and item.details is not None
             ]
+            steps = _write_steps(write_events, new_messages)
+            if steps["unknown"]:
+                status = "needs_reconciliation"
             summary: JsonObject = {
                 "answer": answer or "查询未生成最终回答。",
                 "stop_reason": result.stop_reason.value,
                 "results": business_results,
+                "steps": steps,
             }
             if result.limit_reason is not None:
                 summary["limit_reason"] = result.limit_reason
@@ -139,9 +189,11 @@ class RunCoordinator:
             # Persistence may be unavailable; leave a nonterminal run for recovery
             # instead of reporting an uncommitted successful result.
             try:
+                steps = _write_steps(write_events, ())
                 self._repository.settle_run(
-                    run.owner_user_id, run.id, "failed", "EXECUTION_FAILED",
-                    {"error": "EXECUTION_FAILED"}, (),
+                    run.owner_user_id, run.id,
+                    "needs_reconciliation" if steps["unknown"] else "failed",
+                    "EXECUTION_FAILED", {"error": "EXECUTION_FAILED", "steps": steps}, (),
                 )
             except Exception:
                 pass
@@ -184,7 +236,7 @@ class RunCoordinator:
             handle = self._handles.get(run_id)
             record, created = self._repository.admit_control(
                 owner, run_id, request_id, "cancel", {}, accepting=False)
-            if created and handle is not None:
+            if created and record.reason is None and handle is not None:
                 handle.cancel_requested = True
                 if handle.phase is RunPhase.RUNNING and handle.loop is not None and handle.agent is not None:
                     handle.loop.call_soon_threadsafe(handle.agent.abort)

@@ -119,8 +119,11 @@ class ToolRunner:
                 )
 
         try:
-            async with asyncio.timeout(tool.timeout_seconds):
+            if tool.effect is ToolEffect.WRITE:
                 result = await tool.execute(context, call.arguments)
+            else:
+                async with asyncio.timeout(tool.timeout_seconds):
+                    result = await tool.execute(context, call.arguments)
             if not isinstance(result, ToolResult):
                 raise TypeError("tool execute must return ToolResult")
         except TimeoutError:
@@ -130,10 +133,11 @@ class ToolRunner:
                 context,
             )
         except Exception as exc:
-            result = self._error(
-                "Tool execution failed.",
-                "TOOL_EXECUTION_ERROR",
-                context,
+            result = ToolResult(
+                content="Tool execution failed.",
+                status=ToolStatus.UNKNOWN if tool.effect is ToolEffect.WRITE else ToolStatus.FAILED,
+                error_code="TOOL_EXECUTION_ERROR",
+                operation_id=context.operation_id,
                 details={
                     "exception_type": type(exc).__name__,
                     "reason": str(exc),
