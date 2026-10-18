@@ -131,3 +131,66 @@ def test_input_http_concurrent_retry_pagination_and_history(tmp_path: Path) -> N
                                                      "message": "late"})[1]["error"]["code"] == "RUN_NOT_ACTIVE"  # type: ignore[index]
         assert repo.list_events("id:7", run.id).items[-1].type == "run_settled"
         assert repo.completed_history("id:7", session.id).count(UserMessage((TextBlock("second"),))) == 1
+
+
+def test_http_input_racing_cancel_has_a_durable_disposition_and_ordered_events(
+    tmp_path: Path,
+) -> None:
+    provider = PausedProvider()
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "run-1", "hash-1", {})
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128),
+        ktg_client_factory=lambda token: cast(KTGClient, FakeClient(token)),
+    )
+    coordinator = RunCoordinator(repo, lambda run_id, message, history, page_context,
+                                  authorization, sink, register_agent: service.run_session(
+        run_id=run_id, message=message, history=history, page_context=page_context,
+        authorization=authorization, event_sink=sink, on_agent_ready=register_agent,
+    ))
+    input_path = f"/agent-api/v1/runs/{run.id}/inputs"
+    cancel_path = f"/agent-api/v1/runs/{run.id}/cancel"
+    with served(repo, coordinator) as server:
+        coordinator.schedule(run, "first", "Bearer alice")
+        try:
+            assert provider.started.wait(5)
+            barrier = Barrier(3)
+
+            def submit_input() -> tuple[int, dict[str, object]]:
+                barrier.wait()
+                return request(server, "POST", input_path, body={
+                    "request_id": "input-1", "mode": "follow_up", "message": "later",
+                })
+
+            def submit_cancel() -> tuple[int, dict[str, object]]:
+                barrier.wait()
+                return request(server, "POST", cancel_path, body={"request_id": "cancel-1"})
+
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                input_future = workers.submit(submit_input)
+                cancel_future = workers.submit(submit_cancel)
+                barrier.wait()
+                input_response = input_future.result(5)
+                cancel_response = cancel_future.result(5)
+            assert cancel_response[0] == 202
+            assert input_response[0] in {202, 409}
+        finally:
+            assert provider.owner_loop is not None
+            provider.owner_loop.call_soon_threadsafe(provider.release.set)
+            coordinator.close()
+
+        stored_inputs = repo.list_inputs("id:7", run.id).items
+        if input_response[0] == 202:
+            assert [(item.request_id, item.status, item.reason) for item in stored_inputs] == [
+                ("input-1", "not_consumed", "cancelled")]
+            assert request(server, "POST", input_path, body={
+                "request_id": "input-1", "mode": "follow_up", "message": "later",
+            })[1]["input_status"] == "not_consumed"
+        else:
+            assert input_response[1]["error"]["code"] == "RUN_NOT_ACTIVE"  # type: ignore[index]
+            assert stored_inputs == ()
+        events = repo.list_events("id:7", run.id).items
+        assert [event.seq for event in events] == list(range(1, len(events) + 1))
+        assert events[-1].type == "run_settled"
+        assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]

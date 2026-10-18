@@ -65,6 +65,8 @@ uv run --locked mypy
 
 2026-10-16 本工作区执行 `uv run --locked pytest -q`：`132 passed`；执行 `uv run --locked mypy`：`Success: no issues found in 46 source files`。其中临时 SQLite 与 FakeProvider 的 HTTP 测试覆盖两轮会话、重启读回、遗留 run 不重放及第三轮历史输入；这不是外部模型或 MES 的联调结果。
 
+2026-10-18 T16 离线整包验收：`uv run --locked pytest -q` 为 `164 passed`，`uv run --locked mypy` 为 `Success: no issues found in 50 source files`；前端 `npm run test:agent-session` 和 `npm run test:workorder` 均通过。含可控 HTTP 输入/取消竞争测试；真实浏览器、模型及只读 MES 仍待环境验收，详细矩阵记录在工作区文档 `docs/ktg_agent/任务/T16-运行控制与写入竞态整包验收.md`。
+
 ## 真实模型与网页查询
 
 下面的代码与启动入口已经具备，但单元测试和 `/health` 只能证明本地链路可启动，不能证明外部模型或当前用户下的三个业务接口已经实际查询成功。只有配置真实模型、网页登录，并从悬浮窗分别完成产品、库存和工单查询后，才算端到端验收通过。
@@ -98,13 +100,15 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 启动时会创建或打开该库，并在对外服务前收束上次进程留下的活动 run：`queued` 变为 `cancelled`，`running/cancelling` 变为 `needs_reconciliation`。`GET /runs/{rid}` 返回 `SERVICE_RESTARTED` 原因和摘要，持久事件以 `run_settled` 收尾；服务绝不自动重放模型或工具调用。已经完成的消息和事件保留，用户可继续新一轮。`needs_reconciliation` 表示外部写入结果可能未知，必须先核验业务回执。
 
-当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs`、`GET /agent-api/v1/runs/{rid}` 和 `GET /agent-api/v1/runs/{rid}/events?after_seq=N`。请求均使用请求头中的当前 KTG Bearer token，不能把 token 放进 URL；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
+当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs`、`GET /agent-api/v1/runs/{rid}`、`GET /agent-api/v1/runs/{rid}/events?after_seq=N`、`POST /agent-api/v1/runs/{rid}/cancel`、`POST/GET /agent-api/v1/runs/{rid}/inputs`。请求均使用请求头中的当前 KTG Bearer token，不能把 token 放进 URL；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
+
+取消和追加输入在会话服务校验身份与所有权，由仓储持久准入，协调器投递至运行中的 Agent。`cancel` 已接受返回 202，run 已终结的新取消返回 200 `already_settled`；取消只阻止后续动作，已发出的写入继续以真实结果收尾。`inputs` 的 `mode` 为 `follow_up` 或 `steer`，只在运行中接收；未就绪或已关闭接收门返回 409。`GET /runs/{rid}/inputs` 可查询 `queued`、`consumed`、`not_consumed` 及未消费原因，进程重启不自动重放。控制事件与核心事件使用同一持久 seq，`run_settled` 为最后事件。当前网页悬浮窗已接入停止、两种追加输入及输入状态恢复；实际浏览器与真实模型/MES 仍待环境验证。工单和库存确认是独立 HTTP 路径，不受聊天 run 取消自动撤销。
 
 事件入口返回 `text/event-stream`，默认 `after_seq=0`，先读取持久事件，之后每 0.5 秒检查新事件；SSE `id` 是业务 seq，`event` 是事件类型，JSON 信封按多行 `data:` 发送。15 秒无业务事件时发送 `: heartbeat`，不会占用 seq。`run_settled` 送达后连接结束。历史确实被清理时返回 410 `EVENT_HISTORY_EXPIRED`，应改读 run 快照和最终消息。并发订阅上限为 32，超限返回 503 `SSE_CAPACITY_EXCEEDED`。断开订阅不会取消 run。
 
-创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手仍调用单次 `/query`，尚未接入会话接口和页面上下文采集。
+创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手已接入会话接口和页面上下文采集。
 
-首次打开空文件时建立 `sessions`、`runs`、`messages`、`events` 和索引，SQLite `user_version` 为 2；旧版 v1 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
+首次打开空文件时建立 `sessions`、`runs`、`messages`、`events`、`control_commands` 和索引，SQLite `user_version` 为 3；旧版 v1/v2 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 
@@ -147,4 +151,4 @@ docs/         核心契约和阶段交接说明
 - 只有完整且最终停止原因为 `tool_call` 的工具调用会执行；截断输出不会执行流中出现的调用。
 - 阶段 A 的 `agent_end` 是低层循环结束事件；会话运行的 `run_settled` 在最终状态和消息落库时一并提交。两者不能互相替代。
 
-会话接口已实现持久化、用户隔离、幂等准入、多轮历史、重启收束和 SSE 事件回放续接；仍未提供 inputs/cancel 接口以及会话运行中的业务写工具。这里只完成离线 FakeProvider 和 HTTP 验证，真实模型及 MES 联调需要另行验收。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
+会话接口已实现持久化、用户隔离、幂等准入、多轮历史、重启收束、SSE 回放续接及 inputs/cancel 控制；会话运行中仍未开放真实业务写工具。这里完成的是离线 FakeProvider、假工具和本地 HTTP 验证，真实模型及 MES 联调需要另行验收。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
