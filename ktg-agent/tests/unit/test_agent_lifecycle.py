@@ -13,7 +13,7 @@ from ktg_agent.core.agent import (
     AgentState,
 )
 from ktg_agent.core.events import AgentEvent, AgentEventType
-from ktg_agent.core.loop import AgentLoop
+from ktg_agent.core.loop import AgentLoop, RunLimits
 from ktg_agent.core.messages import (
     AssistantMessage,
     JsonObject,
@@ -199,6 +199,30 @@ def test_follow_up_enters_only_when_the_run_would_otherwise_finish() -> None:
         assert provider.requests[1].messages[-1] == UserMessage(
             (TextBlock("one more thing"),)
         )
+
+    asyncio.run(scenario())
+
+
+def test_budget_exhaustion_does_not_consume_unseen_follow_up() -> None:
+    provider = ControlledProvider((response(TextBlock("first answer")),))
+    provider.block_first = True
+    registry = ToolRegistry(())
+    agent = Agent(AgentLoop(
+        provider=provider, tool_registry=registry, tool_runner=ToolRunner(registry),
+        model_config=ModelConfig(model="fake", max_output_tokens=64),
+        limits=RunLimits(max_model_turns=1),
+    ))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(agent.prompt("start", run_id="run-limited"))
+        await provider.started.wait()
+        await agent.follow_up("unseen", "input-1")
+        provider.release.set()
+        result = await task
+        assert result.stop_reason is StopReason.LIMIT
+        assert len(provider.requests) == 1
+        assert [item.request_id for item in result.unconsumed_inputs] == ["input-1"]
+        assert UserMessage((TextBlock("unseen"),)) not in result.messages
 
     asyncio.run(scenario())
 

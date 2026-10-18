@@ -178,6 +178,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/agent-api/v1/runs/"):
             if path.endswith("/events"):
                 self._get_events(path)
+            elif path.endswith("/inputs"):
+                self._get_inputs(path)
             else:
                 self._get_run(path)
             return
@@ -214,7 +216,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_cancel = (path.startswith("/agent-api/v1/runs/")
                      and len(cancel_segments) == 2 and bool(cancel_segments[0])
                      and cancel_segments[1] == "cancel" and not urlsplit(self.path).query)
-        if not is_run_create and not is_cancel and self.path not in {
+        is_input = (path.startswith("/agent-api/v1/runs/")
+                    and len(cancel_segments) == 2 and bool(cancel_segments[0])
+                    and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
+        if not is_run_create and not is_cancel and not is_input and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
@@ -255,6 +260,13 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 response = asyncio.run(self.server.session_service.cancel_run(
                     authorization, cancel_segments[0], payload["request_id"],
                 ))
+            elif is_input:
+                if set(payload) != {"request_id", "mode", "message"}:
+                    raise ValueError("追加输入仅允许 request_id、mode 和 message。")
+                response = asyncio.run(self.server.session_service.add_input(
+                    authorization, cancel_segments[0], payload["request_id"],
+                    payload["mode"], payload["message"],
+                ))
             elif self.path == "/agent-api/v1/query":
                 message = payload.get("message")
                 if not isinstance(message, str):
@@ -289,8 +301,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._write_error(HTTPStatus.CONFLICT, exc.code, str(exc))
             return
         except KeyError:
-            code = "RUN_NOT_FOUND" if is_cancel else "SESSION_NOT_FOUND"
-            self._write_error(HTTPStatus.NOT_FOUND, code, "运行不存在。" if is_cancel else "会话不存在。")
+            code = "RUN_NOT_FOUND" if is_cancel or is_input else "SESSION_NOT_FOUND"
+            self._write_error(HTTPStatus.NOT_FOUND, code, "运行不存在。" if is_cancel or is_input else "会话不存在。")
             return
         except ProviderError as exc:
             self._write_error(HTTPStatus.BAD_GATEWAY, exc.code, str(exc))
@@ -306,7 +318,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             )
             return
         status = (HTTPStatus.CREATED if self.path == "/agent-api/v1/sessions"
-                  else HTTPStatus.ACCEPTED if is_run_create or
+                  else HTTPStatus.ACCEPTED if is_run_create or is_input or
                   (is_cancel and response["cancel_status"] == "accepted") else HTTPStatus.OK)
         self._write_json(status, response)
 
@@ -324,6 +336,37 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         except KeyError:
             self._write_error(HTTPStatus.NOT_FOUND, "RUN_NOT_FOUND", "运行不存在。")
+            return
+        except Exception:
+            self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Agent 请求失败，请稍后重试。")
+            return
+        self._write_json(HTTPStatus.OK, response)
+
+    def _get_inputs(self, path: str) -> None:
+        run_id = path.removeprefix("/agent-api/v1/runs/").removesuffix("/inputs")
+        if not run_id or "/" in run_id:
+            self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
+            return
+        try:
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True,
+                              strict_parsing=True)
+            if any(key not in {"cursor", "limit"} or len(values) != 1
+                   for key, values in params.items()):
+                raise ValueError("分页参数无效。")
+            cursor = self._positive_int(params["cursor"][0]) if "cursor" in params else None
+            limit = self._positive_int(params["limit"][0]) if "limit" in params else 50
+            response = asyncio.run(self.server.session_service.inputs(
+                self.headers.get("Authorization", ""), run_id,
+                cursor=cursor, limit=min(limit, 100),
+            ))
+        except KTGError as exc:
+            self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+            return
+        except KeyError:
+            self._write_error(HTTPStatus.NOT_FOUND, "RUN_NOT_FOUND", "运行不存在。")
+            return
+        except ValueError as exc:
+            self._write_error(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", str(exc))
             return
         except Exception:
             self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Agent 请求失败，请稍后重试。")

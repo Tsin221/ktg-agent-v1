@@ -262,7 +262,10 @@ class AgentLoop:
                             turns=turn,
                             tool_calls=tool_calls_started,
                         )
-                    if input_queue is not None:
+                    if input_queue is not None and self._next_model_limit(
+                        started_at=started_at, completed_turns=turn,
+                        tool_calls=tool_calls_started,
+                    ) is None:
                         steering = input_queue.take_steering()
                         if steering:
                             history.extend(item.message for item in steering)
@@ -285,6 +288,11 @@ class AgentLoop:
                         turns=turn,
                         tool_calls=tool_calls_started,
                     )
+                if input_queue is not None and not input_queue.is_empty and self._next_model_limit(
+                    started_at=started_at, completed_turns=turn,
+                    tool_calls=tool_calls_started,
+                ) is not None:
+                    continue
                 if input_queue is not None:
                     steering = input_queue.take_steering()
                     if steering:

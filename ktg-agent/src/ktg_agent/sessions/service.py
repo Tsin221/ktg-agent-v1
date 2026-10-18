@@ -137,8 +137,8 @@ class SessionService:
         assert isinstance(mode, str)
         owner = await self.authorize_run(authorization, run_id)
         record = self._coordinator.admit_input(owner, run_id, request_id.strip(), mode, message.strip())
-        return {"request_id": record.request_id, "mode": record.kind,
-                "status": record.status, "reason": record.reason}
+        return {"request_id": record.request_id, "run_id": run_id,
+                "mode": record.kind, "input_status": record.status}
 
     async def cancel_run(self, authorization: str, run_id: str,
                          request_id: object) -> JsonObject:
