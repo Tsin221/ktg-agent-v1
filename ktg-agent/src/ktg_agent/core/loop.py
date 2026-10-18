@@ -23,7 +23,7 @@ from ktg_agent.core.messages import (
     message_to_dict,
     project_model_messages,
 )
-from ktg_agent.core.queues import InputQueue
+from ktg_agent.core.queues import InputQueue, QueuedInput
 from ktg_agent.providers.base import (
     CancellationSignal,
     FinalResponse,
@@ -81,6 +81,7 @@ class AgentRunResult:
     final_response: FinalResponse
     events: tuple[AgentEvent, ...]
     limit_reason: str | None = None
+    unconsumed_inputs: tuple[QueuedInput, ...] = ()
 
     @property
     def stop_reason(self) -> StopReason:
@@ -127,6 +128,7 @@ class AgentLoop:
         ktg_client: object | None = None,
         input_queue: InputQueue | None = None,
         publisher: EventPublisher | None = None,
+        close_inputs: Callable[[], None] | None = None,
     ) -> AgentRunResult:
         history = list(messages)
         if not history:
@@ -147,6 +149,8 @@ class AgentLoop:
         try:
             while True:
                 if cancellation is not None and cancellation.is_cancelled:
+                    if close_inputs is not None:
+                        close_inputs()
                     return await self._cancelled_result(
                         publisher=publisher,
                         history=history,
@@ -159,6 +163,8 @@ class AgentLoop:
                     tool_calls=tool_calls_started,
                 )
                 if limit_reason is not None:
+                    if close_inputs is not None:
+                        close_inputs()
                     return await self._limited_result(
                         publisher=publisher,
                         history=history,
@@ -233,6 +239,8 @@ class AgentLoop:
                         },
                     )
                     if skipped_calls or batch_time_exhausted:
+                        if close_inputs is not None:
+                            close_inputs()
                         return await self._limited_result(
                             publisher=publisher,
                             history=history,
@@ -245,6 +253,8 @@ class AgentLoop:
                             tool_calls=tool_calls_started,
                         )
                     if cancellation is not None and cancellation.is_cancelled:
+                        if close_inputs is not None:
+                            close_inputs()
                         return await self._cancelled_result(
                             publisher=publisher,
                             history=history,
@@ -265,6 +275,8 @@ class AgentLoop:
                     },
                 )
                 if cancellation is not None and cancellation.is_cancelled:
+                    if close_inputs is not None:
+                        close_inputs()
                     return await self._cancelled_result(
                         publisher=publisher,
                         history=history,
@@ -284,6 +296,8 @@ class AgentLoop:
                         if follow_ups:
                             history.extend(follow_ups)
                             continue
+                if close_inputs is not None:
+                    close_inputs()
                 agent_status = self._agent_status(response.stop_reason)
                 await self._emit_agent_end_once(
                     publisher,
@@ -299,6 +313,8 @@ class AgentLoop:
                     events=publisher.events,
                 )
         except BaseException as exc:
+            if close_inputs is not None:
+                close_inputs()
             await self._emit_agent_end_once(
                 publisher,
                 {

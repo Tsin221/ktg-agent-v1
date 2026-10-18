@@ -24,7 +24,7 @@ from ktg_agent.service import QueryService
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.sessions import SessionRepository
-from ktg_agent.sessions.coordinator import RunCoordinator
+from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.service import SessionService
 
 
@@ -180,11 +180,12 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
     )
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
-                      event_sink: EventSink) -> AgentRunResult:
+                      event_sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
         return await query_service.run_session(
             run_id=run_id, message=message, history=history,
             page_context=page_context, authorization=authorization,
             event_sink=event_sink,
+            on_agent_ready=register_agent,
         )
 
     session_service = SessionService(

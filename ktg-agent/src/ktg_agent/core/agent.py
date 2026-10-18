@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from inspect import isawaitable
+from dataclasses import replace
 
 from ktg_agent.core.events import (
     AgentEvent,
@@ -14,7 +15,7 @@ from ktg_agent.core.events import (
 )
 from ktg_agent.core.loop import AgentLoop, AgentRunResult
 from ktg_agent.core.messages import Message, TextBlock, UserMessage
-from ktg_agent.core.queues import InputMode, InputQueue
+from ktg_agent.core.queues import InputMode, InputQueue, QueuedInput
 
 
 class AgentState(StrEnum):
@@ -69,6 +70,8 @@ class Agent:
         self._publisher: EventPublisher | None = None
         self._accepting_inputs = False
         self._listeners: list[AgentListener] = []
+        self._unconsumed_inputs: tuple[QueuedInput, ...] = ()
+        self._on_inputs_closed: Callable[[], None] | None = None
 
     @property
     def state(self) -> AgentState:
@@ -77,6 +80,14 @@ class Agent:
     @property
     def is_running(self) -> bool:
         return self._state is AgentState.RUNNING
+
+    @property
+    def accepting_inputs(self) -> bool:
+        return self._accepting_inputs
+
+    @property
+    def unconsumed_inputs(self) -> tuple[QueuedInput, ...]:
+        return self._unconsumed_inputs
 
     def subscribe(self, listener: AgentListener) -> Unsubscribe:
         if not callable(listener):
@@ -99,6 +110,7 @@ class Agent:
         history: tuple[Message, ...] = (),
         identity: object | None = None,
         ktg_client: object | None = None,
+        on_inputs_closed: Callable[[], None] | None = None,
     ) -> AgentRunResult:
         if self.is_running:
             raise AgentBusyError()
@@ -107,11 +119,13 @@ class Agent:
         self._state = AgentState.RUNNING
         self._idle.clear()
         self._queue.clear()
+        self._unconsumed_inputs = ()
         self._cancellation = CancellationToken()
         self._publisher = EventPublisher(run_id, self._dispatch_event)
         self._accepting_inputs = True
+        self._on_inputs_closed = on_inputs_closed
         try:
-            return await self._loop.run(
+            result = await self._loop.run(
                 run_id=run_id,
                 messages=(*history, user_message),
                 identity=identity,
@@ -119,10 +133,14 @@ class Agent:
                 ktg_client=ktg_client,
                 input_queue=self._queue,
                 publisher=self._publisher,
+                close_inputs=self.close_inputs,
             )
+            self._unconsumed_inputs = self._queue.drain_pending()
+            return replace(result, unconsumed_inputs=self._unconsumed_inputs)
         finally:
-            self._accepting_inputs = False
-            self._queue.clear()
+            self.close_inputs()
+            self._on_inputs_closed = None
+            self._unconsumed_inputs = self._queue.drain_pending() or self._unconsumed_inputs
             self._cancellation = None
             self._publisher = None
             self._state = AgentState.IDLE
@@ -138,7 +156,14 @@ class Agent:
         if self._cancellation is None or not self._accepting_inputs:
             return False
         self._cancellation.cancel()
+        self.close_inputs()
         return True
+
+    def close_inputs(self) -> None:
+        if self._accepting_inputs:
+            self._accepting_inputs = False
+            if self._on_inputs_closed is not None:
+                self._on_inputs_closed()
 
     async def wait_for_idle(self) -> None:
         await self._idle.wait()
@@ -163,8 +188,6 @@ class Agent:
             result = loop_sink(event)
             if isawaitable(result):
                 await result
-        if event.type is AgentEventType.AGENT_END:
-            self._accepting_inputs = False
         for listener in tuple(self._listeners):
             try:
                 result = listener(event)

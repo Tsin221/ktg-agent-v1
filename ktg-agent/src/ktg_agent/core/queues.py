@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from enum import StrEnum
+from dataclasses import dataclass
 
 from ktg_agent.core.messages import UserMessage
 
@@ -11,6 +12,12 @@ from ktg_agent.core.messages import UserMessage
 class InputMode(StrEnum):
     STEER = "steer"
     FOLLOW_UP = "follow_up"
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedInput:
+    mode: InputMode
+    message: UserMessage
 
 
 class InputQueue:
@@ -37,6 +44,13 @@ class InputQueue:
     def clear(self) -> None:
         self._steering.clear()
         self._follow_ups.clear()
+
+    def drain_pending(self) -> tuple[QueuedInput, ...]:
+        pending = (
+            *(QueuedInput(InputMode.STEER, item) for item in self.drain_steering()),
+            *(QueuedInput(InputMode.FOLLOW_UP, item) for item in self.drain_follow_ups()),
+        )
+        return pending
 
     @property
     def is_empty(self) -> bool:

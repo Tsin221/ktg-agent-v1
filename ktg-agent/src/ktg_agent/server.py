@@ -23,7 +23,7 @@ from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
 from ktg_agent.sessions import SessionRepository
-from ktg_agent.sessions.coordinator import RunCoordinator
+from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.repository import EventHistoryExpiredError, RunBusyError, RunConflictError
 from ktg_agent.sessions.service import SessionService
 
@@ -135,11 +135,12 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
     repository.prune_events()
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
-                      event_sink: EventSink) -> AgentRunResult:
+                      event_sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
         return await service.run_session(
             run_id=run_id, message=message, history=history,
             page_context=page_context, authorization=authorization,
             event_sink=event_sink,
+            on_agent_ready=register_agent,
         )
 
     return SessionService(repository, client_factory, RunCoordinator(repository, execute))

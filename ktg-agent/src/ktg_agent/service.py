@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from ktg_agent.core.events import EventSink
 from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
+from ktg_agent.core.agent import Agent
+from collections.abc import Callable
 from ktg_agent.core.messages import (
     JsonObject,
     JsonValue,
@@ -127,6 +129,7 @@ class QueryService:
         self, *, run_id: str, message: str, history: tuple[Message, ...],
         page_context: JsonObject | None = None,
         authorization: str, event_sink: EventSink,
+        on_agent_ready: Callable[[Agent], Callable[[], None]] | None = None,
     ) -> AgentRunResult:
         """Run an authenticated turn with durable session history."""
         client = self._ktg_client_factory(authorization)
@@ -151,12 +154,15 @@ class QueryService:
                 "不要把本轮页面状态沿用为下一轮的当前状态。"
                 f"\n<page_context>{context_json}</page_context>"
             )
-        return await loop.run(
+        agent = Agent(loop)
+        on_inputs_closed = on_agent_ready(agent) if on_agent_ready is not None else None
+        return await agent.prompt(
+            message,
             run_id=run_id,
-            messages=(SystemMessage((TextBlock(system_prompt),)), *history,
-                      UserMessage((TextBlock(message),))),
+            history=(SystemMessage((TextBlock(system_prompt),)), *history),
             identity=identity,
             ktg_client=client,
+            on_inputs_closed=on_inputs_closed,
         )
 
     async def confirm(self, *, preview_id: str, authorization: str) -> JsonObject:

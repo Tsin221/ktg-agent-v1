@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
+from threading import Event
 import sqlite3
 from typing import Any, cast
 
@@ -14,10 +17,10 @@ from ktg_agent.core.messages import (
     UserMessage,
 )
 from ktg_agent.ktg import KTGClient
-from ktg_agent.providers.base import FinalResponse, ModelConfig, ProviderError, ResponseCompleted, Usage
+from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderError, ProviderRequest, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
-from ktg_agent.sessions.coordinator import RunCoordinator
+from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent, RunPhase
 from ktg_agent.sessions.repository import RunRecord, SessionRepository
 from ktg_agent.tools import (
     ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolRegistry,
@@ -37,7 +40,7 @@ class FakeClient:
 
 
 type RunCoordinatorExecutor = Callable[
-    [str, str, tuple[Message, ...], JsonObject | None, str, EventSink], Awaitable[AgentRunResult],
+    [str, str, tuple[Message, ...], JsonObject | None, str, EventSink, RegisterAgent], Awaitable[AgentRunResult],
 ]
 
 
@@ -49,10 +52,11 @@ def query_executor(provider: FakeProvider) -> RunCoordinatorExecutor:
 
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
-                      sink: EventSink) -> AgentRunResult:
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
         return await service.run_session(
             run_id=run_id, message=message, history=history,
             page_context=page_context, authorization=authorization, event_sink=sink,
+            on_agent_ready=register_agent,
         )
 
     return execute
@@ -118,7 +122,7 @@ def test_tool_audit_is_durable_but_projection_uses_summary(tmp_path: Path) -> No
 
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
-                      sink: EventSink) -> AgentRunResult:
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
         loop = AgentLoop(provider=provider, tool_registry=registry,
                          tool_runner=ToolRunner(registry),
                          model_config=ModelConfig("fake", 128), event_sink=sink)
@@ -203,3 +207,55 @@ def test_settlement_transaction_rolls_back_messages_and_status(tmp_path: Path) -
                          AssistantMessage((TextBlock("done"),))))
     assert repo.get_run("id:7", run.id).status == "running"  # type: ignore[union-attr]
     assert repo.list_messages("id:7", session.id).items == ()
+
+
+def test_coordinator_delivers_input_from_different_thread_and_loop(tmp_path: Path) -> None:
+    class PausedProvider:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = asyncio.Event()
+            self.owner_loop: asyncio.AbstractEventLoop | None = None
+            self.requests: list[ProviderRequest] = []
+
+        def stream(self, request: ProviderRequest) -> AsyncIterator[ModelEvent]:
+            async def events() -> AsyncIterator[ModelEvent]:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    self.owner_loop = asyncio.get_running_loop()
+                    self.started.set()
+                    await self.release.wait()
+                yield ResponseCompleted(FinalResponse(
+                    AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, Usage(1, 1),
+                ))
+            return events()
+
+    provider = PausedProvider()
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128),
+        ktg_client_factory=lambda _: cast(KTGClient, FakeClient()),
+    )
+
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      page_context: JsonObject | None, authorization: str,
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+        return await service.run_session(
+            run_id=run_id, message=message, history=history, page_context=page_context,
+            authorization=authorization, event_sink=sink, on_agent_ready=register_agent,
+        )
+
+    coordinator = RunCoordinator(repo, execute)
+    coordinator.schedule(run, "first", "Bearer test")
+    assert provider.started.wait(5)
+    assert coordinator.phase(run.id) is RunPhase.RUNNING
+    coordinator.submit_input(run.id, "follow_up", "second").result(5)
+    assert provider.owner_loop is not None
+    provider.owner_loop.call_soon_threadsafe(provider.release.set)
+    coordinator.close()
+
+    assert repo.get_run("id:7", run.id).status == "completed"  # type: ignore[union-attr]
+    assert len(provider.requests) == 2
+    assert provider.requests[1].messages[-1] == UserMessage((TextBlock("second"),))
+    assert coordinator.phase(run.id) is None

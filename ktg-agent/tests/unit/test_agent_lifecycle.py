@@ -320,3 +320,52 @@ def test_tool_exception_is_normalized_and_agent_returns_to_idle() -> None:
     assert tool_result.is_error is True
     assert result.stop_reason is StopReason.COMPLETED
     assert agent.state is AgentState.IDLE
+
+
+def test_final_queue_check_closes_gate_before_agent_end_sink_waits() -> None:
+    provider = ControlledProvider((response(TextBlock("done")),))
+    entered_end = asyncio.Event()
+    release_end = asyncio.Event()
+
+    async def slow_sink(event: AgentEvent) -> None:
+        if event.type is AgentEventType.AGENT_END:
+            entered_end.set()
+            await release_end.wait()
+
+    registry = ToolRegistry(())
+    agent = Agent(AgentLoop(
+        provider=provider, tool_registry=registry, tool_runner=ToolRunner(registry),
+        model_config=ModelConfig(model="fake", max_output_tokens=64), event_sink=slow_sink,
+    ))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(agent.prompt("start", run_id="run-gate"))
+        await entered_end.wait()
+        assert agent.accepting_inputs is False
+        with pytest.raises(AgentNotRunningError):
+            await agent.follow_up("too late")
+        release_end.set()
+        result = await task
+        assert result.unconsumed_inputs == ()
+        assert len(provider.requests) == 1
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_run_exposes_unconsumed_input_before_queue_clear() -> None:
+    provider = ControlledProvider((response(TextBlock("unused")),))
+    provider.block_first = True
+    agent = make_agent(provider)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(agent.prompt("start", run_id="run-pending"))
+        await provider.started.wait()
+        await agent.follow_up("retain this")
+        assert agent.abort() is True
+        provider.release.set()
+        result = await task
+        assert result.stop_reason is StopReason.CANCELLED
+        assert result.unconsumed_inputs[0].message == UserMessage((TextBlock("retain this"),))
+        assert agent.unconsumed_inputs == result.unconsumed_inputs
+
+    asyncio.run(scenario())
