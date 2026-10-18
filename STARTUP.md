@@ -277,6 +277,8 @@ http://localhost:81
 7. 在 `ktg-mes-ui` 中执行 `npm run dev -- --port 81`
 8. 浏览器访问 `http://localhost:81`，通过公共布局右下角“智能查询”使用当前账号查询产品、库存和工单
 
+使用 `scripts/start-agent.ps1` 启动时，如 `.env` 未设置 `AGENT_SESSION_DB`，脚本会将其设为工作区 `.runtime/agent-sessions.sqlite3` 的绝对路径。直接执行 `python -m ktg_agent.server` 时仍需自行设置绝对路径；会话数据文件应随服务备份。
+
 ### 8.1 独立端到端验收环境
 
 生产工单草稿链路需要联调时，建议使用独立数据库和独立端口，不要在日常开发库中注入故障。前端开发代理支持通过环境变量覆盖后端与 Agent 地址，默认值保持不变：
@@ -358,6 +360,12 @@ location /agent-api/ {
 ```
 
 Agent 也会对 SSE 响应发送 `X-Accel-Buffering: no`，每 15 秒发送心跳。部署后应通过代理发起运行中的订阅，确认每个事件和心跳及时到达，而不是等连接结束后一次性返回。
+
+### 9.1 会话断线恢复验收
+
+悬浮窗提交问题后，服务端先返回 `run_id`，网页再订阅 `/agent-api/v1/runs/{run_id}/events?after_seq=N`。网络中断时页面显示自动重连提示，按已收到的序号继续订阅，不再次提交问题。若返回 410，网页读取 run 快照和会话最终消息；刷新页面后也从服务端恢复消息与结果卡。账号切换后应重新验证会话归属，不能显示前一账号内容。
+
+离线回归可在 `ktg-agent` 中运行 `uv run --locked pytest -q` 与 `uv run --locked mypy`，在 `ktg-mes-ui` 的 Node 16 环境中运行 `npm run test:agent-session`、`npm run test:workorder` 和 `npm run build:stage`。当前项目级 `npm run lint` 会被 `.eslintignore` 的既有全局规则拦截；显式检查助手相关源文件可用 `eslint --no-ignore src/api/agent.js src/api/agentSession.js src/components/AgentAssistant/index.vue src/components/AgentAssistant/sessionPresentation.js`。真实代理验收还须验证断线、410、刷新及只读 MES 查询，不能把离线结果视为真实模型或 MES 已验收。
 
 ## 10. 常见问题
 

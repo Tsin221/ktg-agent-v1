@@ -12,6 +12,10 @@ if ([string]::IsNullOrWhiteSpace($env:MODEL_ID) -or $env:MODEL_ID -eq 'CHANGE_ME
     throw 'MODEL_ID is missing from the root .env file.'
 }
 
+if ([string]::IsNullOrWhiteSpace($env:AGENT_SESSION_DB)) {
+    $env:AGENT_SESSION_DB = Join-Path $workspaceRoot '.runtime\agent-sessions.sqlite3'
+}
+
 Set-Location .\ktg-agent
 uv run --locked python -m ktg_agent.server
 

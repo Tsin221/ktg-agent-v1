@@ -145,7 +145,38 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     return result
   }
 
-  async function subscribeRun({ onEvent, onSnapshot }) {
+  async function cancelRun(requestId) {
+    requireIdentity()
+    if (!pointer || !pointer.runId) throw new Error('没有可停止的 run。')
+    const current = generation
+    const result = await api.cancelRun(pointer.runId, requestId)
+    return checkIdentity() && current === generation ? result : null
+  }
+
+  async function addInput(input) {
+    requireIdentity()
+    if (!pointer || !pointer.runId) throw new Error('没有可追加输入的 run。')
+    const current = generation
+    const result = await api.addInput(pointer.runId, input)
+    return checkIdentity() && current === generation ? result : null
+  }
+
+  async function listInputs(runId = pointer && pointer.runId) {
+    requireIdentity()
+    if (!runId) return []
+    const current = generation
+    const items = []
+    let cursor
+    do {
+      const page = await api.listInputs(runId, cursor ? { cursor } : undefined)
+      if (!checkIdentity() || current !== generation || !pointer || pointer.runId !== runId) return null
+      items.push(...page.items)
+      cursor = page.next_cursor
+    } while (cursor)
+    return items
+  }
+
+  async function subscribeRun({ onEvent, onSnapshot, onConnectionError, onConnectionRestored }) {
     requireIdentity()
     if (!pointer || !pointer.runId) throw new Error('没有可订阅的 run。')
     close()
@@ -166,11 +197,13 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         cursor = page.next_cursor
       } while (cursor && active())
       if (!active()) return null
+      const inputs = await listInputs(runId)
+      if (!active() || !inputs) return null
       if (Number.isSafeInteger(run.last_seq) && run.last_seq > pointer.seq) {
         pointer.seq = run.last_seq
         save()
       }
-      if (onSnapshot) onSnapshot({ run, messages })
+      if (onSnapshot) onSnapshot({ run, messages, inputs })
       return run
     }
 
@@ -184,6 +217,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         })
         if (!active()) return
         if (response.status === 410) {
+          if (onConnectionRestored) onConnectionRestored()
           await snapshot()
           return
         }
@@ -199,6 +233,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
           throw error
         }
         if (!response.body) throw new Error('浏览器不支持流式事件读取。')
+        if (onConnectionRestored) onConnectionRestored()
         const reader = response.body.getReader()
         const decoder = new TextDecoder('utf-8')
         let settled = false
@@ -238,10 +273,12 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
       } catch (error) {
         if (error.authFailure || error.permanent || error.message === '浏览器不支持流式事件读取。') throw error
         if (!active()) return
+        if (onConnectionError) onConnectionError(error)
       }
       await new Promise(resolve => setTimeout(resolve, retryDelay))
     }
   }
 
-  return { checkIdentity, getState, restoreSession, setSession, setRun, createRun, subscribeRun, close, clear }
+  return { checkIdentity, getState, restoreSession, setSession, setRun, createRun,
+    cancelRun, addInput, listInputs, subscribeRun, close, clear }
 }

@@ -34,21 +34,30 @@ export const getAgentRun = runId => request({
   baseURL: '', url: runUrl + '/' + id(runId), method: 'get'
 })
 
+export const cancelAgentRun = (runId, requestId) => request({
+  baseURL: '', url: runUrl + '/' + id(runId) + '/cancel', method: 'post',
+  data: { request_id: requestId }, headers: { repeatSubmit: false }
+})
+
+export const addAgentRunInput = (runId, { requestId, mode, message }) => request({
+  baseURL: '', url: runUrl + '/' + id(runId) + '/inputs', method: 'post',
+  data: { request_id: requestId, mode, message }, headers: { repeatSubmit: false }
+})
+
+export const listAgentRunInputs = (runId, params) => request({
+  baseURL: '', url: runUrl + '/' + id(runId) + '/inputs', method: 'get', params
+})
+
 export const agentSession = createAgentSessionClient({
   api: { getSession: getAgentSession, getRun: getAgentRun, listMessages: listAgentMessages,
-    createRun: createAgentRun },
+    createRun: createAgentRun, cancelRun: cancelAgentRun, addInput: addAgentRunInput,
+    listInputs: listAgentRunInputs },
   getIdentity: () => ({
     token: store.state.user.token && store.state.user.token === getToken() ? store.state.user.token : null,
     userId: store.state.user.id
   }),
   storage: typeof window !== 'undefined' ? window.localStorage : null,
   fetchStream: (url, options) => fetch(url, options)
-})
-
-store.subscribe((mutation) => {
-  if (mutation.type === 'SET_TOKEN' || mutation.type === 'SET_ID') {
-    agentSession.checkIdentity()
-  }
 })
 
 export function queryAgent(message) {

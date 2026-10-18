@@ -3,10 +3,12 @@ const path = require('path')
 const { transformFileSync } = require('@babel/core')
 
 const filename = path.resolve(__dirname, '../src/components/AgentAssistant/sessionPresentation.js')
-const transformed = transformFileSync(filename, { plugins: ['@babel/plugin-transform-modules-commonjs'] })
+const transformed = transformFileSync(filename, { babelrc: false, configFile: false,
+  plugins: ['@babel/plugin-transform-modules-commonjs'] })
 const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
-const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText } = moduleRef.exports
+const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
+  visibleInputs, inputStatusText } = moduleRef.exports
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'
@@ -39,5 +41,14 @@ assert.strictEqual(progress.tools.t1.status, 'succeeded')
 assert.strictEqual(isTerminalRun('running'), false)
 assert.strictEqual(isTerminalRun('completed'), true)
 assert.strictEqual(runStatusText({ status: 'needs_reconciliation' }), '运行中断，请核对业务操作结果')
+assert.strictEqual(runStatusText({ status: 'failed' }), '本轮处理失败，请重试。')
+assert.match(runStatusText({ status: 'cancelling' }), /核验结果/)
+assert.strictEqual(inputStatusText({ status: 'not_consumed' }), '本轮未消费，可主动作为新问题发送')
+assert.deepStrictEqual(visibleInputs([
+  { request_id: 'i1', status: 'consumed', message: '查库存' },
+  { request_id: 'i2', status: 'not_consumed', message: '继续' }
+], history, 'r1').map(input => input.request_id), ['i1', 'i2'])
+assert.deepStrictEqual(visibleInputs([{ request_id: 'i1', status: 'consumed', message: '继续' }],
+  [{ runId: 'r1', role: 'user', text: '查库存' }, { runId: 'r1', role: 'user', text: '继续' }], 'r1'), [])
 
 console.log('agent assistant session presentation tests passed')

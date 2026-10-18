@@ -1,12 +1,28 @@
 const assert = require('assert')
 const path = require('path')
+const { ReadableStream } = require('stream/web')
 const { transformFileSync } = require('@babel/core')
 
 const filename = path.resolve(__dirname, '../src/api/agentSession.js')
-const transformed = transformFileSync(filename, { plugins: ['@babel/plugin-transform-modules-commonjs'] })
+const transformed = transformFileSync(filename, { babelrc: false, configFile: false,
+  plugins: ['@babel/plugin-transform-modules-commonjs'] })
 const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { createSseParser, createAgentSessionClient } = moduleRef.exports
+
+// The Vuex store may still be initializing when the layout imports this API module.
+const apiFilename = path.resolve(__dirname, '../src/api/agent.js')
+const apiCode = transformFileSync(apiFilename, { babelrc: false, configFile: false,
+  plugins: ['@babel/plugin-transform-modules-commonjs'] }).code
+const apiModule = { exports: {} }
+const apiRequire = name => {
+  if (name === '@/utils/request') return () => {}
+  if (name === '@/store') return undefined
+  if (name === '@/utils/auth') return { getToken: () => null }
+  if (name === './agentSession') return { createAgentSessionClient: () => ({}) }
+  throw new Error('unexpected import: ' + name)
+}
+assert.doesNotThrow(() => new Function('exports', 'module', 'require', apiCode)(apiModule.exports, apiModule, apiRequire))
 
 function stream(chunks) {
   return new ReadableStream({
@@ -42,6 +58,7 @@ async function main() {
   }
   let auth = { token: 'first', userId: 7 }
   let postCount = 0
+  const controlCalls = []
   let runReads = 0
   const urls = []
   const received = []
@@ -53,7 +70,14 @@ async function main() {
       assert.strictEqual(input.requestId, 'request-1')
       return { run_id: 'r1', status: 'running' }
     },
+    cancelRun: async (runId, requestId) => {
+      controlCalls.push(['cancel', runId, requestId]); return { status: 'cancelling' }
+    },
+    addInput: async (runId, input) => {
+      controlCalls.push(['input', runId, input]); return { input_status: 'queued' }
+    },
     getRun: async () => ({ session_id: 's1', status: ++runReads === 1 ? 'running' : 'completed', last_seq: 3 }),
+    listInputs: async () => ({ items: [], next_cursor: null }),
     listMessages: async (_sid, params) => params
       ? { items: [{ message_id: 2 }], next_cursor: null }
       : { items: [{ message_id: 1 }], next_cursor: 1 }
@@ -62,9 +86,11 @@ async function main() {
   const unicodeAt = utf8.findIndex((value, index) => value > 127 && utf8[index + 1] > 127)
   const chunks = [utf8.slice(0, 4), utf8.slice(4, unicodeAt + 1), utf8.slice(unicodeAt + 1)]
   let connection = 0
+  let attempts = 0
   const fetchStream = async (url, options) => {
     urls.push(url)
     assert.strictEqual(options.headers.Authorization, 'Bearer first')
+    if (++attempts === 1) throw new Error('temporary network failure')
     connection++
     return { ok: true, status: 200,
       body: connection === 1 ? stream(chunks) : stream([bytes(frame(2) + frame(3, 'run_settled'))]) }
@@ -73,11 +99,22 @@ async function main() {
   client.setSession('s1')
   await client.createRun({ requestId: 'request-1', message: '测试' })
   await client.createRun({ requestId: 'request-1', message: '测试' })
+  await client.addInput({ requestId: 'input-1', mode: 'follow_up', message: '继续' })
+  await client.cancelRun('cancel-1')
+  assert.deepStrictEqual(controlCalls, [
+    ['input', 'r1', { requestId: 'input-1', mode: 'follow_up', message: '继续' }],
+    ['cancel', 'r1', 'cancel-1']
+  ])
   assert.strictEqual(postCount, 2)
   // The server returns the same run for repeated request IDs; reconnect only calls GET events.
-  await client.subscribeRun({ onEvent: value => received.push(value.seq), onSnapshot: value => snapshots.push(value) })
+  const connectionState = []
+  await client.subscribeRun({ onEvent: value => received.push(value.seq), onSnapshot: value => snapshots.push(value),
+    onConnectionError: error => connectionState.push(error.message),
+    onConnectionRestored: () => connectionState.push('restored') })
   assert.deepStrictEqual(received, [1, 2, 3])
+  assert.deepStrictEqual(connectionState, ['temporary network failure', 'restored', 'restored'])
   assert.deepStrictEqual(urls, [
+    '/agent-api/v1/runs/r1/events?after_seq=0',
     '/agent-api/v1/runs/r1/events?after_seq=0',
     '/agent-api/v1/runs/r1/events?after_seq=2'
   ])

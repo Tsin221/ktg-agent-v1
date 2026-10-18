@@ -69,9 +69,36 @@ export function progressFromEvent(progress, event) {
 export function runStatusText(run) {
   if (!run) return ''
   return {
-    queued: '正在排队…', running: '正在处理…', cancelling: '正在处理…',
+    queued: '正在排队…', running: '正在处理…', cancelling: '正在停止后续执行，已发出的业务操作仍在核验结果…',
     completed: '本轮已完成', needs_input: '本轮需要补充信息',
-    failed: '本轮未完成', cancelled: '本轮已取消',
+    failed: '本轮处理失败，请重试。', cancelled: '本轮已取消',
     needs_reconciliation: '运行中断，请核对业务操作结果'
   }[run.status] || '正在获取状态…'
+}
+
+export function visibleInputs(inputs, messages, runId) {
+  const counts = new Map()
+  let originalQuestionSeen = false
+  for (const entry of messages) {
+    if (entry.role !== 'user' || entry.runId !== runId) continue
+    if (!originalQuestionSeen) {
+      originalQuestionSeen = true
+      continue
+    }
+    counts.set(entry.text, (counts.get(entry.text) || 0) + 1)
+  }
+  return inputs.filter(input => {
+    if (input.status !== 'consumed') return true
+    const count = counts.get(input.message) || 0
+    if (!count) return true
+    counts.set(input.message, count - 1)
+    return false
+  })
+}
+
+export function inputStatusText(input) {
+  if (input.status === 'queued') return '已排队，等待本轮处理'
+  if (input.status === 'consumed') return '已进入本轮上下文'
+  if (input.status === 'not_consumed') return '本轮未消费，可主动作为新问题发送'
+  return '回执未确认，请查询或用同一请求重试'
 }

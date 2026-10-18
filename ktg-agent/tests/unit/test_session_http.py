@@ -318,6 +318,25 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
             "user", "assistant", "user", "assistant",
         ]
         assert '"itemCode":"A"' not in str(messages)
+        for rid in completed_ids:
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", f"/agent-api/v1/runs/{rid}/events?after_seq=0",
+                               headers={"Authorization": "Bearer alice"})
+            response = connection.getresponse()
+            assert response.status == 200
+            replay = [frame for frame in response.read().decode().split("\n\n") if frame]
+            connection.close()
+            events = [json.loads("\n".join(line.removeprefix("data: ")
+                                           for line in frame.splitlines()
+                                           if line.startswith("data: ")))
+                      for frame in replay]
+            assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
+            assert events[-1]["type"] == "run_settled"
+            assert events[-1]["payload"]["status"] == "completed"
+            assert request(server, "GET", f"/agent-api/v1/runs/{rid}")[1]["last_seq"] == len(events)
+            assert request(server, "GET", f"/agent-api/v1/runs/{rid}/events?after_seq=0",
+                           token="Bearer bob")[0] == 404
+        assert len(first_provider.requests) == 2
 
     repo = SessionRepository(path)
     orphan, _ = repo.admit_run("id:7", sid, "interrupted", "interrupted", {})
@@ -334,6 +353,12 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
         assert len(third_provider.requests) == 0
         for rid in completed_ids:
             assert request(server, "GET", f"/agent-api/v1/runs/{rid}")[1]["status"] == "completed"
+        restored_messages = request(server, "GET", f"/agent-api/v1/sessions/{sid}/messages")[1]
+        assert [item["role"] for item in cast(list[dict[str, object]], restored_messages["items"])] == [
+            "user", "assistant", "user", "assistant",
+        ]
+        assert request(server, "GET", f"/agent-api/v1/sessions/{sid}/messages",
+                       token="Bearer bob")[0] == 404
         assert request(server, "GET", f"/agent-api/v1/sessions/{sid}")[1]["active_run_id"] is None
         third = submit_and_wait(server, sid, 3)
         assert third != orphan.id
