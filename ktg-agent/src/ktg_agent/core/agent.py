@@ -72,6 +72,10 @@ class Agent:
         self._listeners: list[AgentListener] = []
         self._unconsumed_inputs: tuple[QueuedInput, ...] = ()
         self._on_inputs_closed: Callable[[], None] | None = None
+        self._input_consumed_handler: Callable[[str], None] | None = None
+
+    def set_input_consumed_handler(self, handler: Callable[[str], None]) -> None:
+        self._input_consumed_handler = handler
 
     @property
     def state(self) -> AgentState:
@@ -119,6 +123,7 @@ class Agent:
         self._state = AgentState.RUNNING
         self._idle.clear()
         self._queue.clear()
+        self._queue.on_consumed = self._input_consumed_handler
         self._unconsumed_inputs = ()
         self._cancellation = CancellationToken()
         self._publisher = EventPublisher(run_id, self._dispatch_event)
@@ -140,17 +145,19 @@ class Agent:
         finally:
             self.close_inputs()
             self._on_inputs_closed = None
+            self._queue.on_consumed = None
+            self._input_consumed_handler = None
             self._unconsumed_inputs = self._queue.drain_pending() or self._unconsumed_inputs
             self._cancellation = None
             self._publisher = None
             self._state = AgentState.IDLE
             self._idle.set()
 
-    async def steer(self, message: str | UserMessage) -> None:
-        await self._enqueue(InputMode.STEER, message)
+    async def steer(self, message: str | UserMessage, request_id: str | None = None) -> None:
+        await self._enqueue(InputMode.STEER, message, request_id)
 
-    async def follow_up(self, message: str | UserMessage) -> None:
-        await self._enqueue(InputMode.FOLLOW_UP, message)
+    async def follow_up(self, message: str | UserMessage, request_id: str | None = None) -> None:
+        await self._enqueue(InputMode.FOLLOW_UP, message, request_id)
 
     def abort(self) -> bool:
         if self._cancellation is None or not self._accepting_inputs:
@@ -172,15 +179,17 @@ class Agent:
         self,
         mode: InputMode,
         message: str | UserMessage,
+        request_id: str | None,
     ) -> None:
         if not self._accepting_inputs or self._publisher is None:
             raise AgentNotRunningError()
         user_message = self._user_message(message)
-        self._queue.enqueue(mode, user_message)
-        await self._publisher.emit(
-            AgentEventType.INPUT_QUEUED,
-            {"mode": mode.value},
-        )
+        self._queue.enqueue(mode, user_message, request_id)
+        if request_id is None:
+            await self._publisher.emit(
+                AgentEventType.INPUT_QUEUED,
+                {"mode": mode.value},
+            )
 
     async def _dispatch_event(self, event: AgentEvent) -> None:
         loop_sink = self._loop.event_sink

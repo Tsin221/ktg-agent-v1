@@ -13,7 +13,7 @@ from ktg_agent.core.agent import Agent
 from ktg_agent.core.events import AgentEvent, EventSink
 from ktg_agent.core.loop import AgentRunResult
 from ktg_agent.core.messages import JsonObject, JsonValue, Message, StopReason, TextBlock, ToolResultMessage
-from ktg_agent.sessions.repository import RunRecord, SessionRepository
+from ktg_agent.sessions.repository import ControlRecord, RunRecord, SessionRepository
 
 type RegisterAgent = Callable[[Agent], Callable[[], None]]
 RunExecutor = Callable[[str, str, tuple[Message, ...], JsonObject | None, str, EventSink, RegisterAgent], Awaitable[AgentRunResult]]
@@ -33,6 +33,7 @@ class RunHandle:
     phase: RunPhase = RunPhase.QUEUED
     loop: asyncio.AbstractEventLoop | None = None
     agent: Agent | None = None
+    cancel_requested: bool = False
 
 
 class RunNotRunningError(RuntimeError):
@@ -70,8 +71,13 @@ class RunCoordinator:
     def _execute(self, run: RunRecord, message: str, authorization: str) -> None:
         try:
             with self._lock:
-                self._handles[run.id].phase = RunPhase.STARTING
-            self._repository.update_run_status(run.owner_user_id, run.id, "running")
+                handle = self._handles[run.id]
+                if handle.cancel_requested:
+                    self._repository.settle_run(run.owner_user_id, run.id, "cancelled", "cancelled",
+                                                {"stop_reason": "cancelled"}, ())
+                    return
+                handle.phase = RunPhase.STARTING
+                self._repository.update_run_status(run.owner_user_id, run.id, "running")
             history = self._repository.completed_history(run.owner_user_id, run.session_id)
             page_context = run.request_summary.get("page_context")
             if page_context is not None and not isinstance(page_context, dict):
@@ -91,6 +97,11 @@ class RunCoordinator:
                         handle.loop = owner_loop
                         handle.agent = agent
                         handle.phase = RunPhase.RUNNING
+                        agent.set_input_consumed_handler(
+                            lambda request_id: self._repository.mark_input_consumed(
+                                run.owner_user_id, run.id, request_id))
+                        if handle.cancel_requested:
+                            owner_loop.call_soon(agent.abort)
 
                     def close_inputs() -> None:
                         with self._lock:
@@ -143,6 +154,41 @@ class RunCoordinator:
         with self._lock:
             handle = self._handles.get(run_id)
             return handle.phase if handle is not None else None
+
+    def admit_input(self, owner: str, run_id: str, request_id: str,
+                    mode: str, message: str) -> ControlRecord:
+        with self._lock:
+            handle = self._handles.get(run_id)
+            ready = (handle is not None and handle.phase is RunPhase.RUNNING
+                     and handle.agent is not None and handle.loop is not None)
+            accepting = ready and handle is not None and handle.agent is not None and handle.agent.accepting_inputs
+            record, created = self._repository.admit_control(
+                owner, run_id, request_id, mode, {"mode": mode, "message": message},
+                accepting=accepting, ready=ready,
+                closed=handle is not None and handle.phase is RunPhase.CLOSING)
+            if created:
+                assert handle is not None and handle.loop is not None and handle.agent is not None
+                loop, agent = handle.loop, handle.agent
+
+                async def deliver() -> None:
+                    if mode == "steer":
+                        await agent.steer(message, request_id)
+                    else:
+                        await agent.follow_up(message, request_id)
+
+                asyncio.run_coroutine_threadsafe(deliver(), loop)
+            return record
+
+    def admit_cancel(self, owner: str, run_id: str, request_id: str) -> ControlRecord:
+        with self._lock:
+            handle = self._handles.get(run_id)
+            record, created = self._repository.admit_control(
+                owner, run_id, request_id, "cancel", {}, accepting=False)
+            if created and handle is not None:
+                handle.cancel_requested = True
+                if handle.phase is RunPhase.RUNNING and handle.loop is not None and handle.agent is not None:
+                    handle.loop.call_soon_threadsafe(handle.agent.abort)
+            return record
 
     def submit_input(self, run_id: str, mode: str, message: str) -> Future[None]:
         with self._lock:

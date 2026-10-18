@@ -63,16 +63,14 @@ def test_concurrent_event_writes_cannot_skip_or_duplicate_sequence(tmp_path: Pat
     repo = SessionRepository(tmp_path / "sessions.sqlite3")
     session = repo.create_session("id:7")
     run = repo.create_run("id:7", session.id, "r1", "h1", {})
-    with pytest.raises(sqlite3.IntegrityError):
-        repo.append_event("id:7", run.id, 2, "agent_start", {})
+    repo.append_event("id:7", run.id, 2, "agent_start", {})
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(repo.append_event, "id:7", run.id, 1, "agent_start", {})
                    for _ in range(2)]
         outcomes = [future.exception() for future in futures]
-    assert sum(outcome is None for outcome in outcomes) == 1
-    assert sum(isinstance(outcome, sqlite3.IntegrityError) for outcome in outcomes) == 1
+    assert all(outcome is None for outcome in outcomes)
     repo.append_event("id:7", run.id, 2, "agent_end", {})
-    assert [event.seq for event in repo.list_events("id:7", run.id).items] == [1, 2]
+    assert [event.seq for event in repo.list_events("id:7", run.id).items] == [1, 2, 3, 4]
     repo.settle_run("id:7", run.id, "completed", "completed", {}, ())
     with pytest.raises(KeyError):
         repo.append_event("id:7", run.id, 4, "message_update", {})
@@ -148,5 +146,6 @@ def test_v1_database_migrates_replay_boundary(tmp_path: Path) -> None:
         db.execute("PRAGMA user_version=1")
     SessionRepository(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert any(row[1] == "replay_floor_seq" for row in db.execute("PRAGMA table_info(runs)"))
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None

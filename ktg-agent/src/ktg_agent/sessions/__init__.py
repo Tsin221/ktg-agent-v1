@@ -1,6 +1,9 @@
 """Durable, owner-scoped Agent session history."""
 
 from ktg_agent.sessions.repository import (
+    ControlConflictError,
+    ControlRecord,
+    ControlStateError,
     EventRecord,
     EventHistoryExpiredError,
     MessageRecord,
@@ -11,6 +14,7 @@ from ktg_agent.sessions.repository import (
 )
 
 __all__ = [
+    "ControlConflictError", "ControlRecord", "ControlStateError",
     "EventHistoryExpiredError", "EventRecord", "MessageRecord", "Page", "RunRecord", "SessionRecord",
     "SessionRepository",
 ]

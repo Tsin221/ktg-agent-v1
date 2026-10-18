@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from ktg_agent.core.messages import AssistantMessage, TextBlock, ToolResultMessage, UserMessage
+from ktg_agent.core.messages import AssistantMessage, JsonObject, TextBlock, ToolResultMessage, UserMessage
 from ktg_agent.sessions import SessionRepository
+from ktg_agent.sessions.repository import ControlConflictError, ControlStateError
 
 
 def test_repository_reopens_with_ordered_history(tmp_path: Path) -> None:
@@ -45,10 +47,9 @@ def test_constraints_are_durable_and_failed_writes_roll_back(tmp_path: Path) -> 
             repo.create_run("alice", session.id, "same", "digest", {"message": "hi"})
         next_run = repo.create_run("alice", session.id, "other", "digest", {"message": "other"})
         repo.append_event("alice", next_run.id, 1, "agent_start", {})
-        with pytest.raises(sqlite3.IntegrityError):
-            repo.append_event("alice", next_run.id, 1, "agent_end", {})
+        repo.append_event("alice", next_run.id, 1, "agent_end", {})
         assert [item.id for item in repo.list_runs("alice", session.id).items] == [run.id, next_run.id]
-        assert [item.type for item in repo.list_events("alice", next_run.id).items] == ["agent_start"]
+        assert [item.type for item in repo.list_events("alice", next_run.id).items] == ["agent_start", "agent_end"]
         with pytest.raises(sqlite3.IntegrityError):
             repo.update_run_status("alice", run.id, "running")
         saved = repo.get_run("alice", run.id)
@@ -161,3 +162,102 @@ def test_restart_settles_only_orphaned_runs_once(tmp_path: Path) -> None:
         assert reopened.get_active_run("alice", run.session_id) is None
     assert reopened.get_run("alice", completed.id).status == "completed"  # type: ignore[union-attr]
     assert len(reopened.list_messages("alice", completed_session.id).items) == 2
+
+
+def test_control_admission_is_idempotent_and_events_share_durable_sequence(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "run", "hash", {})
+    repo.update_run_status("alice", run.id, "running")
+    repo.append_event("alice", run.id, 1, "agent_start", {})
+    request: JsonObject = {"mode": "follow_up", "message": "second"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: repo.admit_control(
+            "alice", run.id, "input-1", "follow_up", request, accepting=True), range(2)))
+    assert [created for _, created in results].count(True) == 1
+    assert results[0][0] == results[1][0]
+    with pytest.raises(ControlConflictError):
+        repo.admit_control("alice", run.id, "input-1", "steer", request, accepting=True)
+    with pytest.raises(ControlConflictError):
+        repo.admit_control("alice", run.id, "input-1", "follow_up",
+                           {"mode": "follow_up", "message": "changed"}, accepting=True)
+    repo.append_event("alice", run.id, 1, "turn_end", {})
+    repo.mark_input_consumed("alice", run.id, "input-1")
+    repo.settle_run("alice", run.id, "completed", "completed", {}, ())
+    repeated, created = repo.admit_control("alice", run.id, "input-1", "follow_up", request,
+                                           accepting=False)
+    assert not created and repeated.status == "consumed"
+    assert [item.seq for item in repo.list_events("alice", run.id).items] == [1, 2, 3, 4, 5]
+    assert [item.type for item in repo.list_events("alice", run.id).items] == [
+        "agent_start", "input_queued", "turn_end", "input_consumed", "run_settled"]
+    assert repo.list_inputs("bob", run.id).items == ()
+    with pytest.raises(KeyError):
+        repo.admit_control("bob", run.id, "foreign", "steer",
+                           {"mode": "steer", "message": "foreign"}, accepting=True)
+
+
+def test_pending_inputs_are_closed_before_settled_and_recovery_never_replays(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "run", "hash", {})
+    with pytest.raises(ControlStateError) as exc:
+        repo.admit_control("alice", run.id, "early", "steer",
+                           {"mode": "steer", "message": "early"}, accepting=False)
+    assert exc.value.code == "RUN_NOT_RUNNING"
+    repo.update_run_status("alice", run.id, "running")
+    first, _ = repo.admit_control("alice", run.id, "one", "steer",
+                                  {"mode": "steer", "message": "one"}, accepting=True)
+    second, _ = repo.admit_control("alice", run.id, "two", "follow_up",
+                                   {"mode": "follow_up", "message": "two"}, accepting=True)
+    page = repo.list_inputs("alice", run.id, limit=1)
+    assert [item.request_id for item in page.items] == ["one"]
+    assert [item.request_id for item in repo.list_inputs("alice", run.id,
+                                                          after=page.next_cursor).items] == ["two"]
+    assert first.position < second.position
+    repo.mark_input_consumed("alice", run.id, "one")
+    reopened = SessionRepository(path)
+    assert reopened.recover_interrupted_runs() == 1
+    assert reopened.recover_interrupted_runs() == 0
+    assert [(item.status, item.reason) for item in reopened.list_inputs("alice", run.id).items] == [
+        ("consumed", None), ("not_consumed", "process_interrupted")]
+    assert [item.type for item in reopened.list_events("alice", run.id).items][-2:] == [
+        "input_not_consumed", "run_settled"]
+    repeated, created = reopened.admit_control("alice", run.id, "one", "steer",
+                                               {"mode": "steer", "message": "one"}, accepting=False)
+    assert not created and repeated.status == "consumed"
+
+
+def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "run", "hash", {})
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE control_commands")
+        db.execute("PRAGMA user_version=2")
+    migrated = SessionRepository(path)
+    assert migrated.get_run("alice", run.id) == run
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None
+
+
+@pytest.mark.parametrize("status,stop_reason,expected_reason", [
+    ("cancelled", "cancelled", "cancelled"),
+    ("failed", "limit", "limit"),
+    ("failed", "error", "run_failed"),
+])
+def test_settlement_closes_pending_inputs(tmp_path: Path, status: str,
+                                          stop_reason: str, expected_reason: str) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "run", "hash", {})
+    repo.update_run_status("alice", run.id, "running")
+    repo.admit_control("alice", run.id, "input", "follow_up",
+                       {"mode": "follow_up", "message": "later"}, accepting=True)
+    repo.settle_run("alice", run.id, status, stop_reason, {}, ())
+    item = repo.list_inputs("alice", run.id).items[0]
+    assert (item.status, item.reason) == ("not_consumed", expected_reason)
+    assert [event.type for event in repo.list_events("alice", run.id).items][-2:] == [
+        "input_not_consumed", "run_settled"]

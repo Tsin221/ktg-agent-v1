@@ -250,7 +250,8 @@ def test_coordinator_delivers_input_from_different_thread_and_loop(tmp_path: Pat
     coordinator.schedule(run, "first", "Bearer test")
     assert provider.started.wait(5)
     assert coordinator.phase(run.id) is RunPhase.RUNNING
-    coordinator.submit_input(run.id, "follow_up", "second").result(5)
+    accepted = coordinator.admit_input("id:7", run.id, "input-1", "follow_up", "second")
+    assert accepted.status == "queued"
     assert provider.owner_loop is not None
     provider.owner_loop.call_soon_threadsafe(provider.release.set)
     coordinator.close()
@@ -258,4 +259,37 @@ def test_coordinator_delivers_input_from_different_thread_and_loop(tmp_path: Pat
     assert repo.get_run("id:7", run.id).status == "completed"  # type: ignore[union-attr]
     assert len(provider.requests) == 2
     assert provider.requests[1].messages[-1] == UserMessage((TextBlock("second"),))
+    assert repo.list_inputs("id:7", run.id).items[0].status == "consumed"
+    assert [item.type for item in repo.list_events("id:7", run.id).items][-1] == "run_settled"
     assert coordinator.phase(run.id) is None
+
+
+def test_queued_cancel_settles_without_starting_provider(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "run", "hash", {})
+    provider = FakeProvider((turn("must not run"),))
+    coordinator = RunCoordinator(repo, query_executor(provider))
+    release = Event()
+    started = [Event() for _ in range(4)]
+
+    def occupy(signal: Event) -> None:
+        signal.set()
+        release.wait()
+
+    occupied = [coordinator._workers.submit(occupy, signal) for signal in started]
+    try:
+        assert all(signal.wait(5) for signal in started)
+        coordinator.schedule(run, "question", "Bearer test")
+        first = coordinator.admit_cancel("id:7", run.id, "cancel-1")
+        second = coordinator.admit_cancel("id:7", run.id, "cancel-1")
+        assert first == second
+    finally:
+        release.set()
+        for future in occupied:
+            future.result(5)
+        coordinator.close()
+    assert provider.requests == ()
+    assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]
+    assert [item.type for item in repo.list_events("id:7", run.id).items] == [
+        "cancel_requested", "run_settled"]

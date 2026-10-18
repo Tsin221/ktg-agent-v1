@@ -262,9 +262,10 @@ class AgentLoop:
                             tool_calls=tool_calls_started,
                         )
                     if input_queue is not None:
-                        steering = input_queue.drain_steering()
+                        steering = input_queue.take_steering()
                         if steering:
-                            history.extend(steering)
+                            history.extend(item.message for item in steering)
+                            input_queue.mark_consumed(steering)
                     continue
 
                 await publisher.emit(
@@ -284,17 +285,19 @@ class AgentLoop:
                         tool_calls=tool_calls_started,
                     )
                 if input_queue is not None:
-                    steering = input_queue.drain_steering()
+                    steering = input_queue.take_steering()
                     if steering:
-                        history.extend(steering)
+                        history.extend(item.message for item in steering)
+                        input_queue.mark_consumed(steering)
                         continue
                     if response.stop_reason in {
                         StopReason.COMPLETED,
                         StopReason.LENGTH,
                     }:
-                        follow_ups = input_queue.drain_follow_ups()
+                        follow_ups = input_queue.take_follow_ups()
                         if follow_ups:
-                            history.extend(follow_ups)
+                            history.extend(item.message for item in follow_ups)
+                            input_queue.mark_consumed(follow_ups)
                             continue
                 if close_inputs is not None:
                     close_inputs()

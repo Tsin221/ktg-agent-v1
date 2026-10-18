@@ -11,7 +11,7 @@ import re
 from ktg_agent.core.messages import JsonObject, JsonValue, _json_object, message_to_dict
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.sessions.coordinator import RunCoordinator
-from ktg_agent.sessions.repository import EVENT_RETENTION_DAYS, Page, SessionRecord, SessionRepository
+from ktg_agent.sessions.repository import ControlStateError, EVENT_RETENTION_DAYS, Page, SessionRecord, SessionRepository
 
 _PRIVATE_FIELD = re.compile(
     r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -123,6 +123,47 @@ class SessionService:
                 "stop_reason": run.stop_reason,
                 "last_seq": self._repository.last_event_seq(owner, run_id),
                 "result_summary": run.result_summary}
+
+    async def add_input(self, authorization: str, run_id: str,
+                        request_id: object, mode: object, message: object) -> JsonObject:
+        if self._coordinator is None:
+            raise RuntimeError("run coordinator is not configured")
+        if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
+            raise ValueError("request_id 必须是 1–128 个字符。")
+        if mode not in ("steer", "follow_up"):
+            raise ValueError("mode 必须是 steer 或 follow_up。")
+        if not isinstance(message, str) or not message.strip() or len(message.strip()) > 2000:
+            raise ValueError("message 必须是 1–2000 个字符。")
+        assert isinstance(mode, str)
+        owner = await self.authorize_run(authorization, run_id)
+        record = self._coordinator.admit_input(owner, run_id, request_id.strip(), mode, message.strip())
+        return {"request_id": record.request_id, "mode": record.kind,
+                "status": record.status, "reason": record.reason}
+
+    async def cancel_run(self, authorization: str, run_id: str,
+                         request_id: object) -> JsonObject:
+        if self._coordinator is None:
+            raise RuntimeError("run coordinator is not configured")
+        if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
+            raise ValueError("request_id 必须是 1–128 个字符。")
+        owner = await self.authorize_run(authorization, run_id)
+        try:
+            record = self._coordinator.admit_cancel(owner, run_id, request_id.strip())
+        except ControlStateError as exc:
+            if exc.code == "RUN_ALREADY_SETTLED":
+                return {"request_id": request_id.strip(), "cancel_status": "already_settled"}
+            raise
+        return {"request_id": record.request_id, "cancel_status": record.status}
+
+    async def inputs(self, authorization: str, run_id: str, *,
+                     cursor: int | None, limit: int) -> JsonObject:
+        owner = await self.authorize_run(authorization, run_id)
+        page = self._repository.list_inputs(owner, run_id, after=cursor, limit=limit)
+        return {"items": [{"request_id": item.request_id, "mode": item.kind,
+                           "message": item.request["message"], "status": item.status,
+                           "reason": item.reason, "created_at": item.created_at,
+                           "updated_at": item.updated_at} for item in page.items],
+                "next_cursor": page.next_cursor}
 
     async def events(self, authorization: str, run_id: str, *,
                      after_seq: int = 0, limit: int = 50) -> JsonObject:

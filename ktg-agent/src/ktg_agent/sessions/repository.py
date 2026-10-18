@@ -89,6 +89,20 @@ class EventRecord:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class ControlRecord:
+    position: int
+    run_id: str
+    owner_user_id: str
+    request_id: str
+    kind: str
+    request: JsonObject
+    status: str
+    reason: str | None
+    created_at: str
+    updated_at: str
+
+
 class RunConflictError(ValueError):
     code = "REQUEST_ID_CONFLICT"
 
@@ -99,6 +113,16 @@ class RunBusyError(ValueError):
 
 class EventHistoryExpiredError(ValueError):
     code = "EVENT_HISTORY_EXPIRED"
+
+
+class ControlConflictError(ValueError):
+    code = "REQUEST_ID_CONFLICT"
+
+
+class ControlStateError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _now() -> str:
@@ -158,13 +182,33 @@ class SessionRepository:
     def _migrate(self) -> None:
         with self._connect() as db:
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version > 2:
+            if version > 3:
                 raise RuntimeError("session database has a newer schema version")
-            if version == 2:
+            if version == 3:
                 return
             if version == 1:
                 db.execute("ALTER TABLE runs ADD COLUMN replay_floor_seq INTEGER NOT NULL DEFAULT 1")
                 db.execute("PRAGMA user_version=2")
+                version = 2
+            if version == 2:
+                db.executescript("""BEGIN IMMEDIATE;
+                    CREATE TABLE control_commands (
+                        position INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL REFERENCES runs(id),
+                        owner_user_id TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('cancel','steer','follow_up')),
+                        request_json TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('queued','consumed','not_consumed','accepted')),
+                        reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(owner_user_id,run_id,request_id)
+                    );
+                    CREATE INDEX control_commands_page ON control_commands(run_id,position);
+                    PRAGMA user_version=3;
+                    COMMIT;
+                """)
                 return
             tables = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -223,6 +267,7 @@ class SessionRepository:
                 PRAGMA user_version=2;
                 COMMIT;
             """)
+        self._migrate()
 
     def create_session(self, owner_user_id: str, *, title: str | None = None) -> SessionRecord:
         owner_user_id = _required_text(owner_user_id, "owner user id")
@@ -330,6 +375,100 @@ class SessionRepository:
             ).fetchone()
         return _run(row) if row else None
 
+    @staticmethod
+    def _next_seq(db: sqlite3.Connection, run_id: str) -> int:
+        return int(db.execute(
+            "SELECT MAX(COALESCE(MAX(e.seq),0),r.replay_floor_seq-1)+1 "
+            "FROM runs r LEFT JOIN events e ON e.run_id=r.id WHERE r.id=? GROUP BY r.id",
+            (run_id,),
+        ).fetchone()[0])
+
+    def admit_control(self, owner: str, run_id: str, request_id: str,
+                      kind: str, request: JsonObject, *, accepting: bool,
+                      ready: bool = True, closed: bool = False) -> tuple[ControlRecord, bool]:
+        """Resolve idempotency before state, then commit command and event together."""
+        encoded = _safe_json(request)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT r.status FROM runs r JOIN sessions s ON s.id=r.session_id "
+                "WHERE r.id=? AND s.owner_user_id=?", (run_id, owner),
+            ).fetchone()
+            if run is None:
+                raise KeyError("run not found")
+            existing = db.execute(
+                "SELECT * FROM control_commands WHERE owner_user_id=? AND run_id=? AND request_id=?",
+                (owner, run_id, request_id),
+            ).fetchone()
+            if existing is not None:
+                item = _control(existing)
+                if item.kind != kind or item.request != request:
+                    raise ControlConflictError("request_id 已用于不同控制命令。")
+                return item, False
+            status = str(run["status"])
+            if kind == "cancel":
+                if status in TERMINAL:
+                    raise ControlStateError("RUN_ALREADY_SETTLED")
+                command_status = "accepted"
+                event_type = "cancel_requested"
+            else:
+                if status != "running":
+                    raise ControlStateError("RUN_NOT_RUNNING" if status == "queued" else "RUN_NOT_ACTIVE")
+                if closed:
+                    raise ControlStateError("RUN_NOT_ACTIVE")
+                if not ready:
+                    raise ControlStateError("RUN_NOT_RUNNING")
+                if not accepting:
+                    raise ControlStateError("RUN_NOT_ACTIVE")
+                command_status = "queued"
+                event_type = "input_queued"
+            now = _now()
+            cursor = db.execute(
+                "INSERT INTO control_commands(run_id,owner_user_id,request_id,kind,request_json,"
+                "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (run_id, owner, request_id, kind, encoded, command_status, now, now),
+            )
+            if kind == "cancel":
+                db.execute("UPDATE runs SET status='cancelling' WHERE id=?", (run_id,))
+            payload: JsonObject = {"request_id": request_id}
+            if kind != "cancel":
+                payload["mode"] = kind
+            db.execute(
+                "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (run_id, self._next_seq(db, run_id), event_type, _safe_json(payload), now),
+            )
+            row = db.execute("SELECT * FROM control_commands WHERE position=?", (cursor.lastrowid,)).fetchone()
+            assert row is not None
+            return _control(row), True
+
+    def mark_input_consumed(self, owner: str, run_id: str, request_id: str) -> None:
+        now = _now()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE control_commands SET status='consumed',updated_at=? WHERE owner_user_id=? "
+                "AND run_id=? AND request_id=? AND status='queued' AND kind IN ('steer','follow_up')",
+                (now, owner, run_id, request_id),
+            )
+            if cursor.rowcount != 1:
+                raise ControlStateError("INPUT_NOT_QUEUED")
+            db.execute("INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
+                       (run_id, self._next_seq(db, run_id), "input_consumed",
+                        _safe_json({"request_id": request_id, "status": "consumed"}), now))
+
+    def list_inputs(self, owner: str, run_id: str, *, after: int | None = None,
+                    limit: int = 50) -> Page[ControlRecord]:
+        _page_args(after, limit)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT c.* FROM control_commands c JOIN runs r ON r.id=c.run_id "
+                "JOIN sessions s ON s.id=r.session_id WHERE c.run_id=? AND s.owner_user_id=? "
+                "AND c.kind IN ('steer','follow_up') AND c.position>? "
+                "ORDER BY c.position LIMIT ?", (run_id, owner, after or 0, limit + 1),
+            ).fetchall()
+        return Page(tuple(_control(row) for row in rows[:limit]),
+                    int(rows[limit - 1]["position"]) if len(rows) > limit else None)
+
     def last_event_seq(self, owner_user_id: str, run_id: str) -> int:
         with self._connect() as db:
             row = db.execute(
@@ -391,9 +530,8 @@ class SessionRepository:
                     (status, now, "SERVICE_RESTARTED", _safe_json(summary), row["id"]),
                 )
                 db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, row["session_id"]))
-                seq = int(db.execute(
-                    "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?", (row["id"],),
-                ).fetchone()[0])
+                self._finish_queued_inputs(db, str(row["id"]), "process_interrupted", now)
+                seq = self._next_seq(db, str(row["id"]))
                 payload = _safe_json({"status": status, "stop_reason": "SERVICE_RESTARTED",
                                       "result_summary": summary})
                 db.execute(
@@ -500,9 +638,11 @@ class SessionRepository:
                 (status, now, stop_reason, encoded_summary, run_id),
             )
             db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
-            seq = int(db.execute(
-                "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?", (run_id,),
-            ).fetchone()[0])
+            reason = ("cancelled" if status == "cancelled" else
+                      "limit" if stop_reason == "limit" else "run_failed" if status == "failed" else
+                      "run_completed" if status == "completed" else "run_settled")
+            self._finish_queued_inputs(db, run_id, reason, now)
+            seq = self._next_seq(db, run_id)
             settled = _safe_json({"status": status, "stop_reason": stop_reason,
                                   "result_summary": result_summary})
             db.execute(
@@ -513,6 +653,20 @@ class SessionRepository:
         assert result is not None
         return result
 
+    def _finish_queued_inputs(self, db: sqlite3.Connection, run_id: str,
+                              reason: str, now: str) -> None:
+        rows = db.execute(
+            "SELECT request_id FROM control_commands WHERE run_id=? AND status='queued' ORDER BY position",
+            (run_id,),
+        ).fetchall()
+        for row in rows:
+            request_id = str(row["request_id"])
+            db.execute("UPDATE control_commands SET status='not_consumed',reason=?,updated_at=? "
+                       "WHERE run_id=? AND request_id=?", (reason, now, run_id, request_id))
+            db.execute("INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
+                       (run_id, self._next_seq(db, run_id), "input_not_consumed",
+                        _safe_json({"request_id": request_id, "status": "not_consumed", "reason": reason}), now))
+
     def append_event(self, owner_user_id: str, run_id: str, seq: int, event_type: str, payload: JsonObject) -> EventRecord:
         if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
             raise ValueError("event sequence must be a positive integer")
@@ -522,26 +676,23 @@ class SessionRepository:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT COALESCE(MAX(e.seq),r.replay_floor_seq-1)+1 AS next_seq "
-                "FROM runs r JOIN sessions s ON s.id=r.session_id "
-                "LEFT JOIN events e ON e.run_id=r.id "
+                "SELECT r.id FROM runs r JOIN sessions s ON s.id=r.session_id "
                 "WHERE r.id=? AND s.owner_user_id=? AND r.status IN "
-                "('queued','running','cancelling') GROUP BY r.id",
+                "('queued','running','cancelling')",
                 (run_id, owner_user_id),
             ).fetchone()
             if row is None:
                 raise KeyError("run not found")
-            if seq != int(row["next_seq"]):
-                raise sqlite3.IntegrityError("event sequence must be consecutive")
+            durable_seq = self._next_seq(db, run_id)
             cursor = db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) "
                 "SELECT r.id,?,?,?,? FROM runs r JOIN sessions s ON s.id=r.session_id "
                 "WHERE r.id=? AND s.owner_user_id=?",
-                (seq, event_type, encoded, now, run_id, owner_user_id),
+                (durable_seq, event_type, encoded, now, run_id, owner_user_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError("run not found")
-        return EventRecord(run_id, seq, event_type, _read_json(encoded), now)
+        return EventRecord(run_id, durable_seq, event_type, _read_json(encoded), now)
 
     def list_events(self, owner_user_id: str, run_id: str, *, after: int | None = None, limit: int = 50) -> Page[EventRecord]:
         if after is not None and (not isinstance(after, int) or isinstance(after, bool) or after < 0):
@@ -621,3 +772,9 @@ def _message(row: sqlite3.Row) -> MessageRecord:
 def _event(row: sqlite3.Row) -> EventRecord:
     return EventRecord(row["run_id"], row["seq"], row["type"],
                        _read_json(row["payload_json"]), row["created_at"])
+
+
+def _control(row: sqlite3.Row) -> ControlRecord:
+    return ControlRecord(int(row["position"]), row["run_id"], row["owner_user_id"],
+                         row["request_id"], row["kind"], _read_json(row["request_json"]),
+                         row["status"], row["reason"], row["created_at"], row["updated_at"])
