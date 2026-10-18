@@ -4,7 +4,8 @@
       <span>{{ title }}</span>
       <span>{{ result.total }} 条</span>
     </div>
-    <div v-if="result.rows && result.rows.length" class="result-card__rows">
+    <div v-if="result.kind === 'product_count'" class="result-card__count">当前账号可见的产品记录，不含物料。</div>
+    <div v-else-if="result.rows && result.rows.length" class="result-card__rows">
       <div v-for="(row, index) in result.rows" :key="rowKey(row, index)" class="result-card__row">
         <template v-if="result.kind === 'items'">
           <strong>{{ row.itemName || '未命名产品' }}</strong>
@@ -21,7 +22,7 @@
       </div>
     </div>
     <p v-else class="result-card__empty">没有符合条件的数据</p>
-    <p class="result-card__meta">第 {{ result.page }} 页，每页 {{ result.page_size }} 条</p>
+    <p v-if="result.kind !== 'product_count'" class="result-card__meta">第 {{ result.page }} 页，每页 {{ result.page_size }} 条</p>
   </section>
 </template>
 
@@ -37,6 +38,7 @@ export default {
   computed: {
     title() {
       return {
+        product_count: '产品总数',
         items: '产品查询',
         stock: '库存查询',
         workorders: '工单查询'

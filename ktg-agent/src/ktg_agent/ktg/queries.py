@@ -27,6 +27,13 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
     }
     return (
         _tool(
+            name="ktg_count_products",
+            label="统计产品数量",
+            description="统计当前用户可见的全部产品记录数，不需要编码或名称；只统计产品，不包含物料。适用于‘一共有多少产品’等总数问题。",
+            properties={},
+            execute=_count_products,
+        ),
+        _tool(
             name="ktg_search_items",
             label="查询产品",
             description="按产品或物料编码、名称查询 KTG 产品资料。至少提供一个筛选条件。",
@@ -119,6 +126,31 @@ async def _search_items(
     if "itemCode" not in params and "itemName" not in params:
         return _failure("请提供产品编码或产品名称。", "VALIDATION_ERROR")
     return await _query(context, "/mes/md/mditem/list", params, "items", _item_row)
+
+
+async def _count_products(
+    context: ToolContext, arguments: Mapping[str, object]
+) -> ToolResult:
+    if not isinstance(context.ktg_client, KTGClient):
+        return _failure("KTG 查询客户端未配置。", "KTG_CLIENT_MISSING")
+    try:
+        payload = await context.ktg_client.get(
+            "/mes/md/mditem/list",
+            {"itemOrProduct": "PRODUCT", "pageNum": 1, "pageSize": 1},
+        )
+    except KTGError as exc:
+        return _failure(str(exc), exc.code)
+    total = payload.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        return _failure("KTG 未返回有效的产品总数。", "KTG_INVALID_RESPONSE")
+    details: JsonObject = {
+        "kind": "product_count", "rows": [], "total": total,
+        "page": 1, "page_size": 1, "queried_at": datetime.now(UTC).isoformat(),
+    }
+    return ToolResult(
+        content=f"按当前用户权限查询，产品记录总数为 {total} 条（不含物料）。",
+        details=details,
+    )
 
 
 async def _query_stock(

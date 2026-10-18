@@ -50,6 +50,9 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 			<if test="enableFlag != null and enableFlag != ''">
 				AND enable_flag = #{enableFlag}
 			</if>
+			<if test="itemOrProduct != null and itemOrProduct != ''">
+				AND item_or_product = #{itemOrProduct}
+			</if>
 		</where>
 	</select>
 
@@ -153,4 +156,4 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 		</foreach>
 	</delete>
 
-</mapper> 
+</mapper>

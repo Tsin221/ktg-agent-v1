@@ -50,6 +50,45 @@ def test_three_query_tools_use_fixed_read_only_endpoints() -> None:
     asyncio.run(_three_query_tools_use_fixed_read_only_endpoints())
 
 
+def test_product_count_uses_product_filter_and_server_total() -> None:
+    asyncio.run(_product_count_uses_product_filter_and_server_total())
+
+
+async def _product_count_uses_product_filter_and_server_total() -> None:
+    requests: list[tuple[str, Mapping[str, object]]] = []
+
+    async def transport(
+        url: str,
+        _headers: Mapping[str, str],
+        params: Mapping[str, object],
+        _timeout_seconds: float,
+    ) -> dict[str, object]:
+        requests.append((url, params))
+        return {"code": 200, "total": 37, "rows": [{"itemId": 1, "itemOrProduct": "PRODUCT"}]}
+
+    client = KTGClient(
+        base_url="http://127.0.0.1:8080",
+        authorization="Bearer current-user-token",
+        transport=transport,
+    )
+    tool = next(tool for tool in build_query_tools() if tool.name == "ktg_count_products")
+    context = ToolContext(
+        run_id="run-1", tool_call_id="call-1", identity={"userId": 7}, ktg_client=client
+    )
+
+    result = await tool.execute(context, {})
+
+    assert result.details is not None
+    assert result.details["kind"] == "product_count"
+    assert result.details["total"] == 37
+    assert requests == [
+        (
+            "http://127.0.0.1:8080/mes/md/mditem/list",
+            {"itemOrProduct": "PRODUCT", "pageNum": 1, "pageSize": 1},
+        )
+    ]
+
+
 async def _three_query_tools_use_fixed_read_only_endpoints() -> None:
     requests: list[tuple[str, Mapping[str, object]]] = []
 
