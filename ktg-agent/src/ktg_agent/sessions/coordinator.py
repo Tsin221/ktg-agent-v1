@@ -56,6 +56,10 @@ class RunNotActiveError(RuntimeError):
     code = "RUN_NOT_ACTIVE"
 
 
+class UsagePersistenceError(RuntimeError):
+    code = "USAGE_PERSISTENCE_FAILED"
+
+
 def _write_steps(events: list[AgentEvent], messages: tuple[Message, ...]) -> JsonObject:
     starts: dict[str, JsonObject] = {
         str(event.payload["tool_call_id"]): event.payload
@@ -98,14 +102,18 @@ def _write_steps(events: list[AgentEvent], messages: tuple[Message, ...]) -> Jso
 class RunCoordinator:
     """Owns run tasks beyond the lifetime of each HTTP request event loop."""
 
-    def __init__(self, repository: SessionRepository, executor: RunExecutor) -> None:
+    def __init__(self, repository: SessionRepository, executor: RunExecutor,
+                 budget_snapshot: JsonObject | None = None) -> None:
         self._repository = repository
         self._executor = executor
+        self._budget_snapshot = budget_snapshot
         self._workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent-run")
         self._handles: dict[str, RunHandle] = {}
         self._lock = Lock()
 
     def schedule(self, run: RunRecord, message: str, authorization: str) -> None:
+        if self._budget_snapshot is not None:
+            self._repository.set_run_budget(run.owner_user_id, run.id, self._budget_snapshot)
         with self._lock:
             current = self._repository.get_run(run.owner_user_id, run.id)
             assert current is not None
@@ -140,9 +148,12 @@ class RunCoordinator:
                 raise ValueError("stored page_context is invalid")
 
             def persist_event(event: AgentEvent) -> None:
-                self._repository.append_event(
-                    run.owner_user_id, run.id, event.seq, event.type.value, event.payload,
-                )
+                try:
+                    self._repository.append_event(
+                        run.owner_user_id, run.id, event.seq, event.type.value, event.payload,
+                    )
+                except Exception as error:
+                    raise UsagePersistenceError("event and usage could not be persisted") from error
                 if event.type.value in {"tool_execution_start", "tool_execution_end"}:
                     write_events.append(event)
 
@@ -205,7 +216,10 @@ class RunCoordinator:
             # instead of reporting an uncommitted successful result.
             try:
                 steps = _write_steps(write_events, ())
-                if isinstance(error, ProviderError):
+                if isinstance(error, UsagePersistenceError):
+                    failure_code = error.code
+                    stop_reason = StopReason.ERROR.value
+                elif isinstance(error, ProviderError):
                     failure_code = error.code
                     stop_reason = StopReason.ERROR.value
                 else:

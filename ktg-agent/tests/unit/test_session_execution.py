@@ -70,7 +70,7 @@ def test_two_turns_are_isolated_and_reopenable(tmp_path: Path) -> None:
     first_session = repo.create_session("id:7")
     other_session = repo.create_session("id:7")
     provider = FakeProvider((turn("first answer"), turn("second answer"), turn("other answer")))
-    coordinator = RunCoordinator(repo, query_executor(provider))
+    coordinator = RunCoordinator(repo, query_executor(provider), {"max_total_tokens": 20})
     for session, number, prompt in (
         (first_session, 1, "first question"),
         (first_session, 2, "second question"),
@@ -81,11 +81,16 @@ def test_two_turns_are_isolated_and_reopenable(tmp_path: Path) -> None:
         coordinator.close()
         saved = repo.get_run("id:7", run.id)
         assert saved is not None and saved.status == "completed"
+        assert saved.budget == {"max_total_tokens": 20}
+        assert saved.usage is not None and saved.usage["known_total_tokens"] == 2
+        assert len(saved.model_requests) == 1
         events = repo.list_events("id:7", run.id).items
         assert [event.seq for event in events] == list(range(1, len(events) + 1))
         assert events[-2].type == "agent_end"
         assert events[-1].type == "run_settled"
-        coordinator = RunCoordinator(repo, query_executor(provider))
+        assert events[-1].payload["usage"] == saved.usage
+        assert events[-1].payload["model_requests"] == list(saved.model_requests)
+        coordinator = RunCoordinator(repo, query_executor(provider), {"max_total_tokens": 20})
     coordinator.close()
 
     assert [item.content[0].text for item in provider.requests[1].messages
@@ -179,7 +184,29 @@ def test_provider_and_storage_failure_never_complete(tmp_path: Path) -> None:
     coordinator.close()
     saved = repo.get_run("id:7", next_run.id)
     assert saved is not None and saved.status == "failed"
+    assert saved.usage is not None and saved.usage["known_total_tokens"] == 2
+    assert saved.model_requests[0]["usage_source"] == "provider_reported"
     assert not any(item.run_id == next_run.id for item in repo.list_messages("id:7", session.id).items)
+
+
+def test_usage_storage_failure_stops_run_before_model_transport(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("id:7")
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TRIGGER reject_request BEFORE INSERT ON model_requests "
+                   "BEGIN SELECT RAISE(ABORT, 'storage failure'); END")
+    provider = FakeProvider((turn("must not complete"), turn("must not retry")))
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    coordinator = RunCoordinator(repo, query_executor(provider), {"max_total_tokens": 20})
+    coordinator.schedule(run, "question", "Bearer test")
+    coordinator.close()
+    saved = SessionRepository(path).get_run("id:7", run.id)
+    assert saved is not None and saved.status == "failed"
+    assert saved.result_summary is not None
+    assert saved.result_summary["error_code"] == "USAGE_PERSISTENCE_FAILED"
+    assert saved.model_requests == ()
+    assert len(provider.requests) == 1
 
 
 def test_execution_and_settlement_failures_are_diagnosed_and_recovered(

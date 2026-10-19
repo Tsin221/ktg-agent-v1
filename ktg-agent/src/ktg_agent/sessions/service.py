@@ -122,7 +122,9 @@ class SessionService:
         return {"run_id": run.id, "session_id": run.session_id, "status": run.status,
                 "stop_reason": run.stop_reason,
                 "last_seq": self._repository.last_event_seq(owner, run_id),
-                "result_summary": run.result_summary}
+                "result_summary": run.result_summary,
+                "budget": run.budget, "usage": run.usage,
+                "model_requests": list(run.model_requests)}
 
     async def add_input(self, authorization: str, run_id: str,
                         request_id: object, mode: object, message: object) -> JsonObject:

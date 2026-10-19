@@ -156,7 +156,8 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
             on_agent_ready=register_agent,
         )
 
-    return SessionService(repository, client_factory, RunCoordinator(repository, execute))
+    return SessionService(repository, client_factory,
+                          RunCoordinator(repository, execute, service.budget_snapshot))
 
 
 class AgentHTTPServer(ThreadingHTTPServer):

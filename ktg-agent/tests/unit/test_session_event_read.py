@@ -141,11 +141,16 @@ def test_failed_cleanup_rolls_back_replay_boundary(tmp_path: Path) -> None:
 
 def test_v1_database_migrates_replay_boundary(tmp_path: Path) -> None:
     path = tmp_path / "v1.sqlite3"
+    SessionRepository(path)
     with sqlite3.connect(path) as db:
-        db.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        db.execute("DROP TABLE model_requests")
+        db.execute("DROP TABLE control_commands")
+        db.execute("ALTER TABLE runs DROP COLUMN budget_json")
+        db.execute("ALTER TABLE runs DROP COLUMN usage_json")
+        db.execute("ALTER TABLE runs DROP COLUMN replay_floor_seq")
         db.execute("PRAGMA user_version=1")
     SessionRepository(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert any(row[1] == "replay_floor_seq" for row in db.execute("PRAGMA table_info(runs)"))
         assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None

@@ -75,6 +75,15 @@ class QueryService:
              *(build_inventory_tools(inventory_store, inventory_actions) if inventory_store else ()))
         )
 
+    @property
+    def budget_snapshot(self) -> JsonObject:
+        return {"max_model_turns": self._limits.max_model_turns,
+                "max_tool_calls": self._limits.max_tool_calls,
+                "max_run_seconds": self._limits.max_run_seconds,
+                "max_parallel_reads": self._limits.max_parallel_reads,
+                "max_total_tokens": self._limits.max_total_tokens,
+                "max_output_tokens": self._model_config.max_output_tokens}
+
     async def query(self, *, message: str, authorization: str) -> JsonObject:
         clean_message = message.strip()
         if not clean_message:

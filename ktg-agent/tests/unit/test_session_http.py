@@ -109,6 +109,31 @@ def test_session_http_owner_isolation_and_messages(tmp_path: Path) -> None:
         assert request(server, "GET", "/agent-api/v1/sessions/no-such-session")[0] == 404
 
 
+def test_run_http_exposes_owner_scoped_durable_usage(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run = repo.create_run("id:7", session.id, "r1", "h1", {})
+    repo.set_run_budget("id:7", run.id, {"max_total_tokens": 20})
+    repo.update_run_status("id:7", run.id, "running")
+    repo.append_event("id:7", run.id, 1, "model_request_started",
+                      {"call_id": "c1", "turn": 1, "model": "fake"})
+    repo.append_event("id:7", run.id, 2, "model_usage_reported",
+                      {"call_id": "c1", "turn": 1, "input_tokens": 2,
+                       "output_tokens": 1, "cached_input_tokens": 0})
+    repo.settle_run("id:7", run.id, "failed", "limit", {"limit_reason": "max_total_tokens"}, ())
+    with running_server(repo) as server:
+        path = f"/agent-api/v1/runs/{run.id}"
+        status, body = request(server, "GET", path)
+        assert status == 200
+        assert body["budget"] == {"max_total_tokens": 20}
+        assert cast(dict[str, object], body["usage"])["known_total_tokens"] == 3
+        assert len(cast(list[object], body["model_requests"])) == 1
+        assert request(server, "GET", path, token="Bearer bob")[0] == 404
+        event = repo.list_events("id:7", run.id).items[-1]
+        assert event.payload["usage"] == body["usage"]
+        assert event.payload["model_requests"] == body["model_requests"]
+
+
 def test_session_http_pagination_and_auth(tmp_path: Path) -> None:
     repo = SessionRepository(tmp_path / "sessions.sqlite3")
     with running_server(repo) as server:

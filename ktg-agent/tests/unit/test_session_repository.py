@@ -266,13 +266,68 @@ def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: 
     session = repo.create_session("alice")
     run = repo.create_run("alice", session.id, "run", "hash", {})
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE model_requests")
         db.execute("DROP TABLE control_commands")
+        db.execute("ALTER TABLE runs DROP COLUMN budget_json")
+        db.execute("ALTER TABLE runs DROP COLUMN usage_json")
         db.execute("PRAGMA user_version=2")
     migrated = SessionRepository(path)
-    assert migrated.get_run("alice", run.id) == run
+    restored = migrated.get_run("alice", run.id)
+    assert restored is not None and restored.id == run.id
+    assert restored.usage == {"source": "legacy_unknown", "complete": False}
+    assert restored.budget is None
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None
+
+
+def test_usage_survives_restart_recovery_and_event_pruning(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "r1", "hash", {})
+    repo.set_run_budget("alice", run.id, {"max_total_tokens": 20})
+    repo.update_run_status("alice", run.id, "running")
+    repo.append_event("alice", run.id, 1, "model_request_started",
+                      {"call_id": "call-1", "turn": 1, "model": "fake"})
+    repo.append_event("alice", run.id, 2, "model_usage_reported",
+                      {"call_id": "call-1", "turn": 1, "input_tokens": 7,
+                       "output_tokens": 3, "cached_input_tokens": 2})
+    repo.append_event("alice", run.id, 3, "model_request_started",
+                      {"call_id": "call-2", "turn": 2, "model": "fake"})
+    reopened = SessionRepository(path)
+    assert reopened.get_run("bob", run.id) is None
+    assert reopened.recover_interrupted_runs() == 1
+    saved = reopened.get_run("alice", run.id)
+    assert saved is not None and saved.status == "needs_reconciliation"
+    assert saved.usage == {"known_input_tokens": 7, "known_output_tokens": 3,
+                           "known_cached_input_tokens": 2, "known_total_tokens": 10,
+                           "unknown_request_count": 1, "complete": False}
+    assert [item["usage_source"] for item in saved.model_requests] == [
+        "provider_reported", "unknown"]
+    assert reopened.list_events("alice", run.id).items[-1].payload["usage"] == saved.usage
+    from datetime import datetime, timedelta, timezone
+    reopened.prune_events(now=datetime.now(timezone.utc) + timedelta(days=31))
+    assert SessionRepository(path).get_run("alice", run.id).usage == saved.usage  # type: ignore[union-attr]
+
+
+def test_usage_event_and_snapshot_roll_back_together(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "r1", "hash", {})
+    repo.update_run_status("alice", run.id, "running")
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TRIGGER reject_usage BEFORE INSERT ON model_requests "
+                   "BEGIN SELECT RAISE(ABORT, 'storage failure'); END")
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.append_event("alice", run.id, 1, "model_request_started",
+                          {"call_id": "call-1", "turn": 1, "model": "fake"})
+    assert repo.list_events("alice", run.id).items == ()
+    assert repo.get_run("alice", run.id).usage == {  # type: ignore[union-attr]
+        "known_input_tokens": 0, "known_output_tokens": 0,
+        "known_cached_input_tokens": 0, "known_total_tokens": 0,
+        "unknown_request_count": 0, "complete": True}
 
 
 @pytest.mark.parametrize("status,stop_reason,expected_reason", [

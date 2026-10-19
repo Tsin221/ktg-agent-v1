@@ -69,6 +69,9 @@ class RunRecord:
     ended_at: str | None
     stop_reason: str | None
     result_summary: JsonObject | None
+    budget: JsonObject | None = None
+    usage: JsonObject | None = None
+    model_requests: tuple[JsonObject, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +155,12 @@ def _read_json(raw: str) -> JsonObject:
     return _json_object(json.loads(raw), "stored JSON")
 
 
+def _empty_usage() -> JsonObject:
+    return {"known_input_tokens": 0, "known_output_tokens": 0,
+            "known_cached_input_tokens": 0, "known_total_tokens": 0,
+            "unknown_request_count": 0, "complete": True}
+
+
 class SessionRepository:
     """Owner-scoped persistence; callers must supply a verified owner ID."""
 
@@ -182,9 +191,9 @@ class SessionRepository:
     def _migrate(self) -> None:
         with self._connect() as db:
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version > 3:
+            if version > 4:
                 raise RuntimeError("session database has a newer schema version")
-            if version == 3:
+            if version == 4:
                 return
             if version == 1:
                 db.execute("ALTER TABLE runs ADD COLUMN replay_floor_seq INTEGER NOT NULL DEFAULT 1")
@@ -207,6 +216,28 @@ class SessionRepository:
                     );
                     CREATE INDEX control_commands_page ON control_commands(run_id,position);
                     PRAGMA user_version=3;
+                    COMMIT;
+                """)
+                version = 3
+            if version == 3:
+                db.executescript("""BEGIN IMMEDIATE;
+                    ALTER TABLE runs ADD COLUMN budget_json TEXT;
+                    ALTER TABLE runs ADD COLUMN usage_json TEXT;
+                    CREATE TABLE model_requests (
+                        run_id TEXT NOT NULL REFERENCES runs(id),
+                        call_id TEXT NOT NULL,
+                        turn INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        request_started INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        usage_source TEXT NOT NULL,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        cached_input_tokens INTEGER,
+                        total_tokens INTEGER,
+                        PRIMARY KEY(run_id,call_id)
+                    );
+                    PRAGMA user_version=4;
                     COMMIT;
                 """)
                 return
@@ -314,16 +345,16 @@ class SessionRepository:
         with self._connect() as db:
             cursor = db.execute(
                 "INSERT INTO runs(id,session_id,owner_user_id,request_id,request_hash,"
-                "request_summary_json,status,created_at) "
-                "SELECT ?,s.id,s.owner_user_id,?,?,?,'queued',? FROM sessions s "
+                "request_summary_json,status,created_at,usage_json) "
+                "SELECT ?,s.id,s.owner_user_id,?,?,?,'queued',?,? FROM sessions s "
                 "WHERE s.id=? AND s.owner_user_id=?",
-                (run_id, request_id, request_hash, summary, now, session_id, owner_user_id),
+                (run_id, request_id, request_hash, summary, now, _safe_json(_empty_usage()),
+                 session_id, owner_user_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError("session not found")
             db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
-        return RunRecord(run_id, session_id, owner_user_id, request_id, request_hash,
-                         _read_json(summary), "queued", now, None, None, None, None)
+        return self.get_run(owner_user_id, run_id)  # type: ignore[return-value]
 
     def admit_run(
         self, owner_user_id: str, session_id: str, request_id: str,
@@ -360,20 +391,60 @@ class SessionRepository:
             run_id, now = str(uuid4()), _now()
             db.execute(
                 "INSERT INTO runs(id,session_id,owner_user_id,request_id,request_hash,"
-                "request_summary_json,status,created_at) VALUES(?,?,?,?,?,?,'queued',?)",
-                (run_id, session_id, owner_user_id, request_id, request_hash, summary, now),
+                "request_summary_json,status,created_at,usage_json) VALUES(?,?,?,?,?,?,'queued',?,?)",
+                (run_id, session_id, owner_user_id, request_id, request_hash, summary, now,
+                 _safe_json(_empty_usage())),
             )
             db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
-        return RunRecord(run_id, session_id, owner_user_id, request_id, request_hash,
-                         _read_json(summary), "queued", now, None, None, None, None), True
+        created = self.get_run(owner_user_id, run_id)
+        assert created is not None
+        return created, True
 
     def get_run(self, owner_user_id: str, run_id: str) -> RunRecord | None:
         with self._connect() as db:
+            db.execute("BEGIN")
             row = db.execute(
                 "SELECT r.* FROM runs r JOIN sessions s ON s.id=r.session_id "
                 "WHERE r.id=? AND s.owner_user_id=?", (run_id, owner_user_id),
             ).fetchone()
-        return _run(row) if row else None
+            requests = self._model_requests(db, run_id) if row else ()
+        return _run(row, requests) if row else None
+
+    @staticmethod
+    def _model_requests(db: sqlite3.Connection, run_id: str) -> tuple[JsonObject, ...]:
+        rows = db.execute("SELECT * FROM model_requests WHERE run_id=? ORDER BY turn", (run_id,)).fetchall()
+        return tuple({"call_id": row["call_id"], "turn": row["turn"], "model": row["model"],
+                      "request_started": bool(row["request_started"]), "status": row["status"],
+                      "usage_source": row["usage_source"], "input_tokens": row["input_tokens"],
+                      "output_tokens": row["output_tokens"],
+                      "cached_input_tokens": row["cached_input_tokens"],
+                      "total_tokens": row["total_tokens"]} for row in rows)
+
+    @staticmethod
+    def _usage_from_requests(requests: tuple[JsonObject, ...]) -> JsonObject:
+        result = _empty_usage()
+        for request in requests:
+            if request["usage_source"] == "provider_reported":
+                for target, source in (("known_input_tokens", "input_tokens"),
+                                       ("known_output_tokens", "output_tokens"),
+                                       ("known_cached_input_tokens", "cached_input_tokens"),
+                                       ("known_total_tokens", "total_tokens")):
+                    result[target] = cast(int, result[target]) + cast(int, request[source])
+            elif request["usage_source"] == "unknown":
+                result["unknown_request_count"] = cast(int, result["unknown_request_count"]) + 1
+                result["complete"] = False
+        return result
+
+    def set_run_budget(self, owner: str, run_id: str, budget: JsonObject) -> None:
+        encoded = _safe_json(budget)
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE runs SET budget_json=?,usage_json=COALESCE(usage_json,?) "
+                "WHERE id=? AND owner_user_id=? AND status='queued' AND budget_json IS NULL",
+                (encoded, _safe_json(_empty_usage()), run_id, owner),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("queued run not found")
 
     @staticmethod
     def _next_seq(db: sqlite3.Connection, run_id: str) -> int:
@@ -536,6 +607,15 @@ class SessionRepository:
                                else "服务重启前运行尚未开始，请重新提交。",
                     "outcome_unknown": status == "needs_reconciliation",
                 }
+                requests = self._model_requests(db, str(row["id"]))
+                usage = self._usage_from_requests(requests) if requests else None
+                snapshot = db.execute("SELECT budget_json,usage_json FROM runs WHERE id=?", (row["id"],)).fetchone()
+                assert snapshot is not None
+                budget = _read_json(snapshot["budget_json"]) if snapshot["budget_json"] else None
+                if snapshot["usage_json"] is not None:
+                    usage = _read_json(snapshot["usage_json"])
+                elif usage is None:
+                    usage = {"source": "legacy_unknown", "complete": False}
                 db.execute(
                     "UPDATE runs SET status=?,ended_at=?,stop_reason=?,result_summary_json=? WHERE id=?",
                     (status, now, "SERVICE_RESTARTED", _safe_json(summary), row["id"]),
@@ -544,7 +624,8 @@ class SessionRepository:
                 self._finish_queued_inputs(db, str(row["id"]), "process_interrupted", now)
                 seq = self._next_seq(db, str(row["id"]))
                 payload = _safe_json({"status": status, "stop_reason": "SERVICE_RESTARTED",
-                                      "result_summary": summary})
+                                      "result_summary": summary, "budget": budget,
+                                      "usage": usage, "model_requests": list(requests)})
                 db.execute(
                     "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                     (row["id"], seq, "run_settled", payload, now),
@@ -658,9 +739,16 @@ class SessionRepository:
                       "limit" if stop_reason == "limit" else "run_failed" if status == "failed" else
                       "run_completed" if status == "completed" else "run_settled")
             self._finish_queued_inputs(db, run_id, reason, now)
+            snapshot = db.execute("SELECT budget_json,usage_json FROM runs WHERE id=?", (run_id,)).fetchone()
+            assert snapshot is not None
+            budget = _read_json(snapshot["budget_json"]) if snapshot["budget_json"] else None
+            usage = (_read_json(snapshot["usage_json"]) if snapshot["usage_json"] else
+                     {"source": "legacy_unknown", "complete": False})
+            requests = self._model_requests(db, run_id)
             seq = self._next_seq(db, run_id)
             settled = _safe_json({"status": status, "stop_reason": stop_reason,
-                                  "result_summary": result_summary})
+                                  "result_summary": result_summary, "budget": budget,
+                                  "usage": usage, "model_requests": list(requests)})
             db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                 (run_id, seq, "run_settled", settled, now),
@@ -699,6 +787,42 @@ class SessionRepository:
             ).fetchone()
             if row is None:
                 raise KeyError("run not found")
+            if event_type == "model_request_started":
+                db.execute(
+                    "INSERT INTO model_requests(run_id,call_id,turn,model,request_started,status,usage_source) "
+                    "VALUES(?,?,?,?,1,'running','unknown')",
+                    (run_id, payload["call_id"], payload["turn"], payload["model"]),
+                )
+            elif event_type == "model_usage_reported":
+                cursor = db.execute(
+                    "UPDATE model_requests SET usage_source='provider_reported',"
+                    "input_tokens=?,output_tokens=?,cached_input_tokens=?,total_tokens=? "
+                    "WHERE run_id=? AND call_id=? AND request_started=1",
+                    (payload["input_tokens"], payload["output_tokens"],
+                     payload["cached_input_tokens"],
+                     cast(int, payload["input_tokens"]) + cast(int, payload["output_tokens"]),
+                     run_id, payload["call_id"]),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("usage without started request")
+            elif event_type == "model_request_settled":
+                cursor = db.execute(
+                    "UPDATE model_requests SET status=? WHERE run_id=? AND call_id=?",
+                    (payload["status"], run_id, payload["call_id"]),
+                )
+                if cursor.rowcount == 0:
+                    if payload["request_started"]:
+                        raise ValueError("started request was not recorded")
+                    db.execute(
+                        "INSERT INTO model_requests(run_id,call_id,turn,model,request_started,status,"
+                        "usage_source,input_tokens,output_tokens,cached_input_tokens,total_tokens) "
+                        "VALUES(?,?,?,?,0,?,'not_started',0,0,0,0)",
+                        (run_id, payload["call_id"], payload["turn"], payload["model"], payload["status"]),
+                    )
+            if event_type in {"model_request_started", "model_usage_reported", "model_request_settled"}:
+                requests = self._model_requests(db, run_id)
+                db.execute("UPDATE runs SET usage_json=? WHERE id=?",
+                           (_safe_json(self._usage_from_requests(requests)), run_id))
             durable_seq = self._next_seq(db, run_id)
             cursor = db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) "
@@ -772,12 +896,16 @@ def _session(row: sqlite3.Row) -> SessionRecord:
                          row["created_at"], row["updated_at"])
 
 
-def _run(row: sqlite3.Row) -> RunRecord:
+def _run(row: sqlite3.Row, requests: tuple[JsonObject, ...] = ()) -> RunRecord:
     summary = row["result_summary_json"]
     return RunRecord(row["id"], row["session_id"], row["owner_user_id"],
                      row["request_id"], row["request_hash"], _read_json(row["request_summary_json"]),
                      row["status"], row["created_at"], row["started_at"], row["ended_at"],
-                     row["stop_reason"], _read_json(summary) if summary is not None else None)
+                     row["stop_reason"], _read_json(summary) if summary is not None else None,
+                     _read_json(row["budget_json"]) if row["budget_json"] is not None else None,
+                     _read_json(row["usage_json"]) if row["usage_json"] is not None else
+                     {"source": "legacy_unknown", "complete": False},
+                     requests)
 
 
 def _message(row: sqlite3.Row) -> MessageRecord:
