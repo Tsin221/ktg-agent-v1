@@ -25,6 +25,7 @@ from ktg_agent.providers.base import (
     TextDelta,
     ToolCallCompleted,
     Usage,
+    UsageReported,
 )
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.tools import (
@@ -128,6 +129,46 @@ def event_types(result: AgentRunResult) -> list[AgentEventType]:
     return [event.type for event in result.events]
 
 
+def test_usage_snapshot_is_retained_when_provider_fails_after_reporting_it() -> None:
+    observed: list[AgentEvent] = []
+    provider = FakeProvider([ScriptedTurn(actions=(
+        UsageReported(Usage(9, 2, 3)),
+        ProviderError("MODEL_INVALID_RESPONSE", "broken tail"),
+    ))])
+    registry = ToolRegistry(())
+    loop = AgentLoop(provider=provider, tool_registry=registry,
+                     tool_runner=ToolRunner(registry),
+                     model_config=ModelConfig("fake-model", 128),
+                     event_sink=observed.append)
+
+    with pytest.raises(ProviderError, match="broken tail"):
+        run(loop)
+
+    settled = [event for event in observed if event.type is AgentEventType.MODEL_REQUEST_SETTLED]
+    assert len(settled) == 1
+    assert settled[0].payload == {
+        "call_id": "run-1:model:1", "turn": 1, "model": "fake-model",
+        "request_started": True, "status": "failed", "usage_source": "provider_reported",
+        "input_tokens": 9, "output_tokens": 2, "cached_input_tokens": 3,
+        "total_tokens": 11,
+    }
+    assert provider.requests[0].call_id == "run-1:model:1"
+
+
+def test_started_request_without_usage_settles_with_null_counts() -> None:
+    provider = FakeProvider([ScriptedTurn(actions=(ResponseCompleted(FinalResponse(
+        AssistantMessage((TextBlock("done"),)), StopReason.COMPLETED,
+    )),))])
+
+    result = run(make_loop(provider))
+
+    settled = [event for event in result.events if event.type is AgentEventType.MODEL_REQUEST_SETTLED]
+    assert len(settled) == 1
+    assert settled[0].payload["usage_source"] == "unknown"
+    assert settled[0].payload["total_tokens"] is None
+    assert result.stop_reason is StopReason.COMPLETED
+
+
 def test_plain_text_response_returns_final_message_and_ordered_events() -> None:
     final = response(TextBlock("done"))
     provider = FakeProvider(
@@ -150,8 +191,11 @@ def test_plain_text_response_returns_final_message_and_ordered_events() -> None:
         AgentEventType.AGENT_START,
         AgentEventType.TURN_START,
         AgentEventType.MESSAGE_START,
+        AgentEventType.MODEL_REQUEST_STARTED,
         AgentEventType.MESSAGE_UPDATE,
         AgentEventType.MESSAGE_UPDATE,
+        AgentEventType.MODEL_USAGE_REPORTED,
+        AgentEventType.MODEL_REQUEST_SETTLED,
         AgentEventType.MESSAGE_END,
         AgentEventType.TURN_END,
         AgentEventType.AGENT_END,
@@ -159,8 +203,8 @@ def test_plain_text_response_returns_final_message_and_ordered_events() -> None:
     assert [event.seq for event in result.events] == list(
         range(1, len(result.events) + 1)
     )
-    assert result.events[3].payload["text"] == "do"
-    assert result.events[4].payload["text"] == "ne"
+    assert result.events[4].payload["text"] == "do"
+    assert result.events[5].payload["text"] == "ne"
 
 
 def test_single_tool_result_is_added_to_the_next_provider_request() -> None:

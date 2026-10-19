@@ -66,7 +66,7 @@ def test_provider_protocol_streams_provider_independent_events() -> None:
     assert isinstance(events[0], TextDelta)
     assert isinstance(events[1], ToolCallCompleted)
     assert isinstance(events[2], ResponseCompleted)
-    assert events[2].response.usage.total_tokens == 15
+    assert events[2].response.usage == Usage(10, 5)
 
 
 @pytest.mark.parametrize(

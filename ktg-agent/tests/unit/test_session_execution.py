@@ -18,7 +18,7 @@ from ktg_agent.core.messages import (
     UserMessage,
 )
 from ktg_agent.ktg import KTGClient
-from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderError, ProviderRequest, ResponseCompleted, Usage
+from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderError, ProviderRequest, RequestStarted, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent, RunPhase
@@ -225,6 +225,7 @@ def test_coordinator_delivers_input_from_different_thread_and_loop(tmp_path: Pat
                     self.owner_loop = asyncio.get_running_loop()
                     self.started.set()
                     await self.release.wait()
+                yield RequestStarted()
                 yield ResponseCompleted(FinalResponse(
                     AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, Usage(1, 1),
                 ))

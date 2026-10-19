@@ -62,12 +62,15 @@ class ProviderRequest:
     tools: tuple[ToolSchema, ...]
     config: ModelConfig
     cancellation: CancellationSignal | None = None
+    call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.messages, tuple) or not self.messages:
             raise ValueError("provider request requires at least one message")
         if not isinstance(self.tools, tuple):
             raise TypeError("tools must be a tuple")
+        if self.call_id is not None:
+            _required_text(self.call_id, "model call id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +81,10 @@ class Usage:
 
     def __post_init__(self) -> None:
         counts = (self.input_tokens, self.output_tokens, self.cached_input_tokens)
-        if any(not isinstance(count, int) or count < 0 for count in counts):
+        if any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts):
             raise ValueError("token counts must be non-negative integers")
+        if self.cached_input_tokens > self.input_tokens:
+            raise ValueError("cached input tokens cannot exceed input tokens")
 
     @property
     def total_tokens(self) -> int:
@@ -90,7 +95,7 @@ class Usage:
 class FinalResponse:
     message: AssistantMessage | None
     stop_reason: StopReason
-    usage: Usage
+    usage: Usage | None = None
 
     def __post_init__(self) -> None:
         if self.message is None:
@@ -117,9 +122,26 @@ class FinalResponse:
 
 
 class ModelEventType(StrEnum):
+    REQUEST_STARTED = "request_started"
+    USAGE_REPORTED = "usage_reported"
     TEXT_DELTA = "text_delta"
     TOOL_CALL_COMPLETED = "tool_call_completed"
     RESPONSE_COMPLETED = "response_completed"
+
+
+@dataclass(frozen=True, slots=True)
+class RequestStarted:
+    """The provider has begun dispatching this model request."""
+
+    type: ModelEventType = field(default=ModelEventType.REQUEST_STARTED, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class UsageReported:
+    """A cumulative provider usage snapshot for this request, never a delta."""
+
+    usage: Usage
+    type: ModelEventType = field(default=ModelEventType.USAGE_REPORTED, init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +166,7 @@ class ResponseCompleted:
     type: ModelEventType = field(default=ModelEventType.RESPONSE_COMPLETED, init=False)
 
 
-ModelEvent: TypeAlias = TextDelta | ToolCallCompleted | ResponseCompleted
+ModelEvent: TypeAlias = RequestStarted | UsageReported | TextDelta | ToolCallCompleted | ResponseCompleted
 
 
 class Provider(Protocol):

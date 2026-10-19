@@ -25,9 +25,11 @@ from ktg_agent.providers.base import (
     ModelEvent,
     ProviderError,
     ProviderRequest,
+    RequestStarted,
     ResponseCompleted,
     TextDelta,
     Usage,
+    UsageReported,
 )
 from ktg_agent.core.messages import StopReason
 
@@ -72,6 +74,7 @@ class OpenAICompatibleProvider:
             return
 
         payload = self._request_payload(request)
+        yield RequestStarted()
         response = await self._transport(
             self._url,
             {
@@ -81,7 +84,10 @@ class OpenAICompatibleProvider:
             payload,
             self._timeout_seconds,
         )
-        final = self._parse_response(response)
+        usage = self._parse_usage(response)
+        if usage is not None:
+            yield UsageReported(usage)
+        final = self._parse_response(response, usage=usage)
         if final.message is not None:
             text = "".join(
                 block.text
@@ -221,7 +227,9 @@ class OpenAICompatibleProvider:
         return payload
 
     @staticmethod
-    def _parse_response(payload: Mapping[str, object]) -> FinalResponse:
+    def _parse_response(
+        payload: Mapping[str, object], *, usage: Usage | None = None
+    ) -> FinalResponse:
         choices = payload.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model response must contain one choice.")
@@ -256,17 +264,6 @@ class OpenAICompatibleProvider:
         if not blocks:
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned no content.")
 
-        usage_payload = payload.get("usage", {})
-        if not isinstance(usage_payload, Mapping):
-            usage_payload = {}
-        usage = Usage(
-            input_tokens=OpenAICompatibleProvider._token_count(
-                usage_payload.get("prompt_tokens")
-            ),
-            output_tokens=OpenAICompatibleProvider._token_count(
-                usage_payload.get("completion_tokens")
-            ),
-        )
         return FinalResponse(
             message=AssistantMessage(tuple(blocks)),
             stop_reason=stop_reason,
@@ -294,6 +291,27 @@ class OpenAICompatibleProvider:
         return ToolCall(call_id, name, cast(JsonObject, parsed))
 
     @staticmethod
-    def _token_count(value: object) -> int:
-        return value if isinstance(value, int) and value >= 0 else 0
+    def _parse_usage(payload: Mapping[str, object]) -> Usage | None:
+        if "usage" not in payload:
+            return None
+        raw = payload["usage"]
+        if not isinstance(raw, Mapping):
+            raise ProviderError("MODEL_INVALID_USAGE", "Model usage must be an object.")
+        input_tokens = raw.get("prompt_tokens")
+        output_tokens = raw.get("completion_tokens")
+        details = raw.get("prompt_tokens_details")
+        cached_tokens: object = 0
+        if details is not None:
+            if not isinstance(details, Mapping):
+                raise ProviderError("MODEL_INVALID_USAGE", "Model prompt token details are invalid.")
+            cached_tokens = details.get("cached_tokens", 0)
+        if (
+            not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens < 0
+            or not isinstance(output_tokens, int) or isinstance(output_tokens, bool) or output_tokens < 0
+            or not isinstance(cached_tokens, int) or isinstance(cached_tokens, bool) or cached_tokens < 0
+        ):
+            raise ProviderError("MODEL_INVALID_USAGE", "Model token counts are invalid.")
+        if cached_tokens > input_tokens:
+            raise ProviderError("MODEL_INVALID_USAGE", "Cached tokens exceed input tokens.")
+        return Usage(input_tokens, output_tokens, cached_tokens)
 

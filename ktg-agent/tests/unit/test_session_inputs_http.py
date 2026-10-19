@@ -11,7 +11,7 @@ from typing import cast
 
 from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, UserMessage
 from ktg_agent.ktg import KTGClient
-from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, ResponseCompleted, Usage
+from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, RequestStarted, ResponseCompleted, Usage
 from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator, RunPhase
 from ktg_agent.sessions.repository import SessionRepository
@@ -37,6 +37,7 @@ class PausedProvider:
                 self.owner_loop = asyncio.get_running_loop()
                 self.started.set()
                 await self.release.wait()
+            yield RequestStarted()
             yield ResponseCompleted(FinalResponse(
                 AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, Usage(1, 1),
             ))

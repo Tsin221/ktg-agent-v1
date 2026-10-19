@@ -28,6 +28,7 @@ from ktg_agent.providers.base import (
     ModelConfig,
     ModelEvent,
     ProviderRequest,
+    RequestStarted,
     ResponseCompleted,
     Usage,
 )
@@ -82,6 +83,7 @@ class ControlledProvider:
                     )
                 )
                 return
+            yield RequestStarted()
             yield ResponseCompleted(self._responses.pop(0))
 
         return events()

@@ -21,10 +21,12 @@ from ktg_agent.providers.base import (
     Provider,
     ProviderError,
     ProviderRequest,
+    RequestStarted,
     ResponseCompleted,
     TextDelta,
     ToolCallCompleted,
     Usage,
+    UsageReported,
 )
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 
@@ -66,6 +68,7 @@ def test_script_controls_complete_text_and_delta_order() -> None:
     events = collect(provider.stream(request_with(UserMessage((TextBlock("Hi"),)))))
 
     assert events == [
+        RequestStarted(),
         TextDelta("Hello"),
         TextDelta(" "),
         TextDelta("world"),
@@ -111,7 +114,7 @@ def test_script_controls_tool_call_and_records_next_round_tool_result() -> None:
     first_events = collect(provider.stream(first_request))
     second_events = collect(provider.stream(second_request))
 
-    assert first_events[0] == ToolCallCompleted(call)
+    assert first_events[:2] == [RequestStarted(), ToolCallCompleted(call)]
     assert second_events[-1] == ResponseCompleted(final_response)
     assert provider.requests == (first_request, second_request)
     assert provider.requests[1].messages[-1] == tool_result
@@ -162,7 +165,24 @@ def test_script_can_raise_provider_error_after_text_deltas() -> None:
         assert raised.value.retryable is True
         return events
 
-    assert asyncio.run(consume()) == [TextDelta("partial")]
+    assert asyncio.run(consume()) == [RequestStarted(), TextDelta("partial")]
+
+
+def test_script_keeps_known_usage_before_protocol_failure() -> None:
+    usage = Usage(12, 3, 4)
+    provider = FakeProvider([ScriptedTurn(actions=(
+        UsageReported(usage),
+        ProviderError("MODEL_INVALID_RESPONSE", "broken tail"),
+    ))])
+
+    async def consume() -> list[ModelEvent]:
+        events: list[ModelEvent] = []
+        with pytest.raises(ProviderError, match="broken tail"):
+            async for event in provider.stream(request_with(UserMessage((TextBlock("Go"),)))):
+                events.append(event)
+        return events
+
+    assert asyncio.run(consume()) == [RequestStarted(), UsageReported(usage)]
 
 
 def test_exhausted_script_fails_explicitly() -> None:

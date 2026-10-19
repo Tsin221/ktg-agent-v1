@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import pytest
 
 from ktg_agent.core.messages import SystemMessage, TextBlock, ToolCall, UserMessage
-from ktg_agent.providers.base import ModelConfig, ProviderRequest, ToolSchema
+from ktg_agent.providers.base import ModelConfig, ProviderRequest, RequestStarted, ToolSchema, UsageReported
 from ktg_agent.providers.base import ProviderError
 from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -175,6 +175,71 @@ async def _provider_emits_text_and_completed_response() -> None:
 
     events = [event async for event in provider.stream(request)]
 
-    assert events[0].text == "查询完成。"  # type: ignore[union-attr]
+    assert events[2].text == "查询完成。"  # type: ignore[union-attr]
     assert events[-1].response.message is not None  # type: ignore[union-attr]
+    assert isinstance(events[0], RequestStarted)
+    assert events[1] == UsageReported(events[-1].response.usage)  # type: ignore[union-attr, arg-type]
+
+
+def test_missing_usage_stays_unknown_and_reported_zero_stays_zero() -> None:
+    async def scenario() -> None:
+        responses: list[dict[str, object]] = [
+            {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}],
+             "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+        ]
+
+        async def transport(*_args: object) -> dict[str, object]:
+            return responses.pop(0)
+
+        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
+        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
+                                  config=ModelConfig("test", 32))
+        unknown = [event async for event in provider.stream(request)]
+        zero = [event async for event in provider.stream(request)]
+        assert unknown[-1].response.usage is None  # type: ignore[union-attr]
+        assert not any(isinstance(event, UsageReported) for event in unknown)
+        assert zero[1] == UsageReported(zero[-1].response.usage)  # type: ignore[union-attr, arg-type]
+        assert zero[-1].response.usage.total_tokens == 0  # type: ignore[union-attr]
+
+    asyncio.run(scenario())
+
+
+def test_known_usage_survives_invalid_response_tail() -> None:
+    async def scenario() -> None:
+        async def transport(*_args: object) -> dict[str, object]:
+            return {"usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                    "choices": [{"finish_reason": "invalid", "message": {"content": "partial"}}]}
+
+        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
+        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
+                                  config=ModelConfig("test", 32))
+        events = []
+        with pytest.raises(ProviderError, match="finish reason"):
+            async for event in provider.stream(request):
+                events.append(event)
+        assert events == [RequestStarted(), UsageReported(Usage(5, 2))]
+
+    from ktg_agent.providers.base import Usage
+    asyncio.run(scenario())
+
+
+def test_present_but_invalid_usage_is_protocol_error() -> None:
+    async def scenario() -> None:
+        async def transport(*_args: object) -> dict[str, object]:
+            return {"usage": None, "choices": [
+                {"finish_reason": "stop", "message": {"content": "done"}},
+            ]}
+
+        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
+        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
+                                  config=ModelConfig("test", 32))
+        events = []
+        with pytest.raises(ProviderError) as raised:
+            async for event in provider.stream(request):
+                events.append(event)
+        assert raised.value.code == "MODEL_INVALID_USAGE"
+        assert events == [RequestStarted()]
+
+    asyncio.run(scenario())
 

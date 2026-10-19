@@ -11,9 +11,11 @@ from ktg_agent.providers.base import (
     ModelEvent,
     ProviderError,
     ProviderRequest,
+    RequestStarted,
     ResponseCompleted,
     TextDelta,
     ToolCallCompleted,
+    UsageReported,
 )
 
 
@@ -38,7 +40,7 @@ class ScriptedTurn:
             raise ValueError(
                 "scripted turn requires one terminal action at the end"
             )
-        event_types = (TextDelta, ToolCallCompleted, ResponseCompleted, ProviderError)
+        event_types = (TextDelta, ToolCallCompleted, UsageReported, ResponseCompleted, ProviderError)
         if not all(isinstance(action, event_types) for action in self.actions):
             raise TypeError("scripted turn contains an unsupported action")
 
@@ -71,6 +73,8 @@ class FakeProvider:
                 )
 
             turn = self._script.popleft()
+            if request.cancellation is None or not request.cancellation.is_cancelled:
+                yield RequestStarted()
             for action in turn.actions:
                 if isinstance(action, ProviderError):
                     raise action

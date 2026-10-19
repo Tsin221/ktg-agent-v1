@@ -30,9 +30,11 @@ from ktg_agent.providers.base import (
     ModelConfig,
     Provider,
     ProviderRequest,
+    RequestStarted,
     ResponseCompleted,
     TextDelta,
     Usage,
+    UsageReported,
 )
 from ktg_agent.tools import (
     ToolContext,
@@ -584,15 +586,61 @@ class AgentLoop:
         )
 
         response: FinalResponse | None = None
+        request_started = False
+        reported_usage: Usage | None = None
+        call_id = f"{publisher.run_id}:model:{turn}"
+
+        async def settle_request(status: str) -> None:
+            usage_source = (
+                "not_started" if not request_started else
+                "provider_reported" if reported_usage is not None else "unknown"
+            )
+            usage = reported_usage if request_started else Usage(0, 0)
+            await publisher.emit(AgentEventType.MODEL_REQUEST_SETTLED, {
+                "call_id": call_id,
+                "turn": turn,
+                "model": self._model_config.model,
+                "request_started": request_started,
+                "status": status,
+                "usage_source": usage_source,
+                "input_tokens": usage.input_tokens if usage is not None else None,
+                "output_tokens": usage.output_tokens if usage is not None else None,
+                "cached_input_tokens": usage.cached_input_tokens if usage is not None else None,
+                "total_tokens": usage.total_tokens if usage is not None else None,
+            })
+
         try:
             request = ProviderRequest(
                 messages=project_model_messages(history),
                 tools=self._tool_registry.model_schemas(),
                 config=self._model_config,
                 cancellation=cancellation,
+                call_id=call_id,
             )
             async for event in self._provider.stream(request):
-                if isinstance(event, TextDelta):
+                if response is not None:
+                    raise AgentLoopError("provider emitted an event after completed response")
+                if isinstance(event, RequestStarted):
+                    if request_started:
+                        raise AgentLoopError("provider started a model request twice")
+                    request_started = True
+                    await publisher.emit(AgentEventType.MODEL_REQUEST_STARTED, {
+                        "call_id": request.call_id,
+                        "turn": turn,
+                        "model": request.config.model,
+                    })
+                elif isinstance(event, UsageReported):
+                    if not request_started:
+                        raise AgentLoopError("provider reported usage before request start")
+                    reported_usage = event.usage
+                    await publisher.emit(AgentEventType.MODEL_USAGE_REPORTED, {
+                        "call_id": request.call_id,
+                        "turn": turn,
+                        "input_tokens": event.usage.input_tokens,
+                        "output_tokens": event.usage.output_tokens,
+                        "cached_input_tokens": event.usage.cached_input_tokens,
+                    })
+                elif isinstance(event, TextDelta):
                     await publisher.emit(
                         AgentEventType.MESSAGE_UPDATE,
                         {
@@ -603,12 +651,25 @@ class AgentLoop:
                         },
                     )
                 elif isinstance(event, ResponseCompleted):
-                    if response is not None:
-                        raise AgentLoopError(
-                            "provider emitted more than one completed response"
-                        )
+                    if not request_started and event.response.stop_reason is not StopReason.CANCELLED:
+                        raise AgentLoopError("provider completed a request without request start")
                     response = event.response
+                    if not request_started and response.usage not in (None, Usage(0, 0)):
+                        raise AgentLoopError("unstarted request cannot report nonzero usage")
+                    if request_started and response.usage is not None:
+                        if reported_usage is not None and reported_usage != response.usage:
+                            raise AgentLoopError("final usage conflicts with reported usage")
+                        if reported_usage is None:
+                            reported_usage = response.usage
+                            await publisher.emit(AgentEventType.MODEL_USAGE_REPORTED, {
+                                "call_id": request.call_id,
+                                "turn": turn,
+                                "input_tokens": reported_usage.input_tokens,
+                                "output_tokens": reported_usage.output_tokens,
+                                "cached_input_tokens": reported_usage.cached_input_tokens,
+                            })
         except BaseException:
+            await settle_request("failed")
             await publisher.emit(
                 AgentEventType.MESSAGE_END,
                 {"turn": turn, "message_id": message_id, "status": "failed"},
@@ -620,6 +681,7 @@ class AgentLoop:
             raise
 
         if response is None:
+            await settle_request("failed")
             await publisher.emit(
                 AgentEventType.MESSAGE_END,
                 {"turn": turn, "message_id": message_id, "status": "failed"},
@@ -629,6 +691,8 @@ class AgentLoop:
                 {"turn": turn, "status": "failed"},
             )
             raise AgentLoopError("provider stream ended without a completed response")
+
+        await settle_request(response.stop_reason.value)
 
         end_payload: JsonObject = {
             "turn": turn,
