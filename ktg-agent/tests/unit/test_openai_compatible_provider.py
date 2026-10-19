@@ -1,245 +1,292 @@
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
+from typing import cast
 
 import pytest
 
-from ktg_agent.core.messages import SystemMessage, TextBlock, ToolCall, UserMessage
-from ktg_agent.providers.base import ModelConfig, ProviderRequest, RequestStarted, ToolSchema, UsageReported
-from ktg_agent.providers.base import ProviderError
+from ktg_agent.core.messages import StopReason, TextBlock, ToolCall, UserMessage
+from ktg_agent.providers.base import ModelConfig, ProviderError, ProviderRequest, RequestStarted, ResponseCompleted, TextDelta, Usage, UsageReported
 from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
 
 
-def test_provider_rejects_tool_names_outside_openai_pattern() -> None:
+def request(cancellation: object | None = None) -> ProviderRequest:
+    return ProviderRequest(
+        messages=(UserMessage((TextBlock("查询"),)),), tools=(),
+        config=ModelConfig("test-model", 32), cancellation=cancellation,  # type: ignore[arg-type]
+    )
+
+
+def frame(value: object) -> bytes:
+    return b"data: " + json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\r\n\r\n"
+
+
+def choice(delta: dict[str, object], finish: str | None = None) -> dict[str, object]:
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}], "usage": None}
+
+
+@asynccontextmanager
+async def transport_bytes(chunks: list[bytes]) -> AsyncIterator[AsyncIterator[bytes]]:
+    async def produce() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+    yield produce()
+
+
+def provider_for(chunks: list[bytes]) -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        api_key="key", base_url="http://localhost/v1",
+        transport=lambda *_args: transport_bytes(chunks),
+    )
+
+
+def test_split_utf8_json_and_usage_tail() -> None:
     async def scenario() -> None:
-        async def transport(
-            _url: str,
-            _headers: Mapping[str, str],
-            _body: dict[str, object],
-            _timeout_seconds: float,
-        ) -> dict[str, object]:
-            raise AssertionError("invalid tool names must fail before transport")
-
-        provider = OpenAICompatibleProvider(
-            api_key="test-key",
-            base_url="https://models.example/v1",
-            transport=transport,
-        )
-        request = ProviderRequest(
-            messages=(UserMessage((TextBlock("查询"),)),),
-            tools=(
-                ToolSchema(
-                    name="ktg.query_stock",
-                    description="Query stock",
-                    input_schema={"type": "object", "properties": {}},
-                ),
-            ),
-            config=ModelConfig(model="test-model", max_output_tokens=32),
-        )
-
-        with pytest.raises(ProviderError, match="tool name"):
-            _ = [event async for event in provider.stream(request)]
-
+        first = frame(choice({"content": "中文"}))
+        split = first.index("中".encode("utf-8")) + 1
+        chunks = [first[:split], first[split:split + 1], first[split + 1:14 + split],
+                  first[14 + split:], b"\r\n", frame(choice({}, "stop")),
+                  frame({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}}),
+                  b"data: [DONE]\n\n"]
+        events = [event async for event in provider_for(chunks).stream(request())]
+        assert isinstance(events[-1], ResponseCompleted)
+        assert events == [RequestStarted(), TextDelta("中文"), UsageReported(Usage(5, 2)),
+                          ResponseCompleted(events[-1].response)]
+        assert events[-1].response.message is not None
+        assert events[-1].response.message.content == (TextBlock("中文"),)
     asyncio.run(scenario())
 
 
-def test_provider_converts_tool_call_response() -> None:
+def test_interleaved_tool_arguments_are_only_released_after_done() -> None:
     async def scenario() -> None:
-        await _provider_converts_tool_call_response()
-
-    asyncio.run(scenario())
-
-
-async def _provider_converts_tool_call_response() -> None:
-    captured: dict[str, object] = {}
-
-    async def transport(
-        url: str,
-        headers: Mapping[str, str],
-        body: dict[str, object],
-        timeout_seconds: float,
-    ) -> dict[str, object]:
-        captured.update(url=url, headers=dict(headers), body=body, timeout=timeout_seconds)
-        return {
-            "choices": [
-                {
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call-1",
-                                "type": "function",
-                                "function": {
-                                    "name": "ktg_query_stock",
-                                    "arguments": json.dumps({"item_code": "A-01"}),
-                                },
-                            }
-                        ],
-                    },
-                }
-            ],
-            "usage": {"prompt_tokens": 12, "completion_tokens": 4},
-        }
-
-    provider = OpenAICompatibleProvider(
-        api_key="test-key",
-        base_url="https://models.example/v1",
-        transport=transport,
-    )
-    request = ProviderRequest(
-        messages=(
-            SystemMessage((TextBlock("Use tools."),)),
-            UserMessage((TextBlock("查 A-01 库存"),)),
-        ),
-        tools=(
-            ToolSchema(
-                name="ktg_query_stock",
-                description="Query stock",
-                input_schema={
-                    "type": "object",
-                    "properties": {"item_code": {"type": "string"}},
-                    "required": ["item_code"],
-                },
-            ),
-        ),
-        config=ModelConfig(model="test-model", max_output_tokens=256),
-    )
-
-    events = [event async for event in provider.stream(request)]
-
-    completed = events[-1].response  # type: ignore[union-attr]
-    assert completed.stop_reason.value == "tool_call"
-    assert completed.message is not None
-    assert completed.message.content == (
-        ToolCall(id="call-1", name="ktg_query_stock", arguments={"item_code": "A-01"}),
-    )
-    assert captured["url"] == "https://models.example/v1/chat/completions"
-    assert captured["headers"] == {
-        "Authorization": "Bearer test-key",
-        "Content-Type": "application/json",
-    }
-    assert captured["body"] == {
-        "model": "test-model",
-        "messages": [
-            {"role": "system", "content": "Use tools."},
-            {"role": "user", "content": "查 A-01 库存"},
-        ],
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "ktg_query_stock",
-                    "description": "Query stock",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"item_code": {"type": "string"}},
-                        "required": ["item_code"],
-                    },
-                },
-            }
-        ],
-        "tool_choice": "auto",
-        "max_tokens": 256,
-    }
-
-
-def test_provider_emits_text_and_completed_response() -> None:
-    asyncio.run(_provider_emits_text_and_completed_response())
-
-
-async def _provider_emits_text_and_completed_response() -> None:
-    async def transport(
-        _url: str,
-        _headers: Mapping[str, str],
-        _body: dict[str, object],
-        _timeout_seconds: float,
-    ) -> dict[str, object]:
-        return {
-            "choices": [
-                {"finish_reason": "stop", "message": {"content": "查询完成。"}}
-            ],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-        }
-
-    provider = OpenAICompatibleProvider(
-        api_key="test-key",
-        base_url="https://models.example/v1",
-        transport=transport,
-    )
-    request = ProviderRequest(
-        messages=(UserMessage((TextBlock("查询"),)),),
-        tools=(),
-        config=ModelConfig(model="test-model", max_output_tokens=32),
-    )
-
-    events = [event async for event in provider.stream(request)]
-
-    assert events[2].text == "查询完成。"  # type: ignore[union-attr]
-    assert events[-1].response.message is not None  # type: ignore[union-attr]
-    assert isinstance(events[0], RequestStarted)
-    assert events[1] == UsageReported(events[-1].response.usage)  # type: ignore[union-attr, arg-type]
-
-
-def test_missing_usage_stays_unknown_and_reported_zero_stays_zero() -> None:
-    async def scenario() -> None:
-        responses: list[dict[str, object]] = [
-            {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}]},
-            {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}],
-             "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+        chunks = [
+            frame(choice({"tool_calls": [
+                {"index": 1, "id": "call-b", "type": "function", "function": {"name": "lookup_b", "arguments": "{\"b\":"}},
+                {"index": 0, "id": "call-a", "type": "function", "function": {"name": "lookup_a", "arguments": "{\"a\":"}},
+            ]})),
+            frame(choice({"tool_calls": [
+                {"index": 0, "function": {"arguments": "1}"}},
+                {"index": 1, "function": {"arguments": "2}"}},
+            ]})),
+            frame(choice({}, "tool_calls")), b"data: [DONE]\n\n",
         ]
-
-        async def transport(*_args: object) -> dict[str, object]:
-            return responses.pop(0)
-
-        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
-        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
-                                  config=ModelConfig("test", 32))
-        unknown = [event async for event in provider.stream(request)]
-        zero = [event async for event in provider.stream(request)]
-        assert unknown[-1].response.usage is None  # type: ignore[union-attr]
-        assert not any(isinstance(event, UsageReported) for event in unknown)
-        assert zero[1] == UsageReported(zero[-1].response.usage)  # type: ignore[union-attr, arg-type]
-        assert zero[-1].response.usage.total_tokens == 0  # type: ignore[union-attr]
-
+        events = [event async for event in provider_for(chunks).stream(request())]
+        assert len(events) == 2
+        assert events[-1].response.message.content == (  # type: ignore[union-attr]
+            ToolCall("call-a", "lookup_a", {"a": 1}),
+            ToolCall("call-b", "lookup_b", {"b": 2}),
+        )
     asyncio.run(scenario())
 
 
-def test_known_usage_survives_invalid_response_tail() -> None:
+@pytest.mark.parametrize("chunks", [
+    [frame(choice({"tool_calls": [{"index": 0, "id": "id", "function": {"name": "x", "arguments": "{\"a\":"}}]})), frame(choice({}, "tool_calls"))],
+    [frame(choice({"tool_calls": [{"index": 0, "function": {"name": "x", "arguments": "{}"}}]})), frame(choice({}, "tool_calls")), b"data: [DONE]\n\n"],
+    [frame(choice({"tool_calls": [{"index": 0, "id": "id", "function": {"arguments": "{}"}}]})), frame(choice({}, "tool_calls")), b"data: [DONE]\n\n"],
+    [frame(choice({"tool_calls": [{"index": 0, "id": "id", "function": {"name": "x", "arguments": "oops"}}]})), frame(choice({}, "tool_calls")), b"data: [DONE]\n\n"],
+    [frame(choice({"tool_calls": [{"index": 0, "id": "id", "function": {"name": "x", "arguments": "{\"a\":NaN}"}}]})), frame(choice({}, "tool_calls")), b"data: [DONE]\n\n"],
+])
+def test_bad_tool_stream_never_completes(chunks: list[bytes]) -> None:
     async def scenario() -> None:
-        async def transport(*_args: object) -> dict[str, object]:
-            return {"usage": {"prompt_tokens": 5, "completion_tokens": 2},
-                    "choices": [{"finish_reason": "invalid", "message": {"content": "partial"}}]}
-
-        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
-        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
-                                  config=ModelConfig("test", 32))
         events = []
-        with pytest.raises(ProviderError, match="finish reason"):
-            async for event in provider.stream(request):
+        with pytest.raises(ProviderError):
+            async for event in provider_for(chunks).stream(request()):
+                events.append(event)
+        assert events == [RequestStarted()]
+    asyncio.run(scenario())
+
+
+def test_length_discards_partial_tool_call() -> None:
+    async def scenario() -> None:
+        chunks = [frame(choice({"content": "partial", "tool_calls": [
+            {"index": 0, "id": "id", "function": {"name": "x", "arguments": "{"}}]}, "length")), b"data: [DONE]\n\n"]
+        events = [event async for event in provider_for(chunks).stream(request())]
+        assert events[-1].response.stop_reason is StopReason.LENGTH  # type: ignore[union-attr]
+        assert events[-1].response.message.content == (TextBlock("partial"),)  # type: ignore[union-attr]
+    asyncio.run(scenario())
+
+
+def test_known_usage_survives_bad_tail() -> None:
+    async def scenario() -> None:
+        chunks = [frame({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}}), b"data: broken\n\n"]
+        events = []
+        with pytest.raises(ProviderError):
+            async for event in provider_for(chunks).stream(request()):
                 events.append(event)
         assert events == [RequestStarted(), UsageReported(Usage(5, 2))]
-
-    from ktg_agent.providers.base import Usage
     asyncio.run(scenario())
 
 
-def test_present_but_invalid_usage_is_protocol_error() -> None:
+def test_invalid_usage_is_rejected() -> None:
     async def scenario() -> None:
-        async def transport(*_args: object) -> dict[str, object]:
-            return {"usage": None, "choices": [
-                {"finish_reason": "stop", "message": {"content": "done"}},
-            ]}
-
-        provider = OpenAICompatibleProvider(api_key="key", base_url="https://models.example/v1", transport=transport)
-        request = ProviderRequest(messages=(UserMessage((TextBlock("Go"),)),), tools=(),
-                                  config=ModelConfig("test", 32))
-        events = []
-        with pytest.raises(ProviderError) as raised:
-            async for event in provider.stream(request):
-                events.append(event)
-        assert raised.value.code == "MODEL_INVALID_USAGE"
-        assert events == [RequestStarted()]
-
+        for bad in ({"prompt_tokens": -1, "completion_tokens": 0},
+                    {"prompt_tokens": True, "completion_tokens": 0},
+                    {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 2}}):
+            events = []
+            with pytest.raises(ProviderError) as raised:
+                async for event in provider_for([frame({"choices": [], "usage": bad})]).stream(request()):
+                    events.append(event)
+            assert raised.value.code == "MODEL_INVALID_USAGE"
+            assert events == [RequestStarted()]
     asyncio.run(scenario())
 
+
+def test_real_http_delivers_text_before_tail_and_closes_on_early_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    async def scenario() -> None:
+        first_sent = asyncio.Event()
+        closed = asyncio.Event()
+        captured: dict[str, object] = {}
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                head = await reader.readuntil(b"\r\n\r\n")
+                length = int(next(line.split(b":", 1)[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")))
+                body = json.loads(await reader.readexactly(length))
+                captured.update(body)
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                first = frame(choice({"content": "第一段"}))
+                writer.write(f"{len(first):x}\r\n".encode() + first + b"\r\n")
+                await writer.drain()
+                first_sent.set()
+                await reader.read()
+            except (ConnectionError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1")
+            stream = cast(AsyncGenerator[object, None], provider.stream(request()))
+            assert isinstance(await asyncio.wait_for(anext(stream), 2), RequestStarted)
+            delta = await asyncio.wait_for(anext(stream), 2)
+            assert delta == TextDelta("第一段")
+            assert first_sent.is_set() and not closed.is_set()
+            assert captured["stream"] is True
+            assert captured["stream_options"] == {"include_usage": True}
+            await stream.aclose()
+            await asyncio.wait_for(closed.wait(), 2)
+        finally:
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
+
+
+def test_http_error_closes_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    async def scenario() -> None:
+        closed = asyncio.Event()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1")
+            with pytest.raises(ProviderError) as raised:
+                _ = [event async for event in provider.stream(request())]
+            assert raised.value.code == "MODEL_HTTP_ERROR"
+            await asyncio.wait_for(closed.wait(), 2)
+        finally:
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
+
+
+def test_non_stream_response_fails_without_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+
+    async def scenario() -> None:
+        closed = asyncio.Event()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1")
+            with pytest.raises(ProviderError) as raised:
+                _ = [event async for event in provider.stream(request())]
+            assert raised.value.code == "MODEL_STREAM_UNSUPPORTED"
+            await asyncio.wait_for(closed.wait(), 2)
+        finally:
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
+
+
+def test_read_timeout_and_cancellation_close_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    class Signal:
+        is_cancelled = False
+
+    async def scenario(cancel: bool) -> None:
+        connected = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                head = await reader.readuntil(b"\r\n\r\n")
+                length = int(next(line.split(b":", 1)[1] for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")))
+                await reader.readexactly(length)
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                await writer.drain()
+                connected.set()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1", timeout_seconds=0.3)
+            signal = Signal()
+            events: list[object] = []
+
+            async def consume() -> None:
+                async for event in provider.stream(request(signal)):
+                    events.append(event)
+
+            task = asyncio.create_task(consume())
+            await asyncio.wait_for(connected.wait(), 2)
+            if cancel:
+                signal.is_cancelled = True
+                await asyncio.wait_for(task, 2)
+                assert isinstance(events[-1], ResponseCompleted)
+                assert events[-1].response.stop_reason is StopReason.CANCELLED
+            else:
+                with pytest.raises(ProviderError) as raised:
+                    await asyncio.wait_for(task, 2)
+                assert raised.value.code == "MODEL_TIMEOUT"
+            await asyncio.wait_for(closed.wait(), 2)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario(False))
+    asyncio.run(scenario(True))

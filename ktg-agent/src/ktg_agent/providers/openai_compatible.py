@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import Any, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import NoReturn, cast
+
+import httpx
 
 from ktg_agent.core.messages import (
     AssistantMessage,
@@ -34,10 +36,72 @@ from ktg_agent.providers.base import (
 from ktg_agent.core.messages import StopReason
 
 
-type JsonTransport = Callable[
+type StreamTransport = Callable[
     [str, Mapping[str, str], dict[str, object], float],
-    Awaitable[dict[str, object]],
+    AbstractAsyncContextManager[AsyncIterator[bytes]],
 ]
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+class _SseFrames:
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        self._line = ""
+        self._data: list[str] = []
+        self._after_cr = False
+
+    def feed(self, chunk: bytes) -> list[str]:
+        frames: list[str] = []
+        try:
+            decoded = self._decoder.decode(chunk)
+        except UnicodeDecodeError as exc:
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream contains invalid UTF-8.") from exc
+        for char in decoded:
+            if self._after_cr:
+                self._after_cr = False
+                if char == "\n":
+                    continue
+            if char in "\r\n":
+                line, self._line = self._line, ""
+                if not line:
+                    if self._data:
+                        frames.append("\n".join(self._data))
+                        self._data = []
+                elif line.startswith("data:"):
+                    value = line[5:]
+                    self._data.append(value[1:] if value.startswith(" ") else value)
+                elif line == "data":
+                    self._data.append("")
+                if char == "\r":
+                    self._after_cr = True
+            else:
+                self._line += char
+        return frames
+
+
+@asynccontextmanager
+async def _http_stream(
+    url: str, headers: Mapping[str, str], body: dict[str, object], timeout_seconds: float
+) -> AsyncIterator[AsyncIterator[bytes]]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            async with client.stream("POST", url, headers=headers, json=body) as response:
+                if response.status_code >= 400:
+                    raise ProviderError(
+                        "MODEL_HTTP_ERROR",
+                        f"Model request failed with HTTP {response.status_code}.",
+                        retryable=response.status_code in {408, 409, 429} or response.status_code >= 500,
+                    )
+                if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
+                    raise ProviderError("MODEL_STREAM_UNSUPPORTED", "Model endpoint did not return an SSE stream.")
+                yield response.aiter_bytes()
+    except httpx.TimeoutException as exc:
+        raise ProviderError("MODEL_TIMEOUT", "Model stream timed out.", retryable=True) from exc
+    except httpx.RequestError as exc:
+        raise ProviderError("MODEL_CONNECTION_ERROR", "Could not reach the configured model endpoint.", retryable=True) from exc
 
 
 class OpenAICompatibleProvider:
@@ -49,7 +113,7 @@ class OpenAICompatibleProvider:
         api_key: str,
         base_url: str,
         timeout_seconds: float = 60.0,
-        transport: JsonTransport | None = None,
+        transport: StreamTransport | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("MODEL_API_KEY is required")
@@ -60,7 +124,7 @@ class OpenAICompatibleProvider:
         self._api_key = api_key
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._timeout_seconds = timeout_seconds
-        self._transport = transport or self._default_transport
+        self._transport = transport or _http_stream
 
     async def stream(self, request: ProviderRequest) -> AsyncIterator[ModelEvent]:
         if request.cancellation is not None and request.cancellation.is_cancelled:
@@ -75,84 +139,137 @@ class OpenAICompatibleProvider:
 
         payload = self._request_payload(request)
         yield RequestStarted()
-        response = await self._transport(
+        frames = _SseFrames()
+        text_parts: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
+        usage: Usage | None = None
+        done = False
+        async with self._transport(
             self._url,
-            {
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
+            {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
             payload,
             self._timeout_seconds,
-        )
-        usage = self._parse_usage(response)
-        if usage is not None:
-            yield UsageReported(usage)
-        final = self._parse_response(response, usage=usage)
-        if final.message is not None:
-            text = "".join(
-                block.text
-                for block in final.message.content
-                if isinstance(block, TextBlock)
-            )
-            if text:
-                yield TextDelta(text)
-        yield ResponseCompleted(final)
+        ) as chunks:
+            iterator = aiter(chunks)
+            while not done:
+                chunk = await self._next_chunk(iterator, request)
+                if chunk is None:
+                    break
+                for data in frames.feed(chunk):
+                    if data == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        frame = json.loads(data, parse_constant=_reject_json_constant)
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data is invalid JSON.") from exc
+                    if not isinstance(frame, dict):
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data must be an object.")
+                    frame_usage = self._parse_usage(frame)
+                    if frame_usage is not None:
+                        if usage is not None and usage != frame_usage:
+                            raise ProviderError("MODEL_INVALID_USAGE", "Model usage snapshots conflict.")
+                        usage = frame_usage
+                        yield UsageReported(usage)
+                    choices = frame.get("choices")
+                    if not isinstance(choices, list) or len(choices) > 1:
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream must contain at most one choice.")
+                    if not choices:
+                        if frame_usage is None:
+                            raise ProviderError("MODEL_INVALID_RESPONSE", "Empty model choices require usage.")
+                        continue
+                    if finish_reason is not None:
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model emitted a choice after finish reason.")
+                    choice = choices[0]
+                    if not isinstance(choice, dict) or choice.get("index") != 0:
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice index is invalid.")
+                    reason = choice.get("finish_reason")
+                    if reason is not None:
+                        if finish_reason is not None:
+                            raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice finished twice.")
+                        if reason not in ("stop", "tool_calls", "length"):
+                            raise ProviderError("MODEL_STOP_REASON", f"Unsupported model finish reason: {reason!r}.")
+                        finish_reason = reason
+                    delta = choice.get("delta")
+                    if not isinstance(delta, dict):
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice delta is invalid.")
+                    content = delta.get("content")
+                    if content is not None:
+                        if not isinstance(content, str):
+                            raise ProviderError("MODEL_INVALID_RESPONSE", "Model text delta is invalid.")
+                        if content:
+                            text_parts.append(content)
+                            yield TextDelta(content)
+                    raw_calls = delta.get("tool_calls", [])
+                    if not isinstance(raw_calls, list):
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool delta is invalid.")
+                    for raw_call in raw_calls:
+                        self._append_tool_delta(calls, raw_call)
+            if request.cancellation is not None and request.cancellation.is_cancelled:
+                yield ResponseCompleted(FinalResponse(None, StopReason.CANCELLED, usage))
+                return
+        if not done or finish_reason is None:
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream ended without normal completion.")
+        blocks: list[TextBlock | ToolCall] = []
+        if text_parts:
+            blocks.append(TextBlock("".join(text_parts)))
+        if finish_reason == "tool_calls":
+            for index in sorted(calls):
+                parts = calls[index]
+                blocks.append(self._parse_tool_call({
+                    "id": parts["id"],
+                    "function": {"name": parts["name"], "arguments": parts["arguments"]},
+                }))
+        elif calls and finish_reason != "length":
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned tool deltas without tool_calls finish reason.")
+        if not blocks:
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned no content.")
+        reason = {"stop": StopReason.COMPLETED, "tool_calls": StopReason.TOOL_CALL, "length": StopReason.LENGTH}[finish_reason]
+        yield ResponseCompleted(FinalResponse(AssistantMessage(tuple(blocks)), reason, usage))
 
     @staticmethod
-    async def _default_transport(
-        url: str,
-        headers: Mapping[str, str],
-        body: dict[str, object],
-        timeout_seconds: float,
-    ) -> dict[str, object]:
-        return await asyncio.to_thread(
-            OpenAICompatibleProvider._post_json,
-            url,
-            headers,
-            body,
-            timeout_seconds,
-        )
+    async def _next_chunk(iterator: AsyncIterator[bytes], request: ProviderRequest) -> bytes | None:
+        task = asyncio.create_task(anext(iterator, None))
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=0.1)
+                if request.cancellation is not None and request.cancellation.is_cancelled:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    return None
+                if done:
+                    return task.result()
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
     @staticmethod
-    def _post_json(
-        url: str,
-        headers: Mapping[str, str],
-        body: dict[str, object],
-        timeout_seconds: float,
-    ) -> dict[str, object]:
-        request = Request(
-            url,
-            data=json.dumps(
-                body,
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8"),
-            headers=dict(headers),
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=timeout_seconds) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            retryable = exc.code in {408, 409, 429} or exc.code >= 500
-            raise ProviderError(
-                "MODEL_HTTP_ERROR",
-                f"Model request failed with HTTP {exc.code}.",
-                retryable=retryable,
-            ) from exc
-        except (URLError, TimeoutError) as exc:
-            raise ProviderError(
-                "MODEL_CONNECTION_ERROR",
-                "Could not reach the configured model endpoint.",
-                retryable=True,
-            ) from exc
-        try:
-            value = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned invalid JSON.") from exc
-        if not isinstance(value, dict):
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model response must be an object.")
-        return cast(dict[str, object], value)
+    def _append_tool_delta(calls: dict[int, dict[str, str]], raw: object) -> None:
+        if not isinstance(raw, dict):
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool delta is invalid.")
+        index = raw.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool index is invalid.")
+        parts = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        if "type" in raw and raw["type"] != "function":
+            raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool type is invalid.")
+        call_id = raw.get("id")
+        if call_id is not None:
+            if not isinstance(call_id, str):
+                raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool ID is invalid.")
+            parts["id"] += call_id
+        function = raw.get("function")
+        if function is not None:
+            if not isinstance(function, dict):
+                raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool function is invalid.")
+            for field in ("name", "arguments"):
+                value = function.get(field)
+                if value is not None:
+                    if not isinstance(value, str):
+                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool function is invalid.")
+                    parts[field] += value
 
     @staticmethod
     def _request_payload(request: ProviderRequest) -> dict[str, object]:
@@ -164,6 +281,8 @@ class OpenAICompatibleProvider:
                 )
         payload: dict[str, object] = {
             "model": request.config.model,
+            "stream": True,
+            "stream_options": {"include_usage": True},
             "messages": [
                 OpenAICompatibleProvider._message_payload(message)
                 for message in request.messages
@@ -227,64 +346,20 @@ class OpenAICompatibleProvider:
         return payload
 
     @staticmethod
-    def _parse_response(
-        payload: Mapping[str, object], *, usage: Usage | None = None
-    ) -> FinalResponse:
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or len(choices) != 1:
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model response must contain one choice.")
-        choice = choices[0]
-        if not isinstance(choice, Mapping):
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice is invalid.")
-        message = choice.get("message")
-        if not isinstance(message, Mapping):
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model message is missing.")
-
-        blocks: list[TextBlock | ToolCall] = []
-        content = message.get("content")
-        if isinstance(content, str) and content:
-            blocks.append(TextBlock(content))
-        raw_calls = message.get("tool_calls", [])
-        if not isinstance(raw_calls, list):
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool calls are invalid.")
-        for raw_call in raw_calls:
-            blocks.append(OpenAICompatibleProvider._parse_tool_call(raw_call))
-
-        finish_reason = choice.get("finish_reason")
-        stop_reason = {
-            "stop": StopReason.COMPLETED,
-            "tool_calls": StopReason.TOOL_CALL,
-            "length": StopReason.LENGTH,
-        }.get(finish_reason if isinstance(finish_reason, str) else "")
-        if stop_reason is None:
-            raise ProviderError(
-                "MODEL_STOP_REASON",
-                f"Unsupported model finish reason: {finish_reason!r}.",
-            )
-        if not blocks:
-            raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned no content.")
-
-        return FinalResponse(
-            message=AssistantMessage(tuple(blocks)),
-            stop_reason=stop_reason,
-            usage=usage,
-        )
-
-    @staticmethod
     def _parse_tool_call(payload: object) -> ToolCall:
         if not isinstance(payload, Mapping):
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool call is invalid.")
         call_id = payload.get("id")
         function = payload.get("function")
-        if not isinstance(call_id, str) or not isinstance(function, Mapping):
+        if not isinstance(call_id, str) or not call_id or not isinstance(function, Mapping):
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool call is incomplete.")
         name = function.get("name")
         arguments = function.get("arguments")
-        if not isinstance(name, str) or not isinstance(arguments, str):
+        if not isinstance(name, str) or not name or not isinstance(arguments, str):
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool call function is invalid.")
         try:
-            parsed = json.loads(arguments)
-        except json.JSONDecodeError as exc:
+            parsed = json.loads(arguments, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool arguments are invalid JSON.") from exc
         if not isinstance(parsed, dict):
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool arguments must be an object.")
@@ -292,7 +367,7 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _parse_usage(payload: Mapping[str, object]) -> Usage | None:
-        if "usage" not in payload:
+        if "usage" not in payload or payload["usage"] is None:
             return None
         raw = payload["usage"]
         if not isinstance(raw, Mapping):
