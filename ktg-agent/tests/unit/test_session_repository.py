@@ -8,7 +8,7 @@ import pytest
 
 from ktg_agent.core.messages import AssistantMessage, JsonObject, TextBlock, ToolResultMessage, UserMessage
 from ktg_agent.sessions import SessionRepository
-from ktg_agent.sessions.repository import ControlConflictError, ControlStateError
+from ktg_agent.sessions.repository import ControlConflictError, ControlRecord, ControlStateError
 
 
 def test_repository_reopens_with_ordered_history(tmp_path: Path) -> None:
@@ -194,6 +194,38 @@ def test_control_admission_is_idempotent_and_events_share_durable_sequence(tmp_p
     with pytest.raises(KeyError):
         repo.admit_control("bob", run.id, "foreign", "steer",
                            {"mode": "steer", "message": "foreign"}, accepting=True)
+
+
+def test_control_and_core_events_commit_concurrently_before_settlement(tmp_path: Path) -> None:
+    from threading import Barrier
+
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "run", "hash", {})
+    repo.update_run_status("alice", run.id, "running")
+    gate = Barrier(3)
+
+    def core_event() -> None:
+        gate.wait(timeout=5)
+        repo.append_event("alice", run.id, 1, "turn_start", {})
+
+    def control_event() -> tuple[ControlRecord, bool]:
+        gate.wait(timeout=5)
+        return repo.admit_control("alice", run.id, "input-1", "follow_up",
+                                  {"mode": "follow_up", "message": "next"}, accepting=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        core = pool.submit(core_event)
+        control = pool.submit(control_event)
+        gate.wait(timeout=5)
+        core.result(5)
+        receipt, created = control.result(5)
+    assert created and receipt.status == "queued"
+    repo.settle_run("alice", run.id, "completed", "completed", {}, ())
+    events = repo.list_events("alice", run.id).items
+    assert [event.seq for event in events] == list(range(1, len(events) + 1))
+    assert set(event.type for event in events[:2]) == {"turn_start", "input_queued"}
+    assert [event.type for event in events[-2:]] == ["input_not_consumed", "run_settled"]
 
 
 def test_pending_inputs_are_closed_before_settled_and_recovery_never_replays(tmp_path: Path) -> None:

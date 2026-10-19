@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import traceback
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import Lock
@@ -17,6 +19,15 @@ from ktg_agent.sessions.repository import ControlRecord, RunRecord, SessionRepos
 
 type RegisterAgent = Callable[[Agent], Callable[[], None]]
 RunExecutor = Callable[[str, str, tuple[Message, ...], JsonObject | None, str, EventSink, RegisterAgent], Awaitable[AgentRunResult]]
+logger = logging.getLogger(__name__)
+
+
+def _log_worker_error(run_id: str, phase: str, error: Exception) -> None:
+    # Exception messages can contain request text or credentials; log stack frames and type only.
+    frames = traceback.extract_tb(error.__traceback__)
+    stack = " > ".join(f"{frame.filename}:{frame.lineno}:{frame.name}" for frame in frames)
+    logger.error("run_id=%s phase=%s error_type=%s stack=%s", run_id, phase,
+                 type(error).__name__, stack)
 
 
 class RunPhase(StrEnum):
@@ -147,7 +158,7 @@ class RunCoordinator:
                             lambda request_id: self._repository.mark_input_consumed(
                                 run.owner_user_id, run.id, request_id))
                         if handle.cancel_requested:
-                            owner_loop.call_soon(agent.abort)
+                            agent.abort_or_on_start()
 
                     def close_inputs() -> None:
                         with self._lock:
@@ -185,7 +196,8 @@ class RunCoordinator:
                 run.owner_user_id, run.id, status, result.stop_reason.value,
                 summary, new_messages,
             )
-        except Exception:
+        except Exception as error:
+            _log_worker_error(run.id, "execute", error)
             # Persistence may be unavailable; leave a nonterminal run for recovery
             # instead of reporting an uncommitted successful result.
             try:
@@ -195,8 +207,9 @@ class RunCoordinator:
                     "needs_reconciliation" if steps["unknown"] else "failed",
                     "EXECUTION_FAILED", {"error": "EXECUTION_FAILED", "steps": steps}, (),
                 )
-            except Exception:
-                pass
+            except Exception as settlement_error:
+                _log_worker_error(run.id, "settle_after_failure", settlement_error)
+                raise
         finally:
             with self._lock:
                 self._handles[run.id].phase = RunPhase.SETTLED
@@ -239,7 +252,7 @@ class RunCoordinator:
             if created and record.reason is None and handle is not None:
                 handle.cancel_requested = True
                 if handle.phase is RunPhase.RUNNING and handle.loop is not None and handle.agent is not None:
-                    handle.loop.call_soon_threadsafe(handle.agent.abort)
+                    handle.loop.call_soon_threadsafe(handle.agent.abort_or_on_start)
             return record
 
     def submit_input(self, run_id: str, mode: str, message: str) -> Future[None]:

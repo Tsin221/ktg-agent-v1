@@ -8,9 +8,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from threading import Event
 import sqlite3
+import logging
 from typing import Any, cast
 
-from ktg_agent.core.events import EventSink
+from ktg_agent.core.events import AgentEvent, AgentEventType, EventSink
 from ktg_agent.core.agent import Agent
 from ktg_agent.core.loop import AgentLoop, AgentRunResult
 from ktg_agent.core.messages import (
@@ -177,6 +178,42 @@ def test_provider_and_storage_failure_never_complete(tmp_path: Path) -> None:
     assert not any(item.run_id == next_run.id for item in repo.list_messages("id:7", session.id).items)
 
 
+def test_execution_and_settlement_failures_are_diagnosed_and_recovered(
+    tmp_path: Path, caplog: Any,
+) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+
+    async def broken_executor(*_: Any) -> AgentRunResult:
+        raise RuntimeError("Bearer secret-token message body")
+
+    caplog.set_level(logging.ERROR)
+    coordinator = RunCoordinator(repo, broken_executor)
+    coordinator.schedule(run, "private question", "Bearer secret-token")
+    coordinator.close()
+    assert repo.get_run("id:7", run.id).status == "failed"  # type: ignore[union-attr]
+    assert f"run_id={run.id} phase=execute error_type=RuntimeError" in caplog.text
+    assert "secret-token" not in caplog.text
+    assert "private question" not in caplog.text
+
+    failing, _ = repo.admit_run("id:7", session.id, "r2", "h2", {})
+    def unavailable(owner_user_id: str, run_id: str, status: str, stop_reason: str,
+                    result_summary: JsonObject, messages: tuple[Message, ...]) -> RunRecord:
+        raise OSError("Bearer secret-token database unavailable")
+    repo.settle_run = unavailable  # type: ignore[method-assign]
+    coordinator = RunCoordinator(repo, broken_executor)
+    coordinator.schedule(failing, "private question", "Bearer secret-token")
+    coordinator.close()
+    assert repo.get_run("id:7", failing.id).status == "running"  # type: ignore[union-attr]
+    assert f"run_id={failing.id} phase=settle_after_failure error_type=OSError" in caplog.text
+    assert "secret-token" not in caplog.text
+    reopened = SessionRepository(path)
+    assert reopened.recover_interrupted_runs() == 1
+    assert reopened.get_run("id:7", failing.id).status == "needs_reconciliation"  # type: ignore[union-attr]
+
+
 def test_cancelled_provider_response_is_not_completed(tmp_path: Path) -> None:
     repo = SessionRepository(tmp_path / "sessions.sqlite3")
     session = repo.create_session("id:7")
@@ -310,6 +347,36 @@ def test_cancel_before_schedule_never_starts_provider(tmp_path: Path) -> None:
     assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]
 
 
+def test_cancel_during_starting_prevents_provider_call(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    provider = FakeProvider((turn("must not run"),))
+    delegate = query_executor(provider)
+    starting, release = Event(), Event()
+
+    async def paused_executor(run_id: str, message: str, history: tuple[Message, ...],
+                              page_context: JsonObject | None, authorization: str,
+                              sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+        starting.set()
+        await asyncio.to_thread(release.wait)
+        return await delegate(run_id, message, history, page_context, authorization, sink, register_agent)
+
+    coordinator = RunCoordinator(repo, paused_executor)
+    try:
+        coordinator.schedule(run, "question", "Bearer test")
+        assert starting.wait(5)
+        assert coordinator.phase(run.id) is RunPhase.STARTING
+        receipt = coordinator.admit_cancel("id:7", run.id, "cancel-1")
+        assert receipt.status == "accepted"
+    finally:
+        release.set()
+        coordinator.close()
+    assert provider.requests == ()
+    assert repo.get_run("id:7", run.id).status == "cancelled"  # type: ignore[union-attr]
+    assert repo.list_events("id:7", run.id).items[-1].type == "run_settled"
+
+
 def test_cancel_waits_for_started_write_and_preserves_outcome(tmp_path: Path) -> None:
     for outcome in (ToolStatus.SUCCEEDED, ToolStatus.FAILED, ToolStatus.UNKNOWN):
         started, release = Event(), Event()
@@ -403,6 +470,54 @@ def test_cancel_and_completion_commit_order(tmp_path: Path) -> None:
     assert created and no_op.reason == "already_settled"
     assert repo.last_event_seq("id:7", after.id) == before_seq
     assert repo.get_run("id:7", after.id).status == "completed"  # type: ignore[union-attr]
+
+
+def test_cancel_during_closing_preserves_verified_write_result(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+    closing, release = Event(), Event()
+
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      page_context: JsonObject | None, authorization: str,
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+        agent = Agent(AgentLoop(provider=FakeProvider(()), tool_registry=ToolRegistry(()),
+                                tool_runner=ToolRunner(ToolRegistry(())),
+                                model_config=ModelConfig("fake", 128)))
+        close_inputs = register_agent(agent)
+        sink(AgentEvent(run_id, 1, AgentEventType.TOOL_EXECUTION_START,
+                        {"tool_call_id": "write-1", "tool_name": "test.write", "effect": "write"}))
+        sink(AgentEvent(run_id, 2, AgentEventType.TOOL_EXECUTION_END,
+                        {"tool_call_id": "write-1", "effect": "write", "status": "succeeded",
+                         "operation_id": "op-1", "verification": {"checked": True}}))
+        close_inputs()
+        closing.set()
+        await asyncio.to_thread(release.wait)
+        final = AssistantMessage((TextBlock("completed action"),))
+        return AgentRunResult((UserMessage((TextBlock(message),)), final),
+                              FinalResponse(final, StopReason.COMPLETED, Usage(1, 1)), ())
+
+    coordinator = RunCoordinator(repo, execute)
+    try:
+        coordinator.schedule(run, "write", "Bearer test")
+        assert closing.wait(5)
+        assert coordinator.phase(run.id) is RunPhase.CLOSING
+        receipt = coordinator.admit_cancel("id:7", run.id, "cancel-1")
+        assert receipt.status == "accepted"
+    finally:
+        release.set()
+        coordinator.close()
+    saved = repo.get_run("id:7", run.id)
+    assert saved is not None and saved.status == "cancelled"
+    assert saved.result_summary is not None
+    steps = saved.result_summary["steps"]
+    assert isinstance(steps, dict)
+    completed = steps["completed"]
+    assert isinstance(completed, list) and isinstance(completed[0], dict)
+    assert completed[0]["operation_id"] == "op-1"
+    events = repo.list_events("id:7", run.id).items
+    assert [event.seq for event in events] == list(range(1, len(events) + 1))
+    assert events[-1].type == "run_settled"
 
 
 def test_input_accepted_before_cancel_is_resolved_and_later_input_is_rejected(

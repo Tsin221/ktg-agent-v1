@@ -32,7 +32,7 @@ const client = {
       throw new Error('network interrupted')
     }
     pointer.runId = `run-${sent.length}`
-    return { run_id: pointer.runId, status: 'running' }
+    return { run_id: pointer.runId, status: 'queued' }
   },
   subscribeRun: async options => { handlers = options; return new Promise(() => {}) },
   listInputs: async () => controls.filter(input => input.requestId).map(input => ({
@@ -103,6 +103,7 @@ assert.strictEqual(view.errorText({ response: { status: 500 } }, '提交状态�
 
 async function settle(number, answer) {
   const runId = `run-${number}`
+  if (view.activeRun.status === 'queued') handlers.onEvent({ type: 'agent_start', run_id: runId, payload: {} })
   handlers.onEvent({ type: 'message_end', run_id: runId, payload: { message: { content: [{ type: 'text', text: answer }] } } })
   assert.strictEqual(view.activeRun.status, 'running')
   handlers.onEvent({ type: 'tool_execution_end', run_id: runId, payload: { tool_call_id: 'tool', status: 'succeeded' } })
@@ -122,6 +123,12 @@ async function main() {
   assert.strictEqual(createCount, 1)
   assert.strictEqual(sent[0].sessionId, 'session-1')
   assert.deepStrictEqual(sent[0].pageContext.filters, { itemCode: 'A-01' })
+  assert.strictEqual(view.activeRun.status, 'queued')
+  assert.strictEqual(view.composerBusy, true)
+  handlers.onEvent({ type: 'agent_start', run_id: 'run-1', payload: {} })
+  assert.strictEqual(view.activeRun.status, 'running')
+  assert.strictEqual(view.canInput, true)
+  assert.strictEqual(view.composerBusy, false)
   view.draft = '追加查库存'
   await view.send()
   assert.strictEqual(controls[0].mode, 'follow_up')
@@ -135,7 +142,12 @@ async function main() {
   view.draft = '未被接受'
   await view.send()
   assert.strictEqual(view.draft, '未被接受')
-  assert.strictEqual(view.inputAttempt, null)
+  assert.strictEqual(view.inputAttempt.status, 'rejected')
+  assert.strictEqual(view.inputAttempt.reason, 'RUN_NOT_ACTIVE')
+  assert.strictEqual(view.displayedInputs.find(input => input.message === '未被接受').request_id,
+    view.inputAttempt.requestId)
+  assert.match(view.displayedInputs.find(input => input.message === '未被接受').status, /rejected/)
+  view.inputAttempt = null
   view.activeRun.status = 'running'
   inputFailure = new Error('network interrupted')
   view.draft = '回执不明'
@@ -199,6 +211,70 @@ async function main() {
   assert.strictEqual(view.pastInputs[0].status, 'not_consumed')
   assert.strictEqual(view.messages[1].text, '第一轮回答')
   assert.strictEqual(view.messages[1].results[0].kind, 'stock')
+  // A confirmed rejection keeps its original identity until the user chooses a new run.
+  for (const code of ['RUN_NOT_RUNNING', 'RUN_NOT_ACTIVE', 'REQUEST_ID_CONFLICT']) {
+    view.resetIdentity()
+    pointer = { sessionId: 'session-1', runId: 'run-1' }
+    view.sessionId = 'session-1'
+    view.activeRunId = 'run-1'
+    view.activeRun = { run_id: 'run-1', status: 'running' }
+    view.draft = `拒绝 ${code}`
+    inputFailure = { response: { status: 409, data: { error: { code } } } }
+    const before = controls.length
+    const runPosts = sent.length
+    await view.send()
+    const attempt = view.inputAttempt
+    assert.strictEqual(attempt.runId, 'run-1')
+    assert.strictEqual(attempt.message, `拒绝 ${code}`)
+    assert.strictEqual(attempt.status, code === 'REQUEST_ID_CONFLICT' ? 'conflict' : 'rejected')
+    assert.strictEqual(view.displayedInputs.find(input => input.request_id === attempt.requestId).status,
+      attempt.status)
+    assert.strictEqual(controls.length, before)
+    assert.strictEqual(sent.length, runPosts)
+    await view.send()
+    assert.strictEqual(controls.length, before)
+    assert.strictEqual(sent.length, runPosts)
+    if (code !== 'REQUEST_ID_CONFLICT') {
+      view.activeRun.status = 'cancelled'
+      view.resendInput(view.displayedInputs.find(input => input.request_id === attempt.requestId))
+      await new Promise(resolve => setImmediate(resolve))
+      assert.strictEqual(sent[sent.length - 1].message, attempt.message)
+      assert.notStrictEqual(sent[sent.length - 1].requestId, attempt.requestId)
+      assert.ok(view.pastInputs.some(input => input.request_id === attempt.requestId))
+    }
+  }
+  // Recovered server inputs resolve only their own pending draft, for live and terminal runs.
+  for (const status of ['running', 'completed']) {
+    view.resetIdentity()
+    pointer = { sessionId: 'session-1', runId: 'run-recovered' }
+    const attempt = { runId: 'run-recovered', requestId: `recovered-${status}`,
+      mode: 'follow_up', message: '已接受的输入' }
+    browserState.set('ktg-agent-view:7:session-1', JSON.stringify({ inputAttempt: attempt }))
+    api.getAgentRun = async runId => ({ run_id: runId, status })
+    let releaseInputs
+    client.listInputs = () => new Promise(resolve => { releaseInputs = resolve })
+    const boot = view.bootstrap()
+    while (!releaseInputs) await new Promise(resolve => setImmediate(resolve))
+    view.draft = '稍后写的新草稿'
+    releaseInputs([{ request_id: attempt.requestId, mode: attempt.mode,
+      message: attempt.message, status: 'consumed' }])
+    await boot
+    assert.strictEqual(view.inputAttempt, null)
+    assert.strictEqual(view.draft, '稍后写的新草稿')
+    assert.strictEqual(view.displayedInputs.filter(input => input.request_id === attempt.requestId).length, 1)
+    assert.strictEqual(view.runInputs[0].status, 'consumed')
+  }
+  view.resetIdentity()
+  pointer = { sessionId: 'session-1', runId: 'run-unconfirmed' }
+  const uncertain = { runId: 'run-unconfirmed', requestId: 'retry-after-refresh',
+    mode: 'follow_up', message: '回执丢失' }
+  browserState.set('ktg-agent-view:7:session-1', JSON.stringify({ inputAttempt: uncertain }))
+  api.getAgentRun = async runId => ({ run_id: runId, status: 'running' })
+  client.listInputs = async () => { throw new Error('read failed') }
+  await view.bootstrap()
+  assert.strictEqual(view.inputAttempt.requestId, uncertain.requestId)
+  assert.strictEqual(view.displayedInputs.find(input => input.request_id === uncertain.requestId).status,
+    'unconfirmed')
   console.log('agent assistant component state tests passed')
 }
 

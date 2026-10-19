@@ -75,7 +75,7 @@
           <div class="agent-message">{{ input.message }}</div>
           <div class="agent-input-status">
             {{ input.mode === 'steer' ? '调整方向' : '追加问题' }} · {{ inputStatusText(input) }}
-            <button v-if="input.status === 'not_consumed'" type="button" @click="resendInput(input)">作为新问题发送</button>
+            <button v-if="['not_consumed', 'rejected'].includes(input.status)" type="button" :disabled="composerBusy || canInput" @click="resendInput(input)">作为新问题发送</button>
             <button v-if="input.status === 'unconfirmed'" type="button" @click="retryInput">用同一请求重试</button>
           </div>
         </div>
@@ -192,7 +192,8 @@ export default {
     displayedInputs() {
       const inputs = [...this.pastInputs, ...this.runInputs]
       if (this.inputAttempt && !inputs.some(item => item.request_id === this.inputAttempt.requestId)) {
-        inputs.push({ ...this.inputAttempt, request_id: this.inputAttempt.requestId, status: 'unconfirmed' })
+        inputs.push({ ...this.inputAttempt, request_id: this.inputAttempt.requestId,
+          status: this.inputAttempt.status || 'unconfirmed' })
       }
       return visibleInputs(inputs, this.messages, this.activeRunId)
     },
@@ -338,6 +339,7 @@ export default {
           this.activeRun = run
           this.runInputs = await agentSession.listInputs(runId) || []
           if (epoch !== this.epoch) return
+          this.reconcileInputAttempt(runId, this.runInputs)
           if (isTerminalRun(run.status)) {
             const finalItems = await allMessages(sessionId)
             if (epoch !== this.epoch) return
@@ -389,6 +391,9 @@ export default {
           onEvent: event => {
             if (epoch !== this.epoch || event.run_id !== this.activeRunId) return
             if (['input_queued', 'input_consumed', 'input_not_consumed'].includes(event.type)) this.refreshInputs(epoch)
+            if (event.type === 'agent_start' && this.activeRun.status === 'queued') {
+              this.activeRun = { ...this.activeRun, status: 'running' }
+            }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
             if (event.type !== 'run_settled') this.progress = progressFromEvent(this.progress, event)
           },
@@ -397,11 +402,7 @@ export default {
             this.activeRun = snapshot.run
             this.messages = presentMessages(snapshot.messages.items)
             this.runInputs = snapshot.inputs
-            if (this.inputAttempt && this.runInputs.some(item => item.request_id === this.inputAttempt.requestId)) {
-              this.inputAttempt = null
-              this.draft = ''
-              this.saveLocalState()
-            }
+            this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
             if (isTerminalRun(snapshot.run.status)) {
               this.pendingQuestion = ''
               this.progress = { text: '', tools: {}}
@@ -438,6 +439,14 @@ export default {
       this.draft = example
       this.send()
     },
+    reconcileInputAttempt(runId, inputs) {
+      const attempt = this.inputAttempt
+      if (!attempt || attempt.runId !== runId ||
+          !inputs.some(item => item.request_id === attempt.requestId)) return
+      this.inputAttempt = null
+      if (this.draft === attempt.message) this.draft = ''
+      this.saveLocalState()
+    },
     async refreshInputs(epoch = this.epoch) {
       const runId = this.activeRunId
       if (!runId) return
@@ -445,11 +454,7 @@ export default {
         const inputs = await agentSession.listInputs(runId)
         if (epoch === this.epoch && runId === this.activeRunId && inputs) {
           this.runInputs = inputs
-          if (this.inputAttempt && inputs.some(item => item.request_id === this.inputAttempt.requestId)) {
-            this.inputAttempt = null
-            this.draft = ''
-            this.saveLocalState()
-          }
+          this.reconcileInputAttempt(runId, inputs)
         }
       } catch (error) {
         if (epoch === this.epoch) this.panelError = this.errorText(error, '输入状态读取失败，请稍后重试。')
@@ -481,7 +486,7 @@ export default {
       }
     },
     async retryInput() {
-      if (!this.inputAttempt) return
+      if (!this.inputAttempt || ['rejected', 'conflict'].includes(this.inputAttempt.status)) return
       await this.sendInput(true)
     },
     async retryPendingRun() {
@@ -513,7 +518,15 @@ export default {
       if (!text || (!this.canInput && !retry) || this.loading || this.sessionLoading) return
       if (this.inputAttempt && !retry &&
           (this.inputAttempt.message !== text || this.inputAttempt.mode !== this.inputMode)) {
-        this.panelError = '上一条输入的回执未确认，请先按原内容重试。'
+        this.panelError = this.inputAttempt.status === 'rejected'
+          ? '上一条输入已被本轮拒绝，请查看运行状态后决定是否作为新问题发送。'
+          : '上一条输入的回执未确认，请先按原内容重试。'
+        return
+      }
+      if (this.inputAttempt && ['rejected', 'conflict'].includes(this.inputAttempt.status)) {
+        this.panelError = this.inputAttempt.status === 'rejected'
+          ? '上一条输入已被本轮拒绝，请主动选择作为新问题发送。'
+          : '请求 ID 与已提交内容冲突，请查看输入状态。'
         return
       }
       const epoch = this.epoch
@@ -531,24 +544,23 @@ export default {
         this.runInputs = [...this.runInputs.filter(item => item.request_id !== attempt.requestId),
           { request_id: attempt.requestId, mode: attempt.mode, message: text, status: result.input_status }]
         this.inputAttempt = null
-        this.draft = ''
+        if (this.draft === attempt.message) this.draft = ''
         this.saveLocalState()
         await this.refreshInputs(epoch)
       } catch (error) {
         if (epoch !== this.epoch) return
         const code = error && error.response && error.response.data && error.response.data.error && error.response.data.error.code
-        if (error.response && error.response.status === 409 && code !== 'REQUEST_ID_CONFLICT') {
-          this.inputAttempt = null
+        if (error.response && error.response.status === 409 && ['RUN_NOT_RUNNING', 'RUN_NOT_ACTIVE'].includes(code)) {
+          this.inputAttempt = { ...attempt, status: 'rejected', reason: code }
           this.saveLocalState()
           this.panelError = '本轮当前不接收输入，内容已保留。请查看运行状态后决定是否作为新问题发送。'
+        } else if (code === 'REQUEST_ID_CONFLICT') {
+          this.inputAttempt = { ...attempt, status: 'conflict', reason: code }
+          this.saveLocalState()
+          this.panelError = this.errorText(error, '请求 ID 与已提交内容冲突，请查看输入状态。')
         } else {
           await this.refreshInputs(epoch)
-          const found = this.runInputs.find(item => item.request_id === attempt.requestId)
-          if (found) {
-            this.inputAttempt = null
-            this.draft = ''
-            this.saveLocalState()
-          } else this.panelError = this.errorText(error, '输入回执未确认；再次提交相同内容会沿用同一请求 ID。')
+          if (this.inputAttempt) this.panelError = this.errorText(error, '输入回执未确认；再次提交相同内容会沿用同一请求 ID。')
         }
         try {
           const run = await getAgentRun(runId)
@@ -559,7 +571,12 @@ export default {
       }
     },
     resendInput(input) {
-      if (input.status !== 'not_consumed' || !this.sessionId || this.composerBusy || this.canInput) return
+      if (!['not_consumed', 'rejected'].includes(input.status) || !this.sessionId || this.composerBusy || this.canInput) return
+      if (input.status === 'rejected' && this.inputAttempt && this.inputAttempt.requestId === input.request_id) {
+        this.pastInputs = [...this.pastInputs, { request_id: input.request_id, runId: input.runId,
+          mode: input.mode, message: input.message, status: 'rejected', reason: input.reason }]
+        this.inputAttempt = null
+      }
       this.draft = input.message
       this.pendingSubmission = null
       this.saveLocalState()
@@ -571,7 +588,9 @@ export default {
       if (this.canInput) return this.sendInput()
       if (!text || this.composerBusy) return
       if (this.inputAttempt) {
-        this.panelError = '上一条输入的回执未确认，请先用同一请求重试。'
+        this.panelError = this.inputAttempt.status === 'rejected'
+          ? '上一条输入已被本轮拒绝，请主动选择作为新问题发送。'
+          : '上一条输入的回执未确认，请先用同一请求重试。'
         return
       }
       if (this.activeRun && isTerminalRun(this.activeRun.status)) {

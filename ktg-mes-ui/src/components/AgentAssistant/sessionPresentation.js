@@ -100,5 +100,7 @@ export function inputStatusText(input) {
   if (input.status === 'queued') return '已排队，等待本轮处理'
   if (input.status === 'consumed') return '已进入本轮上下文'
   if (input.status === 'not_consumed') return '本轮未消费，可主动作为新问题发送'
+  if (input.status === 'rejected') return '本轮拒绝输入，可主动作为新问题发送'
+  if (input.status === 'conflict') return '请求 ID 与已提交内容冲突'
   return '回执未确认，请查询或用同一请求重试'
 }

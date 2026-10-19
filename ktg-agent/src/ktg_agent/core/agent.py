@@ -67,6 +67,7 @@ class Agent:
         self._idle.set()
         self._queue = InputQueue()
         self._cancellation: CancellationToken | None = None
+        self._abort_on_start = False
         self._publisher: EventPublisher | None = None
         self._accepting_inputs = False
         self._listeners: list[AgentListener] = []
@@ -126,6 +127,9 @@ class Agent:
         self._queue.on_consumed = self._input_consumed_handler
         self._unconsumed_inputs = ()
         self._cancellation = CancellationToken()
+        if self._abort_on_start:
+            self._cancellation.cancel()
+            self._abort_on_start = False
         self._publisher = EventPublisher(run_id, self._dispatch_event)
         self._accepting_inputs = True
         self._on_inputs_closed = on_inputs_closed
@@ -165,6 +169,12 @@ class Agent:
         self._cancellation.cancel()
         self.close_inputs()
         return True
+
+    def abort_or_on_start(self) -> None:
+        if self._cancellation is None:
+            self._abort_on_start = True
+        else:
+            self.abort()
 
     def close_inputs(self) -> None:
         if self._accepting_inputs:
