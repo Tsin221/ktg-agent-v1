@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 
 from ktg_agent.core.events import (
@@ -77,6 +77,46 @@ class RunLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRequestUsage:
+    call_id: str
+    turn: int
+    model: str
+    request_started: bool
+    status: str
+    usage_source: str
+    usage: Usage | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunUsage:
+    known_input_tokens: int = 0
+    known_output_tokens: int = 0
+    known_cached_input_tokens: int = 0
+    known_total_tokens: int = 0
+    unknown_request_count: int = 0
+    complete: bool = True
+
+
+@dataclass(slots=True)
+class _UsageAccumulator:
+    requests: list[ModelRequestUsage] = field(default_factory=list)
+
+    def record(self, request: ModelRequestUsage) -> None:
+        self.requests.append(request)
+
+    def snapshot(self) -> RunUsage:
+        known = [request.usage for request in self.requests if request.usage_source == "provider_reported"]
+        return RunUsage(
+            known_input_tokens=sum(usage.input_tokens for usage in known if usage is not None),
+            known_output_tokens=sum(usage.output_tokens for usage in known if usage is not None),
+            known_cached_input_tokens=sum(usage.cached_input_tokens for usage in known if usage is not None),
+            known_total_tokens=sum(usage.total_tokens for usage in known if usage is not None),
+            unknown_request_count=sum(request.usage_source == "unknown" for request in self.requests),
+            complete=all(request.usage_source != "unknown" for request in self.requests),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Final response, complete run-local history, and emitted event trace."""
 
@@ -85,6 +125,8 @@ class AgentRunResult:
     events: tuple[AgentEvent, ...]
     limit_reason: str | None = None
     unconsumed_inputs: tuple[QueuedInput, ...] = ()
+    model_requests: tuple[ModelRequestUsage, ...] = ()
+    usage: RunUsage = field(default_factory=RunUsage)
 
     @property
     def stop_reason(self) -> StopReason:
@@ -149,6 +191,7 @@ class AgentLoop:
         agent_status = "failed"
         turn = 0
         tool_calls_started = 0
+        usage_accumulator = _UsageAccumulator()
         try:
             while True:
                 if cancellation is not None and cancellation.is_cancelled:
@@ -159,6 +202,7 @@ class AgentLoop:
                         history=history,
                         turns=turn,
                         tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator,
                     )
                 limit_reason = self._next_model_limit(
                     started_at=started_at,
@@ -174,6 +218,7 @@ class AgentLoop:
                         reason=limit_reason,
                         turns=turn,
                         tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator,
                     )
 
                 turn += 1
@@ -182,6 +227,7 @@ class AgentLoop:
                     turn=turn,
                     history=history,
                     cancellation=cancellation,
+                    usage_accumulator=usage_accumulator,
                 )
 
                 if response.message is not None:
@@ -254,6 +300,7 @@ class AgentLoop:
                             ),
                             turns=turn,
                             tool_calls=tool_calls_started,
+                            usage_accumulator=usage_accumulator,
                         )
                     if cancellation is not None and cancellation.is_cancelled:
                         if close_inputs is not None:
@@ -263,6 +310,7 @@ class AgentLoop:
                             history=history,
                             turns=turn,
                             tool_calls=tool_calls_started,
+                            usage_accumulator=usage_accumulator,
                         )
                     if input_queue is not None and self._next_model_limit(
                         started_at=started_at, completed_turns=turn,
@@ -289,6 +337,7 @@ class AgentLoop:
                         history=history,
                         turns=turn,
                         tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator,
                     )
                 if input_queue is not None and not input_queue.is_empty and self._next_model_limit(
                     started_at=started_at, completed_turns=turn,
@@ -325,6 +374,8 @@ class AgentLoop:
                     messages=tuple(history),
                     final_response=response,
                     events=publisher.events,
+                    model_requests=tuple(usage_accumulator.requests),
+                    usage=usage_accumulator.snapshot(),
                 )
         except BaseException as exc:
             if close_inputs is not None:
@@ -518,11 +569,12 @@ class AgentLoop:
         history: list[Message],
         turns: int,
         tool_calls: int,
+        usage_accumulator: _UsageAccumulator,
     ) -> AgentRunResult:
         response = FinalResponse(
             message=None,
             stop_reason=StopReason.CANCELLED,
-            usage=Usage(input_tokens=0, output_tokens=0),
+            usage=None,
         )
         await AgentLoop._emit_agent_end_once(
             publisher,
@@ -537,6 +589,8 @@ class AgentLoop:
             messages=tuple(history),
             final_response=response,
             events=publisher.events,
+            model_requests=tuple(usage_accumulator.requests),
+            usage=usage_accumulator.snapshot(),
         )
 
     @staticmethod
@@ -547,11 +601,12 @@ class AgentLoop:
         reason: str,
         turns: int,
         tool_calls: int,
+        usage_accumulator: _UsageAccumulator,
     ) -> AgentRunResult:
         response = FinalResponse(
             message=None,
             stop_reason=StopReason.LIMIT,
-            usage=Usage(input_tokens=0, output_tokens=0),
+            usage=None,
         )
         await AgentLoop._emit_agent_end_once(
             publisher,
@@ -568,6 +623,8 @@ class AgentLoop:
             final_response=response,
             events=publisher.events,
             limit_reason=reason,
+            model_requests=tuple(usage_accumulator.requests),
+            usage=usage_accumulator.snapshot(),
         )
 
     async def _run_model_turn(
@@ -577,6 +634,7 @@ class AgentLoop:
         turn: int,
         history: list[Message],
         cancellation: CancellationSignal | None,
+        usage_accumulator: _UsageAccumulator,
     ) -> FinalResponse:
         await publisher.emit(AgentEventType.TURN_START, {"turn": turn})
         message_id = f"{publisher.events[0].run_id}:message:{turn}"
@@ -596,6 +654,15 @@ class AgentLoop:
                 "provider_reported" if reported_usage is not None else "unknown"
             )
             usage = reported_usage if request_started else Usage(0, 0)
+            usage_accumulator.record(ModelRequestUsage(
+                call_id=call_id,
+                turn=turn,
+                model=self._model_config.model,
+                request_started=request_started,
+                status=status,
+                usage_source=usage_source,
+                usage=usage,
+            ))
             await publisher.emit(AgentEventType.MODEL_REQUEST_SETTLED, {
                 "call_id": call_id,
                 "turn": turn,

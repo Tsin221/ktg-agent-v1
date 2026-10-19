@@ -8,6 +8,7 @@ import pytest
 
 from ktg_agent.core.events import AgentEvent, AgentEventType, ToolProgressPublisher
 from ktg_agent.core.loop import AgentLoop, AgentRunResult
+from ktg_agent.core.queues import InputQueue, InputMode
 from ktg_agent.core.messages import (
     AssistantMessage,
     JsonObject,
@@ -21,6 +22,7 @@ from ktg_agent.providers.base import (
     FinalResponse,
     ModelConfig,
     ProviderError,
+    RequestStarted,
     ResponseCompleted,
     TextDelta,
     ToolCallCompleted,
@@ -167,6 +169,125 @@ def test_started_request_without_usage_settles_with_null_counts() -> None:
     assert settled[0].payload["usage_source"] == "unknown"
     assert settled[0].payload["total_tokens"] is None
     assert result.stop_reason is StopReason.COMPLETED
+    assert result.usage.unknown_request_count == 1
+    assert result.usage.complete is False
+
+
+def test_run_usage_counts_each_request_once_across_tool_turn_and_follow_up() -> None:
+    call = ToolCall("call-1", "test.lookup", {"value": 7})
+    first = FinalResponse(AssistantMessage((call,)), StopReason.TOOL_CALL, Usage(10, 3, 4))
+    second = FinalResponse(AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, Usage(5, 2, 1))
+    third = FinalResponse(AssistantMessage((TextBlock("follow up"),)), StopReason.COMPLETED, Usage(8, 6, 2))
+    provider = FakeProvider([
+        ScriptedTurn((UsageReported(Usage(10, 3, 4)), UsageReported(Usage(10, 3, 4)), ResponseCompleted(first))),
+        ScriptedTurn((ResponseCompleted(second),)),
+        ScriptedTurn((ResponseCompleted(third),)),
+    ])
+    queue = InputQueue()
+    queue.enqueue(InputMode.FOLLOW_UP, UserMessage((TextBlock("more"),)), None)
+    loop = make_loop(provider, RecordingTool())
+
+    result = asyncio.run(loop.run(
+        run_id="run-1", messages=(UserMessage((TextBlock("start"),)),), input_queue=queue,
+    ))
+
+    assert [request.call_id for request in result.model_requests] == [
+        "run-1:model:1", "run-1:model:2", "run-1:model:3",
+    ]
+    assert result.usage.known_input_tokens == 23
+    assert result.usage.known_output_tokens == 11
+    assert result.usage.known_cached_input_tokens == 7
+    assert result.usage.known_total_tokens == 34
+    assert result.usage.unknown_request_count == 0
+    assert result.usage.complete is True
+    assert result.final_response.usage == Usage(8, 6, 2)
+
+
+def test_zero_usage_and_unknown_usage_have_distinct_run_results() -> None:
+    provider = FakeProvider([
+        ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((TextBlock("zero"),)), StopReason.COMPLETED, Usage(0, 0),
+        )),)),
+    ])
+    result = run(make_loop(provider))
+    assert result.usage.known_total_tokens == 0
+    assert result.usage.complete is True
+    assert result.model_requests[0].usage_source == "provider_reported"
+
+
+def test_cancelled_before_request_has_no_unknown_usage() -> None:
+    class Cancelled:
+        is_cancelled = True
+
+    provider = FakeProvider([ScriptedTurn((ResponseCompleted(FinalResponse(
+        None, StopReason.CANCELLED, Usage(0, 0),
+    )),))])
+    loop = make_loop(provider)
+    result = asyncio.run(loop.run(
+        run_id="run-1", messages=(UserMessage((TextBlock("start"),)),),
+        cancellation=Cancelled(),
+    ))
+
+    assert provider.requests == ()
+    assert result.model_requests == ()
+    assert result.usage.complete is True
+    assert result.usage.unknown_request_count == 0
+    assert result.final_response.usage is None
+
+
+def test_provider_cancelled_before_dispatch_records_not_started() -> None:
+    class PreDispatchCancelled:
+        async def stream(self, request: Any) -> Any:
+            yield ResponseCompleted(FinalResponse(None, StopReason.CANCELLED))
+
+    registry = ToolRegistry(())
+    loop = AgentLoop(provider=PreDispatchCancelled(), tool_registry=registry,
+                     tool_runner=ToolRunner(registry), model_config=ModelConfig("fake-model", 128))
+
+    result = run(loop)
+
+    assert result.model_requests[0].usage_source == "not_started"
+    assert result.model_requests[0].usage == Usage(0, 0)
+    assert result.usage.complete is True
+    assert result.usage.unknown_request_count == 0
+
+
+def test_blocked_tail_keeps_text_live_and_settles_usage_before_run_end() -> None:
+    text_sent = asyncio.Event()
+    release_tail = asyncio.Event()
+
+    class BlockingProvider:
+        async def stream(self, request: Any) -> Any:
+            yield RequestStarted()
+            yield TextDelta("live")
+            text_sent.set()
+            await release_tail.wait()
+            yield UsageReported(Usage(4, 2, 1))
+            yield ResponseCompleted(FinalResponse(
+                AssistantMessage((TextBlock("live"),)), StopReason.COMPLETED, Usage(4, 2, 1),
+            ))
+
+    observed: list[AgentEvent] = []
+    registry = ToolRegistry(())
+    loop = AgentLoop(provider=BlockingProvider(), tool_registry=registry,
+                     tool_runner=ToolRunner(registry), model_config=ModelConfig("fake-model", 128),
+                     event_sink=observed.append)
+
+    async def scenario() -> AgentRunResult:
+        task = asyncio.create_task(loop.run(
+            run_id="run-1", messages=(UserMessage((TextBlock("start"),)),),
+        ))
+        await text_sent.wait()
+        assert AgentEventType.MESSAGE_UPDATE in [event.type for event in observed]
+        assert AgentEventType.MODEL_REQUEST_SETTLED not in [event.type for event in observed]
+        release_tail.set()
+        return await task
+
+    result = asyncio.run(scenario())
+    types = event_types(result)
+    assert types.index(AgentEventType.MODEL_REQUEST_SETTLED) < types.index(AgentEventType.TURN_END)
+    assert types.index(AgentEventType.TURN_END) < types.index(AgentEventType.AGENT_END)
+    assert result.usage.known_total_tokens == 6
 
 
 def test_plain_text_response_returns_final_message_and_ordered_events() -> None:

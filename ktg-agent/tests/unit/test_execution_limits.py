@@ -285,6 +285,9 @@ def test_model_turn_limit_stops_before_another_provider_request() -> None:
     assert result.stop_reason is StopReason.LIMIT
     assert result.limit_reason == "max_model_turns"
     assert result.events[-1].payload["limit_reason"] == "max_model_turns"
+    assert result.usage.known_total_tokens == 2
+    assert result.model_requests[0].usage_source == "provider_reported"
+    assert result.final_response.usage is None
 
 
 def test_tool_call_limit_does_not_start_excess_calls() -> None:
@@ -348,6 +351,9 @@ def test_total_time_limit_stops_before_first_model_request() -> None:
     assert provider.requests == ()
     assert result.limit_reason == "max_run_seconds"
     assert result.events[-1].payload["limit_reason"] == "max_run_seconds"
+    assert result.model_requests == ()
+    assert result.usage.complete is True
+    assert result.usage.known_total_tokens == 0
 
 
 def test_total_time_limit_reached_during_model_turn_starts_no_tools() -> None:
@@ -385,6 +391,7 @@ def test_total_time_limit_reached_during_model_turn_starts_no_tools() -> None:
     assert AgentEventType.TOOL_EXECUTION_START not in {
         event.type for event in result.events
     }
+    assert result.usage.known_total_tokens == 2
 
 
 def test_total_time_limit_stops_later_tools_in_a_sequential_batch() -> None:
