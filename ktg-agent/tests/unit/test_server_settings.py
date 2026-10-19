@@ -44,6 +44,27 @@ def test_service_does_not_force_optional_temperature(
     assert service._model_config.temperature is None
 
 
+def test_token_limit_configuration_reaches_both_service_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_environment(monkeypatch)
+    monkeypatch.delenv("AGENT_MAX_TOTAL_TOKENS", raising=False)
+    assert create_service(Settings.from_env())._limits.max_total_tokens is None
+    monkeypatch.setenv("AGENT_MAX_TOTAL_TOKENS", "123")
+    service = create_service(Settings.from_env())
+    assert service._limits.max_total_tokens == 123
+
+
+@pytest.mark.parametrize("raw", ("", "0", "-1", "1.5", "invalid"))
+def test_invalid_token_limit_configuration_fails(
+    monkeypatch: pytest.MonkeyPatch, raw: str,
+) -> None:
+    _set_valid_environment(monkeypatch)
+    monkeypatch.setenv("AGENT_MAX_TOTAL_TOKENS", raw)
+    with pytest.raises(RuntimeError, match="AGENT_MAX_TOTAL_TOKENS"):
+        Settings.from_env()
+
+
 def test_session_database_uses_separate_absolute_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

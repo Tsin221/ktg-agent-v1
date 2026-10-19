@@ -2,10 +2,47 @@ import asyncio
 from collections.abc import Mapping
 
 from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, ToolCall
+from ktg_agent.core.loop import RunLimits
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
+
+
+def test_legacy_query_returns_token_stop_reasons_without_running_tools() -> None:
+    async def scenario(usage: Usage | None) -> None:
+        async def transport(
+            _url: str, _headers: Mapping[str, str], _params: Mapping[str, object],
+            _timeout_seconds: float,
+        ) -> object:
+            return {"code": 200, "user": {"userId": 7, "userName": "alice"}}
+
+        provider = FakeProvider([ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((ToolCall("call-1", "ktg_query_stock", {"item_code": "A-01"}),)),
+            StopReason.TOOL_CALL, usage,
+        )),))])
+        service = QueryService(
+            provider=provider, model_config=ModelConfig("fake", 64),
+            ktg_client_factory=lambda authorization: KTGClient(
+                base_url="http://127.0.0.1:8080", authorization=authorization,
+                transport=transport,
+            ),
+            limits=RunLimits(max_total_tokens=2),
+        )
+        result = await service.query(message="stock", authorization="Bearer test")
+        assert result["stop_reason"] == ("limit" if usage else "error")
+        assert result.get("limit_reason") == ("max_total_tokens" if usage else None)
+        assert result.get("error_code") == ("MODEL_USAGE_UNAVAILABLE" if usage is None else None)
+        assert result["results"] == [{
+            "execution_status": "not_executed",
+            "stop_reason": "limit" if usage else "error",
+            **({"limit_reason": "max_total_tokens"} if usage else
+               {"error_code": "MODEL_USAGE_UNAVAILABLE"}),
+        }]
+        assert len(provider.requests) == 1
+
+    asyncio.run(scenario(Usage(1, 1)))
+    asyncio.run(scenario(None))
 
 
 def test_query_service_validates_identity_runs_tool_and_returns_business_results() -> None:

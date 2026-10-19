@@ -13,7 +13,7 @@ from typing import Any, cast
 
 from ktg_agent.core.events import AgentEvent, AgentEventType, EventSink
 from ktg_agent.core.agent import Agent
-from ktg_agent.core.loop import AgentLoop, AgentRunResult
+from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
 from ktg_agent.core.messages import (
     AssistantMessage, JsonObject, Message, StopReason, TextBlock, ToolCall, ToolResultMessage,
     UserMessage,
@@ -158,6 +158,10 @@ def test_provider_and_storage_failure_never_complete(tmp_path: Path) -> None:
     coordinator.schedule(failed, "question", "Bearer test")
     coordinator.close()
     assert repo.get_run("id:7", failed.id).status == "failed"  # type: ignore[union-attr]
+    failed_record = repo.get_run("id:7", failed.id)
+    assert failed_record is not None and failed_record.stop_reason == "error"
+    assert failed_record.result_summary is not None
+    assert failed_record.result_summary["error_code"] == "UPSTREAM"
     assert repo.list_events("id:7", failed.id).items[-1].payload["status"] == "failed"
 
     original = repo.settle_run
@@ -449,6 +453,57 @@ def test_cancel_waits_for_started_write_and_preserves_outcome(tmp_path: Path) ->
         assert writes == ["write-1"]
         assert len(provider.requests) == 1
         assert repo.list_events("id:7", run.id).items[-1].type == "run_settled"
+
+
+def test_run_deadline_after_issued_write_preserves_unknown_reconciliation(tmp_path: Path) -> None:
+    now = [0.0]
+    started: list[str] = []
+
+    async def write(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+        started.append(context.tool_call_id)
+        now[0] = 2.0
+        return ToolResult(
+            "write result unknown", status=ToolStatus.UNKNOWN,
+            error_code="RESULT_UNKNOWN", operation_id="op-1",
+            details={"outcome": "unknown"},
+        )
+
+    registry = ToolRegistry((ToolDefinition(
+        name="test.write", version="1.0", description="write", label="write",
+        input_schema={"type": "object", "properties": {}}, output_schema=None,
+        required_permissions=(), effect=ToolEffect.WRITE,
+        execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=1,
+        execute=write,
+    ),))
+    provider = FakeProvider((ScriptedTurn((ResponseCompleted(FinalResponse(
+        AssistantMessage((ToolCall("write-1", "test.write", {}),
+                          ToolCall("write-2", "test.write", {}))),
+        StopReason.TOOL_CALL, Usage(1, 1),
+    )),)),))
+    repo = SessionRepository(tmp_path / "deadline.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      _page_context: JsonObject | None, _authorization: str,
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+        loop = AgentLoop(provider=provider, tool_registry=registry,
+                         tool_runner=ToolRunner(registry),
+                         model_config=ModelConfig("fake", 128), event_sink=sink,
+                         limits=RunLimits(max_run_seconds=1), clock=lambda: now[0])
+        agent = Agent(loop)
+        return await agent.prompt(message, run_id=run_id, history=history,
+                                  on_inputs_closed=register_agent(agent))
+
+    coordinator = RunCoordinator(repo, execute)
+    coordinator.schedule(run, "write", "Bearer test")
+    coordinator.close()
+    saved = repo.get_run("id:7", run.id)
+    assert saved is not None and saved.result_summary is not None
+    assert saved.status == "needs_reconciliation"
+    assert saved.result_summary["limit_reason"] == "max_run_seconds"
+    assert started == ["write-1"]
+    assert len(provider.requests) == 1
 
 
 def test_cancel_and_completion_commit_order(tmp_path: Path) -> None:

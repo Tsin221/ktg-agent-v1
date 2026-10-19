@@ -9,6 +9,8 @@ from pathlib import Path
 from threading import Barrier, Event
 from typing import cast
 
+import pytest
+
 from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, UserMessage
 from ktg_agent.ktg import KTGClient
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, RequestStarted, ResponseCompleted, Usage
@@ -18,17 +20,18 @@ from ktg_agent.sessions.repository import SessionRepository
 from test_session_cancel_http import served
 from test_session_http import FakeClient, request
 from ktg_agent.core.events import AgentEvent, EventSink
-from ktg_agent.core.loop import AgentRunResult
+from ktg_agent.core.loop import AgentRunResult, RunLimits
 from ktg_agent.core.messages import JsonObject, Message
 from ktg_agent.sessions.coordinator import RegisterAgent
 
 
 class PausedProvider:
-    def __init__(self) -> None:
+    def __init__(self, usage: Usage | None = Usage(1, 1)) -> None:
         self.started = Event()
         self.release = asyncio.Event()
         self.owner_loop: asyncio.AbstractEventLoop | None = None
         self.requests: list[ProviderRequest] = []
+        self.usage = usage
 
     def stream(self, request: ProviderRequest) -> AsyncIterator[ModelEvent]:
         async def events() -> AsyncIterator[ModelEvent]:
@@ -39,9 +42,52 @@ class PausedProvider:
                 await self.release.wait()
             yield RequestStarted()
             yield ResponseCompleted(FinalResponse(
-                AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, Usage(1, 1),
+                AssistantMessage((TextBlock("answer"),)), StopReason.COMPLETED, self.usage,
             ))
         return events()
+
+
+@pytest.mark.parametrize("usage, expected_status, expected_reason", (
+    (Usage(1, 1), "limit", "limit"),
+    (None, "error", "run_failed"),
+))
+def test_token_policy_persists_unconsumed_follow_up(
+    tmp_path: Path, usage: Usage | None, expected_status: str, expected_reason: str,
+) -> None:
+    provider = PausedProvider(usage)
+    repo = SessionRepository(tmp_path / "sessions.sqlite3")
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "run-1", "hash-1", {})
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128),
+        ktg_client_factory=lambda token: cast(KTGClient, FakeClient(token)),
+        limits=RunLimits(max_total_tokens=2),
+    )
+    coordinator = RunCoordinator(repo, lambda run_id, message, history, page_context,
+                                  authorization, sink, register_agent: service.run_session(
+        run_id=run_id, message=message, history=history, page_context=page_context,
+        authorization=authorization, event_sink=sink, on_agent_ready=register_agent,
+    ))
+    path = f"/agent-api/v1/runs/{run.id}/inputs"
+    with served(repo, coordinator) as server:
+        coordinator.schedule(run, "first", "Bearer alice")
+        assert provider.started.wait(5)
+        assert request(server, "POST", path, body={
+            "request_id": "next", "mode": "follow_up", "message": "later",
+        })[0] == 202
+        assert provider.owner_loop is not None
+        provider.owner_loop.call_soon_threadsafe(provider.release.set)
+        coordinator.close()
+    saved = repo.get_run("id:7", run.id)
+    assert saved is not None and saved.result_summary is not None
+    assert saved.stop_reason == expected_status
+    assert saved.result_summary.get("limit_reason" if usage else "error_code") == (
+        "max_total_tokens" if usage else "MODEL_USAGE_UNAVAILABLE"
+    )
+    assert [(item.status, item.reason) for item in repo.list_inputs("id:7", run.id).items] == [
+        ("not_consumed", expected_reason),
+    ]
+    assert len(provider.requests) == 1
 
 
 def test_input_http_concurrent_retry_pagination_and_history(tmp_path: Path) -> None:

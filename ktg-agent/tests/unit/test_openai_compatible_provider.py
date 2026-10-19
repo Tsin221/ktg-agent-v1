@@ -7,7 +7,10 @@ from typing import cast
 import pytest
 
 from ktg_agent.core.messages import StopReason, TextBlock, ToolCall, UserMessage
-from ktg_agent.providers.base import ModelConfig, ProviderError, ProviderRequest, RequestStarted, ResponseCompleted, TextDelta, Usage, UsageReported
+from ktg_agent.core.agent import CancellationToken
+from ktg_agent.core.loop import AgentLoop, RunLimits
+from ktg_agent.tools import ToolRegistry, ToolRunner
+from ktg_agent.providers.base import FinalResponse, ModelConfig, ProviderError, ProviderRequest, RequestStarted, ResponseCompleted, TextDelta, Usage, UsageReported
 from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
 
 
@@ -264,7 +267,7 @@ def test_read_timeout_and_cancellation_close_connection(monkeypatch: pytest.Monk
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         try:
             port = server.sockets[0].getsockname()[1]
-            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1", timeout_seconds=0.3)
+            provider = OpenAICompatibleProvider(api_key="key", base_url=f"http://127.0.0.1:{port}/v1", timeout_seconds=1.0)
             signal = Signal()
             events: list[object] = []
 
@@ -290,3 +293,103 @@ def test_read_timeout_and_cancellation_close_connection(monkeypatch: pytest.Monk
 
     asyncio.run(scenario(False))
     asyncio.run(scenario(True))
+
+
+def test_absolute_run_deadline_closes_stalled_stream_and_preserves_usage() -> None:
+    async def scenario() -> None:
+        closed = asyncio.Event()
+
+        @asynccontextmanager
+        async def stalled(*_args: object) -> AsyncIterator[AsyncIterator[bytes]]:
+            async def chunks() -> AsyncIterator[bytes]:
+                yield frame({"choices": [], "usage": {
+                    "prompt_tokens": 2, "completion_tokens": 1,
+                }})
+                await asyncio.Event().wait()
+                yield b"unreachable"
+            try:
+                yield chunks()
+            finally:
+                closed.set()
+
+        provider = OpenAICompatibleProvider(
+            api_key="key", base_url="http://localhost/v1",
+            timeout_seconds=2, transport=stalled,
+        )
+        original = request()
+        bounded = ProviderRequest(original.messages, original.tools, original.config,
+                                  remaining_run_seconds=0.15)
+        events = [event async for event in provider.stream(bounded)]
+        assert closed.is_set()
+        assert events[-1] == ResponseCompleted(FinalResponse(None, StopReason.LIMIT, Usage(2, 1)))
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_during_model_connection_closes_transport() -> None:
+    async def scenario() -> None:
+        entering = asyncio.Event()
+        closed = asyncio.Event()
+
+        @asynccontextmanager
+        async def blocked(*_args: object) -> AsyncIterator[AsyncIterator[bytes]]:
+            entering.set()
+            try:
+                await asyncio.Event().wait()
+                yield cast(AsyncIterator[bytes], None)
+            finally:
+                closed.set()
+
+        provider = OpenAICompatibleProvider(
+            api_key="key", base_url="http://localhost/v1",
+            transport=blocked,
+        )
+        registry = ToolRegistry(())
+        loop = AgentLoop(provider=provider, tool_registry=registry,
+                         tool_runner=ToolRunner(registry),
+                         model_config=ModelConfig("test-model", 32),
+                         limits=RunLimits(max_run_seconds=2))
+        signal = CancellationToken()
+        task = asyncio.create_task(loop.run(
+            run_id="run-1", messages=(UserMessage((TextBlock("query"),)),),
+            cancellation=signal,
+        ))
+        await asyncio.wait_for(entering.wait(), 1)
+        signal.cancel()
+        result = await asyncio.wait_for(task, 1)
+        assert result.stop_reason is StopReason.CANCELLED
+        assert result.usage.unknown_request_count == 1
+        assert closed.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_continuous_model_deltas_cannot_extend_run_deadline() -> None:
+    async def scenario() -> None:
+        closed = asyncio.Event()
+
+        @asynccontextmanager
+        async def continuous(*_args: object) -> AsyncIterator[AsyncIterator[bytes]]:
+            async def chunks() -> AsyncIterator[bytes]:
+                while True:
+                    await asyncio.sleep(0.01)
+                    yield frame(choice({"content": "x"}))
+            try:
+                yield chunks()
+            finally:
+                closed.set()
+
+        provider = OpenAICompatibleProvider(
+            api_key="key", base_url="http://localhost/v1",
+            timeout_seconds=2, transport=continuous,
+        )
+        original = request()
+        bounded = ProviderRequest(original.messages, original.tools, original.config,
+                                  remaining_run_seconds=0.15)
+        events = [event async for event in provider.stream(bounded)]
+        assert any(isinstance(event, TextDelta) for event in events)
+        assert isinstance(events[-1], ResponseCompleted)
+        assert events[-1].response.stop_reason is StopReason.LIMIT
+        assert closed.is_set()
+
+    asyncio.run(scenario())

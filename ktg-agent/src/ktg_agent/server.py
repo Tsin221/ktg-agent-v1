@@ -15,7 +15,7 @@ from threading import BoundedSemaphore, Event
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from ktg_agent.core.events import EventSink
-from ktg_agent.core.loop import AgentRunResult
+from ktg_agent.core.loop import AgentRunResult, RunLimits
 from ktg_agent.core.messages import JsonObject, Message
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
@@ -41,6 +41,7 @@ class Settings:
     session_db_path: str = ""
     enable_item_receipt: bool = False
     enable_production_issue: bool = False
+    max_total_tokens: int | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -71,6 +72,13 @@ class Settings:
             raise RuntimeError("AGENT_PORT must be an integer") from exc
         if not 1 <= port <= 65535:
             raise RuntimeError("AGENT_PORT must be between 1 and 65535")
+        raw_tokens = os.environ.get("AGENT_MAX_TOTAL_TOKENS")
+        try:
+            max_total_tokens = int(raw_tokens) if raw_tokens is not None else None
+        except ValueError as exc:
+            raise RuntimeError("AGENT_MAX_TOTAL_TOKENS must be a positive integer") from exc
+        if max_total_tokens is not None and max_total_tokens <= 0:
+            raise RuntimeError("AGENT_MAX_TOTAL_TOKENS must be a positive integer")
         return cls(
             model_api_key=api_key,
             model_base_url=model_base_url,
@@ -82,6 +90,7 @@ class Settings:
             session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
+            max_total_tokens=max_total_tokens,
         )
 
 
@@ -124,6 +133,9 @@ def create_service(settings: Settings) -> QueryService:
         ktg_client_factory=client_factory,
         inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
         inventory_actions=actions,
+        limits=RunLimits(max_model_turns=8, max_tool_calls=12,
+                         max_run_seconds=90, max_parallel_reads=3,
+                         max_total_tokens=settings.max_total_tokens),
     )
 
 

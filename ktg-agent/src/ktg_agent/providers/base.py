@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Protocol, TypeAlias
 
 from ktg_agent.core.messages import (
@@ -63,6 +64,7 @@ class ProviderRequest:
     config: ModelConfig
     cancellation: CancellationSignal | None = None
     call_id: str | None = None
+    remaining_run_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.messages, tuple) or not self.messages:
@@ -71,6 +73,13 @@ class ProviderRequest:
             raise TypeError("tools must be a tuple")
         if self.call_id is not None:
             _required_text(self.call_id, "model call id")
+        if self.remaining_run_seconds is not None and (
+            isinstance(self.remaining_run_seconds, bool)
+            or not isinstance(self.remaining_run_seconds, int | float)
+            or not isfinite(self.remaining_run_seconds)
+            or self.remaining_run_seconds <= 0
+        ):
+            raise ValueError("remaining run seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)

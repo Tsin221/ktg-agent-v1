@@ -58,6 +58,7 @@ class QueryService:
         ktg_client_factory: KTGClientFactory,
         inventory_store: InventoryStore | None = None,
         inventory_actions: frozenset[str] = frozenset(),
+        limits: RunLimits | None = None,
     ) -> None:
         self._provider = provider
         self._model_config = model_config
@@ -65,6 +66,10 @@ class QueryService:
         self._preview_store = PreviewStore(ttl_seconds=600)
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
+        self._limits = limits or RunLimits(
+            max_model_turns=8, max_tool_calls=12,
+            max_run_seconds=90, max_parallel_reads=3,
+        )
         self._registry = ToolRegistry(
             (*build_query_tools(), *build_workorder_tools(self._preview_store),
              *(build_inventory_tools(inventory_store, inventory_actions) if inventory_store else ()))
@@ -84,12 +89,7 @@ class QueryService:
             tool_registry=self._registry,
             tool_runner=ToolRunner(self._registry),
             model_config=self._model_config,
-            limits=RunLimits(
-                max_model_turns=8,
-                max_tool_calls=12,
-                max_run_seconds=90,
-                max_parallel_reads=3,
-            ),
+            limits=self._limits,
         )
         run_id = str(uuid4())
         result = await loop.run(
@@ -118,13 +118,18 @@ class QueryService:
                 business_results.append(item.details)
 
         username = identity.get("userName")
-        return {
+        response: JsonObject = {
             "run_id": run_id,
             "answer": answer,
             "stop_reason": result.stop_reason.value,
             "current_user": username if isinstance(username, str) else "",
             "results": business_results,
         }
+        if result.limit_reason is not None:
+            response["limit_reason"] = result.limit_reason
+        if result.error_code is not None:
+            response["error_code"] = result.error_code
+        return response
 
     async def run_session(
         self, *, run_id: str, message: str, history: tuple[Message, ...],
@@ -141,8 +146,7 @@ class QueryService:
             tool_runner=ToolRunner(self._registry),
             model_config=self._model_config,
             event_sink=event_sink,
-            limits=RunLimits(max_model_turns=8, max_tool_calls=12,
-                             max_run_seconds=90, max_parallel_reads=3),
+            limits=self._limits,
         )
         system_prompt = SYSTEM_PROMPT
         if page_context is not None:

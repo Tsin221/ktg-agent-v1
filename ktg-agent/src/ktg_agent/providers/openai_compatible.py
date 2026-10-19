@@ -145,70 +145,83 @@ class OpenAICompatibleProvider:
         finish_reason: str | None = None
         usage: Usage | None = None
         done = False
-        async with self._transport(
-            self._url,
-            {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
-            payload,
-            self._timeout_seconds,
-        ) as chunks:
-            iterator = aiter(chunks)
-            while not done:
-                chunk = await self._next_chunk(iterator, request)
-                if chunk is None:
-                    break
-                for data in frames.feed(chunk):
-                    if data == "[DONE]":
-                        done = True
-                        break
-                    try:
-                        frame = json.loads(data, parse_constant=_reject_json_constant)
-                    except (json.JSONDecodeError, ValueError) as exc:
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data is invalid JSON.") from exc
-                    if not isinstance(frame, dict):
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data must be an object.")
-                    frame_usage = self._parse_usage(frame)
-                    if frame_usage is not None:
-                        if usage is not None and usage != frame_usage:
-                            raise ProviderError("MODEL_INVALID_USAGE", "Model usage snapshots conflict.")
-                        usage = frame_usage
-                        yield UsageReported(usage)
-                    choices = frame.get("choices")
-                    if not isinstance(choices, list) or len(choices) > 1:
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream must contain at most one choice.")
-                    if not choices:
-                        if frame_usage is None:
-                            raise ProviderError("MODEL_INVALID_RESPONSE", "Empty model choices require usage.")
-                        continue
-                    if finish_reason is not None:
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model emitted a choice after finish reason.")
-                    choice = choices[0]
-                    if not isinstance(choice, dict) or choice.get("index") != 0:
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice index is invalid.")
-                    reason = choice.get("finish_reason")
-                    if reason is not None:
-                        if finish_reason is not None:
-                            raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice finished twice.")
-                        if reason not in ("stop", "tool_calls", "length"):
-                            raise ProviderError("MODEL_STOP_REASON", f"Unsupported model finish reason: {reason!r}.")
-                        finish_reason = reason
-                    delta = choice.get("delta")
-                    if not isinstance(delta, dict):
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice delta is invalid.")
-                    content = delta.get("content")
-                    if content is not None:
-                        if not isinstance(content, str):
-                            raise ProviderError("MODEL_INVALID_RESPONSE", "Model text delta is invalid.")
-                        if content:
-                            text_parts.append(content)
-                            yield TextDelta(content)
-                    raw_calls = delta.get("tool_calls", [])
-                    if not isinstance(raw_calls, list):
-                        raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool delta is invalid.")
-                    for raw_call in raw_calls:
-                        self._append_tool_delta(calls, raw_call)
+        run_timeout = request.remaining_run_seconds
+        timeout_seconds = min(self._timeout_seconds, run_timeout) if run_timeout is not None else self._timeout_seconds
+        run_deadline_first = run_timeout is not None and run_timeout <= self._timeout_seconds
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with self._transport(
+                    self._url,
+                    {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+                    payload,
+                    timeout_seconds,
+                ) as chunks:
+                    iterator = aiter(chunks)
+                    while not done:
+                        chunk = await self._next_chunk(iterator, request)
+                        if chunk is None:
+                            break
+                        for data in frames.feed(chunk):
+                            if data == "[DONE]":
+                                done = True
+                                break
+                            try:
+                                frame = json.loads(data, parse_constant=_reject_json_constant)
+                            except (json.JSONDecodeError, ValueError) as exc:
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data is invalid JSON.") from exc
+                            if not isinstance(frame, dict):
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model SSE data must be an object.")
+                            frame_usage = self._parse_usage(frame)
+                            if frame_usage is not None:
+                                if usage is not None and usage != frame_usage:
+                                    raise ProviderError("MODEL_INVALID_USAGE", "Model usage snapshots conflict.")
+                                usage = frame_usage
+                                yield UsageReported(usage)
+                            choices = frame.get("choices")
+                            if not isinstance(choices, list) or len(choices) > 1:
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream must contain at most one choice.")
+                            if not choices:
+                                if frame_usage is None:
+                                    raise ProviderError("MODEL_INVALID_RESPONSE", "Empty model choices require usage.")
+                                continue
+                            if finish_reason is not None:
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model emitted a choice after finish reason.")
+                            choice = choices[0]
+                            if not isinstance(choice, dict) or choice.get("index") != 0:
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice index is invalid.")
+                            reason = choice.get("finish_reason")
+                            if reason is not None:
+                                if finish_reason is not None:
+                                    raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice finished twice.")
+                                if reason not in ("stop", "tool_calls", "length"):
+                                    raise ProviderError("MODEL_STOP_REASON", f"Unsupported model finish reason: {reason!r}.")
+                                finish_reason = reason
+                            delta = choice.get("delta")
+                            if not isinstance(delta, dict):
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model choice delta is invalid.")
+                            content = delta.get("content")
+                            if content is not None:
+                                if not isinstance(content, str):
+                                    raise ProviderError("MODEL_INVALID_RESPONSE", "Model text delta is invalid.")
+                                if content:
+                                    text_parts.append(content)
+                                    yield TextDelta(content)
+                            raw_calls = delta.get("tool_calls", [])
+                            if not isinstance(raw_calls, list):
+                                raise ProviderError("MODEL_INVALID_RESPONSE", "Model tool delta is invalid.")
+                            for raw_call in raw_calls:
+                                self._append_tool_delta(calls, raw_call)
+                    if request.cancellation is not None and request.cancellation.is_cancelled:
+                        yield ResponseCompleted(FinalResponse(None, StopReason.CANCELLED, usage))
+                        return
+        except TimeoutError as exc:
             if request.cancellation is not None and request.cancellation.is_cancelled:
                 yield ResponseCompleted(FinalResponse(None, StopReason.CANCELLED, usage))
                 return
+            if run_deadline_first:
+                yield ResponseCompleted(FinalResponse(None, StopReason.LIMIT, usage))
+                return
+            raise ProviderError("MODEL_TIMEOUT", "Model request timed out.", retryable=True) from exc
         if not done or finish_reason is None:
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model stream ended without normal completion.")
         blocks: list[TextBlock | ToolCall] = []

@@ -15,6 +15,7 @@ from ktg_agent.core.agent import Agent
 from ktg_agent.core.events import AgentEvent, EventSink
 from ktg_agent.core.loop import AgentRunResult
 from ktg_agent.core.messages import JsonObject, JsonValue, Message, StopReason, TextBlock, ToolResultMessage
+from ktg_agent.providers.base import ProviderError
 from ktg_agent.sessions.repository import ControlRecord, RunRecord, SessionRepository
 
 type RegisterAgent = Callable[[Agent], Callable[[], None]]
@@ -192,6 +193,8 @@ class RunCoordinator:
             }
             if result.limit_reason is not None:
                 summary["limit_reason"] = result.limit_reason
+            if result.error_code is not None:
+                summary["error_code"] = result.error_code
             self._repository.settle_run(
                 run.owner_user_id, run.id, status, result.stop_reason.value,
                 summary, new_messages,
@@ -202,10 +205,18 @@ class RunCoordinator:
             # instead of reporting an uncommitted successful result.
             try:
                 steps = _write_steps(write_events, ())
+                if isinstance(error, ProviderError):
+                    failure_code = error.code
+                    stop_reason = StopReason.ERROR.value
+                else:
+                    failure_code = "EXECUTION_FAILED"
+                    stop_reason = "EXECUTION_FAILED"
                 self._repository.settle_run(
                     run.owner_user_id, run.id,
                     "needs_reconciliation" if steps["unknown"] else "failed",
-                    "EXECUTION_FAILED", {"error": "EXECUTION_FAILED", "steps": steps}, (),
+                    stop_reason,
+                    {"error": failure_code, "error_code": failure_code,
+                     "stop_reason": stop_reason, "steps": steps}, (),
                 )
             except Exception as settlement_error:
                 _log_worker_error(run.id, "settle_after_failure", settlement_error)

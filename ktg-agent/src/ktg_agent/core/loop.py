@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
+from math import isfinite
 from time import monotonic
+from typing import cast
 
 from ktg_agent.core.events import (
     AgentEvent,
@@ -27,6 +29,7 @@ from ktg_agent.core.queues import InputQueue, QueuedInput
 from ktg_agent.providers.base import (
     CancellationSignal,
     FinalResponse,
+    ModelEvent,
     ModelConfig,
     Provider,
     ProviderRequest,
@@ -58,6 +61,7 @@ class RunLimits:
     max_tool_calls: int = 128
     max_run_seconds: float = 300.0
     max_parallel_reads: int = 4
+    max_total_tokens: int | None = None
 
     def __post_init__(self) -> None:
         integer_limits = {
@@ -68,9 +72,16 @@ class RunLimits:
         for name, value in integer_limits.items():
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.max_total_tokens is not None and (
+            not isinstance(self.max_total_tokens, int)
+            or isinstance(self.max_total_tokens, bool)
+            or self.max_total_tokens <= 0
+        ):
+            raise ValueError("max_total_tokens must be a positive integer or None")
         if (
             not isinstance(self.max_run_seconds, int | float)
             or isinstance(self.max_run_seconds, bool)
+            or not isfinite(self.max_run_seconds)
             or self.max_run_seconds <= 0
         ):
             raise ValueError("max_run_seconds must be positive")
@@ -124,6 +135,7 @@ class AgentRunResult:
     final_response: FinalResponse
     events: tuple[AgentEvent, ...]
     limit_reason: str | None = None
+    error_code: str | None = None
     unconsumed_inputs: tuple[QueuedInput, ...] = ()
     model_requests: tuple[ModelRequestUsage, ...] = ()
     usage: RunUsage = field(default_factory=RunUsage)
@@ -204,11 +216,21 @@ class AgentLoop:
                         tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator,
                     )
+                checked_at = self._clock()
                 limit_reason = self._next_model_limit(
                     started_at=started_at,
                     completed_turns=turn,
                     tool_calls=tool_calls_started,
+                    usage=usage_accumulator.snapshot(),
+                    now=checked_at,
                 )
+                if limit_reason == "MODEL_USAGE_UNAVAILABLE":
+                    if close_inputs is not None:
+                        close_inputs()
+                    return await self._usage_unavailable_result(
+                        publisher=publisher, history=history, turns=turn,
+                        tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
+                    )
                 if limit_reason is not None:
                     if close_inputs is not None:
                         close_inputs()
@@ -228,10 +250,17 @@ class AgentLoop:
                     history=history,
                     cancellation=cancellation,
                     usage_accumulator=usage_accumulator,
+                    started_at=started_at,
                 )
 
                 if response.message is not None:
                     history.append(response.message)
+
+                # A completed model call can consume the budget before any of its tools start.
+                budget_reason = (
+                    "max_run_seconds" if self._clock() - started_at >= self._limits.max_run_seconds
+                    else self._usage_limit(usage_accumulator.snapshot())
+                )
 
                 if response.stop_reason is StopReason.TOOL_CALL:
                     if response.message is None:  # guarded by FinalResponse
@@ -241,6 +270,35 @@ class AgentLoop:
                         for block in response.message.content
                         if isinstance(block, ToolCall)
                     )
+                    if cancellation is not None and cancellation.is_cancelled:
+                        budget_reason = "cancelled"
+                    if budget_reason is not None:
+                        for call in calls:
+                            await self._append_tool_message(
+                                publisher=publisher, history=history, run_id=run_id,
+                                turn=turn, call=call,
+                                result=self._not_executed_tool_result(budget_reason),
+                            )
+                        await publisher.emit(AgentEventType.TURN_END, {
+                            "turn": turn, "stop_reason": response.stop_reason.value,
+                        })
+                        if close_inputs is not None:
+                            close_inputs()
+                        if budget_reason == "cancelled":
+                            return await self._cancelled_result(
+                                publisher=publisher, history=history, turns=turn,
+                                tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
+                            )
+                        if budget_reason == "MODEL_USAGE_UNAVAILABLE":
+                            return await self._usage_unavailable_result(
+                                publisher=publisher, history=history, turns=turn,
+                                tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
+                            )
+                        return await self._limited_result(
+                            publisher=publisher, history=history, reason=budget_reason,
+                            turns=turn, tool_calls=tool_calls_started,
+                            usage_accumulator=usage_accumulator,
+                        )
                     time_exhausted = (
                         self._clock() - started_at
                         >= self._limits.max_run_seconds
@@ -315,6 +373,7 @@ class AgentLoop:
                     if input_queue is not None and self._next_model_limit(
                         started_at=started_at, completed_turns=turn,
                         tool_calls=tool_calls_started,
+                        usage=usage_accumulator.snapshot(),
                     ) is None:
                         steering = input_queue.take_steering()
                         if steering:
@@ -339,9 +398,52 @@ class AgentLoop:
                         tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator,
                     )
+                if response.stop_reason is StopReason.CANCELLED:
+                    if close_inputs is not None:
+                        close_inputs()
+                    return await self._cancelled_result(
+                        publisher=publisher, history=history, turns=turn,
+                        tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
+                    )
+                if response.stop_reason is StopReason.LIMIT:
+                    if close_inputs is not None:
+                        close_inputs()
+                    return await self._limited_result(
+                        publisher=publisher, history=history, reason="max_run_seconds",
+                        turns=turn, tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator,
+                    )
+                if response.stop_reason is StopReason.ERROR:
+                    if close_inputs is not None:
+                        close_inputs()
+                    await self._emit_agent_end_once(publisher, {
+                        "status": "failed", "stop_reason": StopReason.ERROR.value,
+                        "turns": turn,
+                    })
+                    return AgentRunResult(
+                        messages=tuple(history), final_response=response,
+                        events=publisher.events,
+                        model_requests=tuple(usage_accumulator.requests),
+                        usage=usage_accumulator.snapshot(),
+                    )
+                elif budget_reason is not None:
+                    if close_inputs is not None:
+                        close_inputs()
+                    if budget_reason == "MODEL_USAGE_UNAVAILABLE":
+                        return await self._usage_unavailable_result(
+                            publisher=publisher, history=history, turns=turn,
+                            tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
+                            message=response.message,
+                        )
+                    return await self._limited_result(
+                        publisher=publisher, history=history, reason=budget_reason,
+                        turns=turn, tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator, message=response.message,
+                    )
                 if input_queue is not None and not input_queue.is_empty and self._next_model_limit(
                     started_at=started_at, completed_turns=turn,
                     tool_calls=tool_calls_started,
+                    usage=usage_accumulator.snapshot(),
                 ) is not None:
                     continue
                 if input_queue is not None:
@@ -391,14 +493,25 @@ class AgentLoop:
             raise
 
     def _next_model_limit(
-        self, *, started_at: float, completed_turns: int, tool_calls: int
+        self, *, started_at: float, completed_turns: int, tool_calls: int,
+        usage: RunUsage, now: float | None = None,
     ) -> str | None:
-        if self._clock() - started_at >= self._limits.max_run_seconds:
+        if (self._clock() if now is None else now) - started_at >= self._limits.max_run_seconds:
             return "max_run_seconds"
         if completed_turns >= self._limits.max_model_turns:
             return "max_model_turns"
         if tool_calls >= self._limits.max_tool_calls:
             return "max_tool_calls"
+        return self._usage_limit(usage)
+
+    def _usage_limit(self, usage: RunUsage) -> str | None:
+        threshold = self._limits.max_total_tokens
+        if threshold is None:
+            return None
+        if not usage.complete:
+            return "MODEL_USAGE_UNAVAILABLE"
+        if usage.known_total_tokens >= threshold:
+            return "max_total_tokens"
         return None
 
     async def _run_tool_batch(
@@ -532,6 +645,21 @@ class AgentLoop:
         )
 
     @staticmethod
+    def _not_executed_tool_result(reason: str) -> ToolResult:
+        return ToolResult(
+            content=f"Tool call was not executed: {reason}.",
+            details={
+                "execution_status": "not_executed",
+                "stop_reason": "error" if reason == "MODEL_USAGE_UNAVAILABLE" else
+                               "cancelled" if reason == "cancelled" else "limit",
+                **({"error_code": reason} if reason == "MODEL_USAGE_UNAVAILABLE" else
+                   {"limit_reason": reason} if reason != "cancelled" else {}),
+            },
+            status=ToolStatus.FAILED,
+            error_code=reason,
+        )
+
+    @staticmethod
     async def _append_tool_message(
         *,
         publisher: EventPublisher,
@@ -602,9 +730,10 @@ class AgentLoop:
         turns: int,
         tool_calls: int,
         usage_accumulator: _UsageAccumulator,
+        message: AssistantMessage | None = None,
     ) -> AgentRunResult:
         response = FinalResponse(
-            message=None,
+            message=message,
             stop_reason=StopReason.LIMIT,
             usage=None,
         )
@@ -627,6 +756,25 @@ class AgentLoop:
             usage=usage_accumulator.snapshot(),
         )
 
+    @staticmethod
+    async def _usage_unavailable_result(
+        *, publisher: EventPublisher, history: list[Message], turns: int,
+        tool_calls: int, usage_accumulator: _UsageAccumulator,
+        message: AssistantMessage | None = None,
+    ) -> AgentRunResult:
+        response = FinalResponse(message, StopReason.ERROR, None)
+        await AgentLoop._emit_agent_end_once(publisher, {
+            "status": "failed", "stop_reason": StopReason.ERROR.value,
+            "error_code": "MODEL_USAGE_UNAVAILABLE", "turns": turns,
+            "tool_calls": tool_calls,
+        })
+        return AgentRunResult(
+            messages=tuple(history), final_response=response,
+            events=publisher.events, error_code="MODEL_USAGE_UNAVAILABLE",
+            model_requests=tuple(usage_accumulator.requests),
+            usage=usage_accumulator.snapshot(),
+        )
+
     async def _run_model_turn(
         self,
         *,
@@ -635,6 +783,7 @@ class AgentLoop:
         history: list[Message],
         cancellation: CancellationSignal | None,
         usage_accumulator: _UsageAccumulator,
+        started_at: float,
     ) -> FinalResponse:
         await publisher.emit(AgentEventType.TURN_START, {"turn": turn})
         message_id = f"{publisher.events[0].run_id}:message:{turn}"
@@ -677,14 +826,24 @@ class AgentLoop:
             })
 
         try:
+            remaining_run_seconds = self._limits.max_run_seconds - (self._clock() - started_at)
+            if remaining_run_seconds <= 0:
+                response = FinalResponse(None, StopReason.LIMIT)
+                await settle_request(StopReason.LIMIT.value)
+                await publisher.emit(AgentEventType.MESSAGE_END, {
+                    "turn": turn, "message_id": message_id,
+                    "stop_reason": StopReason.LIMIT.value,
+                })
+                return response
             request = ProviderRequest(
                 messages=project_model_messages(history),
                 tools=self._tool_registry.model_schemas(),
                 config=self._model_config,
                 cancellation=cancellation,
                 call_id=call_id,
+                remaining_run_seconds=remaining_run_seconds,
             )
-            async for event in self._provider.stream(request):
+            async for event in self._model_events(request):
                 if response is not None:
                     raise AgentLoopError("provider emitted an event after completed response")
                 if isinstance(event, RequestStarted):
@@ -770,6 +929,32 @@ class AgentLoop:
             end_payload["message"] = message_to_dict(response.message)
         await publisher.emit(AgentEventType.MESSAGE_END, end_payload)
         return response
+
+    async def _model_events(self, request: ProviderRequest) -> AsyncGenerator[ModelEvent, None]:
+        stream = cast(AsyncGenerator[ModelEvent, None], self._provider.stream(request))
+        try:
+            while True:
+                next_event = asyncio.create_task(anext(stream, None))
+                try:
+                    while True:
+                        done, _ = await asyncio.wait({next_event}, timeout=0.05)
+                        if request.cancellation is not None and request.cancellation.is_cancelled:
+                            next_event.cancel()
+                            await asyncio.gather(next_event, return_exceptions=True)
+                            yield ResponseCompleted(FinalResponse(None, StopReason.CANCELLED))
+                            return
+                        if done:
+                            break
+                    event = next_event.result()
+                except BaseException:
+                    next_event.cancel()
+                    await asyncio.gather(next_event, return_exceptions=True)
+                    raise
+                if event is None:
+                    return
+                yield event
+        finally:
+            await stream.aclose()
 
     @staticmethod
     def _agent_status(stop_reason: StopReason) -> str:
