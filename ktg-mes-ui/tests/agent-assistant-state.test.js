@@ -127,6 +127,21 @@ async function main() {
   assert.strictEqual(view.composerBusy, true)
   handlers.onEvent({ type: 'agent_start', run_id: 'run-1', payload: {} })
   assert.strictEqual(view.activeRun.status, 'running')
+  handlers.onEvent({ type: 'message_start', run_id: 'run-1', payload: { message_id: 'run-1:message:1', role: 'assistant' } })
+  handlers.onEvent({ type: 'message_update', run_id: 'run-1', payload: { message_id: 'run-1:message:1', delta_type: 'text', text: '首段' } })
+  assert.strictEqual(view.progress.messages[0].text, '首段')
+  handlers.onEvent({ type: 'message_update', run_id: 'run-1', payload: { message_id: 'run-1:message:1', delta_type: 'text', text: '后段' } })
+  assert.strictEqual(view.progress.messages[0].text, '首段后段')
+  const originalRunRead = api.getAgentRun
+  api.getAgentRun = async runId => ({ run_id: runId, status: 'running', last_seq: 8,
+    usage: { known_total_tokens: 7, complete: true } })
+  handlers.onEvent({ type: 'model_usage_reported', run_id: 'run-1', payload: { input_tokens: 5, output_tokens: 2 } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.activeRun.usage.known_total_tokens, 7)
+  handlers.onEvent({ type: 'model_usage_reported', run_id: 'run-1', payload: { input_tokens: 5, output_tokens: 2 } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.activeRun.usage.known_total_tokens, 7)
+  api.getAgentRun = originalRunRead
   assert.strictEqual(view.canInput, true)
   assert.strictEqual(view.composerBusy, false)
   view.draft = '追加查库存'
@@ -172,6 +187,7 @@ async function main() {
   const workorderConfirmation = view.confirmPreview('preview-1')
   const inventoryConfirmation = view.confirmInventory('inventory-1')
   handlers.onSnapshot({ run: { run_id: 'run-1', status: 'cancelled' }, messages: { items: [] }, inputs: [] })
+  assert.strictEqual(view.progress.messages[0].status, 'incomplete')
   assert.strictEqual(view.confirmingPreviewId, 'preview-1')
   assert.strictEqual(view.confirmingInventoryId, 'inventory-1')
   resolveWorkorder({ result: { kind: 'workorder_draft_result', outcome: 'failed', label: '工单失败' } })

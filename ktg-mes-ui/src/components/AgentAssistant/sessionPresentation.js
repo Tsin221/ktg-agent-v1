@@ -33,8 +33,8 @@ export function presentMessages(items) {
       questions.set(runId, entry.text)
     } else if (item.role === 'assistant' || item.role === 'tool') {
       let entry = turns.get(runId)
-      if (!entry) {
-        entry = { id: `run-${runId}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId), results: [] }
+      if (!entry || (item.role === 'assistant' && entry.text)) {
+        entry = { id: `message-${item.message_id}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId), results: [] }
         turns.set(runId, entry)
         entries.push(entry)
       }
@@ -47,12 +47,24 @@ export function presentMessages(items) {
 
 export function progressFromEvent(progress, event) {
   const payload = event.payload || {}
-  if (event.type === 'message_start') return { ...progress, text: '' }
-  if (event.type === 'message_update' && payload.delta_type === 'text') {
-    return { ...progress, text: (progress.text || '') + (payload.text || '') }
-  }
-  if (event.type === 'message_end' && payload.message) {
-    return { ...progress, text: textOf(payload.message) || progress.text }
+  if (['message_start', 'message_update', 'message_end'].includes(event.type) && payload.role !== 'tool') {
+    const id = payload.message_id
+    if (!id) return progress
+    const messages = [...(progress.messages || [])]
+    const index = messages.findIndex(message => message.id === id)
+    if (event.type === 'message_start') {
+      if (index < 0) messages.push({ id, text: '', status: 'streaming' })
+    } else if (index >= 0) {
+      const previous = messages[index]
+      if (event.type === 'message_update' && payload.delta_type === 'text' && previous.status === 'streaming') {
+        messages.splice(index, 1, { ...previous, text: previous.text + (payload.text || '') })
+      } else if (event.type === 'message_end') {
+        messages.splice(index, 1, { ...previous,
+          text: payload.message ? textOf(payload.message) : previous.text,
+          status: payload.stop_reason === 'completed' || payload.stop_reason === 'tool_call' ? 'ended' : 'incomplete' })
+      }
+    }
+    return { ...progress, messages }
   }
   if (event.type.startsWith('tool_execution_')) {
     const id = payload.tool_call_id
@@ -66,8 +78,32 @@ export function progressFromEvent(progress, event) {
   return progress
 }
 
+export function usageText(usage) {
+  if (!usage) return '用量：暂缺'
+  if (usage.source === 'legacy_unknown') return '用量：无记录'
+  const total = usage.known_total_tokens
+  const known = Number.isSafeInteger(total) ? `已知用量 ${total} token` : '已知用量暂缺'
+  return `${known} · ${usage.complete ? '统计完整' : '未完整统计（部分用量暂缺）'}`
+}
+
 export function runStatusText(run) {
   if (!run) return ''
+  const summary = run.result_summary || {}
+  const reason = summary.limit_reason || summary.error_code || run.stop_reason
+  const reasons = {
+    length: '单次模型输出达到长度上限',
+    max_total_tokens: '已达到本轮总 token 停止阈值',
+    max_run_seconds: '本轮运行时间已到',
+    max_model_turns: '本轮模型调用次数已达上限',
+    max_tool_calls: '本轮工具启动次数已达上限',
+    MODEL_USAGE_UNAVAILABLE: '模型用量暂缺，已停止后续执行',
+    USAGE_PERSISTENCE_FAILED: '用量记录失败，已停止后续执行',
+    cancelled: '本轮已由用户取消'
+  }
+  if (run.status === 'needs_reconciliation') {
+    return `业务结果待核验；请查询对应操作回执。${reasons[reason] ? `聊天运行：${reasons[reason]}` : ''}`
+  }
+  if (isTerminalRun(run.status) && reasons[reason]) return reasons[reason]
   return {
     queued: '正在排队…', running: '正在处理…', cancelling: '正在停止后续执行，已发出的业务操作仍在核验结果…',
     completed: '本轮已完成', needs_input: '本轮需要补充信息',

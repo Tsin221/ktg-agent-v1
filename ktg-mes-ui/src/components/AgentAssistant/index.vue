@@ -82,8 +82,11 @@
         <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
           <div class="agent-message">{{ pendingQuestion }}</div>
         </div>
-        <div v-if="progress.text || Object.keys(progress.tools).length" class="agent-progress" aria-label="本轮临时进度">
-          <div v-if="progress.text" class="agent-message">{{ progress.text }}</div>
+        <div v-if="progress.messages.length || Object.keys(progress.tools).length" class="agent-progress" aria-label="本轮临时进度">
+          <div v-for="message in progress.messages" :key="message.id">
+            <div v-if="message.text" class="agent-message">{{ message.text }}</div>
+            <div v-if="message.text" class="agent-progress__status">{{ message.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && message.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
+          </div>
           <div v-for="(tool, id) in progress.tools" :key="id" class="agent-progress__tool">
             {{ tool.name }}：{{ tool.message || (tool.status === 'running' ? '执行中' : tool.status) }}
           </div>
@@ -94,6 +97,16 @@
           <button v-if="canCancel" type="button" :disabled="cancelLoading" @click="stopRun">
             {{ cancelLoading ? '停止请求中…' : '停止后续执行' }}
           </button>
+        </div>
+        <div v-if="activeRun" class="agent-run-usage" role="status">
+          <span>{{ usageText(activeRun.usage) }}</span>
+          <span v-if="activeRun.budget && activeRun.budget.max_total_tokens != null">总 token 停止阈值：{{ activeRun.budget.max_total_tokens }}</span>
+          <details v-if="activeRun.usage && activeRun.usage.source !== 'legacy_unknown'" class="agent-run-usage__details">
+            <summary>用量详情</summary>
+            <div>已知输入 {{ activeRun.usage.known_input_tokens }} · 输出 {{ activeRun.usage.known_output_tokens }} token</div>
+            <div>其中缓存输入 {{ activeRun.usage.known_cached_input_tokens }} token（已包含在输入中）</div>
+            <div v-if="activeRun.usage.unknown_request_count">{{ activeRun.usage.unknown_request_count }} 次模型调用用量暂缺</div>
+          </details>
         </div>
         <p v-if="confirmingPreviewId || confirmingInventoryId" class="agent-business-status" role="status">独立业务确认仍在核验结果；停止聊天运行不会撤销已发出的确认。</p>
         <div v-if="pendingSubmission" class="agent-message agent-message--assistant" role="status">
@@ -135,7 +148,7 @@ import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
-import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText,
+import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
 const requestId = () => (window.crypto && window.crypto.randomUUID)
@@ -174,7 +187,7 @@ export default {
       cancelRequestId: '',
       cancelLoading: false,
       businessMessages: [],
-      progress: { text: '', tools: {}},
+      progress: { messages: [], tools: {}},
       panelError: '',
       streamError: false,
       epoch: 0,
@@ -224,7 +237,7 @@ export default {
   },
   methods: {
     isTerminalRun, inputStatusText,
-    runStatusText,
+    runStatusText, usageText,
     localKey() {
       return `ktg-agent-view:${this.$store.state.user.id}:${this.sessionId}`
     },
@@ -271,7 +284,7 @@ export default {
       this.cancelRequestId = ''
       this.cancelLoading = false
       this.businessMessages = []
-      this.progress = { text: '', tools: {}}
+      this.progress = { messages: [], tools: {}}
       this.messages = []
       this.draft = ''
       this.panelError = ''
@@ -315,7 +328,7 @@ export default {
       this.cancelRequestId = ''
       this.cancelLoading = false
       this.businessMessages = []
-      this.progress = { text: '', tools: {}}
+      this.progress = { messages: [], tools: {}}
       this.activeRun = null
       this.activeRunId = ''
       this.messages = []
@@ -395,6 +408,15 @@ export default {
               this.activeRun = { ...this.activeRun, status: 'running' }
             }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
+            if (['model_request_started', 'model_usage_reported', 'model_request_settled'].includes(event.type)) {
+              const runId = this.activeRunId
+              getAgentRun(runId).then(run => {
+                if (epoch === this.epoch && runId === this.activeRunId &&
+                    (!this.activeRun.last_seq || run.last_seq >= this.activeRun.last_seq)) this.activeRun = run
+              }).catch(error => {
+                if (epoch === this.epoch) this.panelError = this.errorText(error, '用量状态读取失败。')
+              })
+            }
             if (event.type !== 'run_settled') this.progress = progressFromEvent(this.progress, event)
           },
           onSnapshot: snapshot => {
@@ -405,7 +427,14 @@ export default {
             this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
             if (isTerminalRun(snapshot.run.status)) {
               this.pendingQuestion = ''
-              this.progress = { text: '', tools: {}}
+              if (snapshot.run.status === 'completed' || snapshot.run.status === 'needs_input') {
+                this.progress = { messages: [], tools: {}}
+              } else {
+                const savedTexts = new Set(this.messages.filter(message => message.role === 'assistant').map(message => message.text))
+                this.progress = { ...this.progress, messages: this.progress.messages
+                  .filter(message => message.text && !savedTexts.has(message.text))
+                  .map(message => ({ ...message, status: 'incomplete' })) }
+              }
             }
             this.scrollToBottom()
           }
@@ -604,7 +633,7 @@ export default {
       this.loading = true
       this.activeRun = null
       this.activeRunId = ''
-      this.progress = { text: '', tools: {}}
+      this.progress = { messages: [], tools: {}}
       this.pendingQuestion = text
       this.panelError = ''
       const epoch = this.epoch
@@ -881,7 +910,11 @@ export default {
 .agent-business-status { margin: 8px 0; color: #606266; font-size: 12px; }
 .agent-panel__hint { margin: 0; padding: 0 12px 8px; background: #fff; color: #606266; font-size: 12px; }
 .agent-progress { margin-top: 12px; }
+.agent-progress__status { margin: 3px 0 8px; color: #606266; font-size: 12px; }
 .agent-progress__tool { margin-top: 6px; padding: 7px 10px; border-left: 3px solid #a0cfff; background: #fff; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
+.agent-run-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: #606266; font-size: 12px; }
+.agent-run-usage__details { width: 100%; }
+.agent-run-usage__details summary { color: #337ecc; cursor: pointer; }
 
 .agent-example {
   display: block;
