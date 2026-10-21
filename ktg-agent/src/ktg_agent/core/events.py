@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from inspect import isawaitable
-from ktg_agent.core.messages import JsonObject, _json_object, _required_text
+from ktg_agent.core.messages import JsonObject, MessageValidationError, _json_object, _required_text
 
 
 class AgentEventType(StrEnum):
@@ -24,6 +24,91 @@ class AgentEventType(StrEnum):
     TOOL_EXECUTION_UPDATE = "tool_execution_update"
     TOOL_EXECUTION_END = "tool_execution_end"
     INPUT_QUEUED = "input_queued"
+    CONTEXT_ASSEMBLED = "context_assembled"
+    COMPACTION_STARTED = "compaction_started"
+    COMPACTION_SUMMARY = "compaction_summary"
+    COMPACTION_FAILED = "compaction_failed"
+    CONTEXT_OVERFLOW = "context_overflow"
+
+
+def _integer(payload: JsonObject, key: str, *, positive: bool = False) -> None:
+    value = payload.get(key)
+    if type(value) is not int or value < (1 if positive else 0):
+        raise MessageValidationError(f"{key} must be a {'positive' if positive else 'nonnegative'} integer")
+
+
+def _text(payload: JsonObject, key: str, *, nullable: bool = False) -> None:
+    value = payload.get(key)
+    if (value is None and nullable and key in payload) or isinstance(value, str):
+        return
+    raise MessageValidationError(f"{key} must be {'a string or null' if nullable else 'a string'}")
+
+
+def _choice(payload: JsonObject, key: str, choices: frozenset[str]) -> None:
+    value = payload.get(key)
+    if not isinstance(value, str) or value not in choices:
+        raise MessageValidationError(f"{key} must be one of {sorted(choices)}")
+
+
+def _context_assembled(payload: JsonObject) -> None:
+    _integer(payload, "estimated_tokens", positive=True)
+    _integer(payload, "threshold_tokens")
+    _text(payload, "summary_id", nullable=True)
+    _integer(payload, "retained_message_count")
+    _integer(payload, "spill_count")
+    if type(payload.get("trimmed")) is not bool:
+        raise MessageValidationError("trimmed must be a boolean")
+
+
+def _compaction_started(payload: JsonObject) -> None:
+    _text(payload, "session_id")
+    _choice(payload, "trigger", frozenset({"preflight", "manual"}))
+    _text(payload, "parent_run_id", nullable=True)
+    _integer(payload, "source_message_count", positive=True)
+    _integer(payload, "covers_start_index")
+    _integer(payload, "covers_end_index")
+    start = payload["covers_start_index"]
+    end = payload["covers_end_index"]
+    assert type(start) is int and type(end) is int
+    if start > end:
+        raise MessageValidationError("covers_start_index must not exceed covers_end_index")
+    for key in ("covers_start_message_id", "covers_end_message_id"):
+        value = payload.get(key)
+        if key not in payload or (value is not None and (type(value) is not int or value < 0)):
+            raise MessageValidationError(f"{key} must be a nonnegative integer or null")
+
+
+def _compaction_summary(payload: JsonObject) -> None:
+    _text(payload, "summary_id", nullable=True)
+    _integer(payload, "source_token_estimate", positive=True)
+    _integer(payload, "summary_token_estimate", positive=True)
+    _text(payload, "call_id")
+
+
+def _compaction_failed(payload: JsonObject) -> None:
+    _choice(payload, "error_code", frozenset({"COMPACTION_FAILED", "SUMMARY_NOT_SMALLER"}))
+    _choice(payload, "stage", frozenset({"summary", "validate", "commit"}))
+
+
+def _context_overflow(payload: JsonObject) -> None:
+    _integer(payload, "estimated_tokens", positive=True)
+    _integer(payload, "available_tokens")
+    _integer(payload, "largest_group_tokens", positive=True)
+
+
+_PAYLOAD_VALIDATORS: dict[AgentEventType, Callable[[JsonObject], None]] = {
+    AgentEventType.CONTEXT_ASSEMBLED: _context_assembled,
+    AgentEventType.COMPACTION_STARTED: _compaction_started,
+    AgentEventType.COMPACTION_SUMMARY: _compaction_summary,
+    AgentEventType.COMPACTION_FAILED: _compaction_failed,
+    AgentEventType.CONTEXT_OVERFLOW: _context_overflow,
+}
+
+
+def _validate_payload(event_type: AgentEventType, payload: JsonObject) -> None:
+    validator = _PAYLOAD_VALIDATORS.get(event_type)
+    if validator is not None:
+        validator(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +127,7 @@ class AgentEvent:
         if not isinstance(self.type, AgentEventType):
             raise TypeError("event type must be an AgentEventType")
         object.__setattr__(self, "payload", _json_object(self.payload, "event payload"))
+        _validate_payload(self.type, self.payload)
 
 
 type EventSink = Callable[[AgentEvent], Awaitable[None] | None]

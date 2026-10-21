@@ -137,6 +137,7 @@ class Agent:
             result = await self._loop.run(
                 run_id=run_id,
                 messages=(*history, user_message),
+                new_input_count=1,
                 identity=identity,
                 cancellation=self._cancellation,
                 ktg_client=ktg_client,

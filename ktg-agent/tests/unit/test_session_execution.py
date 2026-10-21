@@ -64,6 +64,35 @@ def query_executor(provider: FakeProvider) -> RunCoordinatorExecutor:
     return execute
 
 
+def test_coordinator_persists_only_explicit_new_messages_when_prefix_drifts(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(path)
+    session = repo.create_session("id:7")
+    run, _ = repo.admit_run("id:7", session.id, "r1", "h1", {})
+
+    async def execute(run_id: str, message: str, history: tuple[Message, ...],
+                      page_context: JsonObject | None, authorization: str,
+                      sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
+        user = UserMessage((TextBlock(message),))
+        final = AssistantMessage((TextBlock("done"),))
+        additions = (user, final)
+        injected = UserMessage((TextBlock("dynamic prefix"),))
+        return AgentRunResult(
+            messages=(injected, *history, *additions),
+            final_response=FinalResponse(final, StopReason.COMPLETED, Usage(1, 1)),
+            events=(), new_messages=additions,
+        )
+
+    coordinator = RunCoordinator(repo, execute)
+    coordinator.schedule(run, "question", "Bearer test")
+    coordinator.close()
+    reopened = SessionRepository(path)
+    assert reopened.completed_history("id:7", session.id) == (
+        UserMessage((TextBlock("question"),)), AssistantMessage((TextBlock("done"),)),
+    )
+    assert reopened.get_run("id:7", run.id).status == "completed"  # type: ignore[union-attr]
+
+
 def test_two_turns_are_isolated_and_reopenable(tmp_path: Path) -> None:
     path = tmp_path / "sessions.sqlite3"
     repo = SessionRepository(path)
@@ -225,6 +254,7 @@ def test_execution_and_settlement_failures_are_diagnosed_and_recovered(
     coordinator.schedule(run, "private question", "Bearer secret-token")
     coordinator.close()
     assert repo.get_run("id:7", run.id).status == "failed"  # type: ignore[union-attr]
+    assert repo.list_messages("id:7", session.id).items == ()
     assert f"run_id={run.id} phase=execute error_type=RuntimeError" in caplog.text
     assert "secret-token" not in caplog.text
     assert "private question" not in caplog.text
@@ -576,8 +606,9 @@ def test_cancel_during_closing_preserves_verified_write_result(tmp_path: Path) -
         closing.set()
         await asyncio.to_thread(release.wait)
         final = AssistantMessage((TextBlock("completed action"),))
-        return AgentRunResult((UserMessage((TextBlock(message),)), final),
-                              FinalResponse(final, StopReason.COMPLETED, Usage(1, 1)), ())
+        additions = (UserMessage((TextBlock(message),)), final)
+        return AgentRunResult(additions, FinalResponse(final, StopReason.COMPLETED, Usage(1, 1)),
+                              (), new_messages=additions)
 
     coordinator = RunCoordinator(repo, execute)
     try:

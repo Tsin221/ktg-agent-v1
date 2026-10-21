@@ -546,6 +546,7 @@ def test_token_policy_pairs_all_blocked_calls_without_starting_tools(
     assert result.model_requests[0].status == "tool_call"
     assert result.stop_reason is (StopReason.LIMIT if usage else StopReason.ERROR)
     assert result.messages[1] == AssistantMessage(calls)
+    assert result.new_messages == result.messages
     assert result.limit_reason == (reason if usage else None)
     assert result.error_code == (reason if usage is None else None)
     results = [item for item in result.messages if isinstance(item, ToolResultMessage)]

@@ -188,7 +188,7 @@ class RunCoordinator:
                 block.text for block in result.final_message.content
                 if isinstance(block, TextBlock)
             ).strip() if result.final_message is not None else ""
-            new_messages = result.messages[1 + len(history):]
+            new_messages = result.new_messages
             business_results: list[JsonValue] = [
                 item.details for item in new_messages
                 if isinstance(item, ToolResultMessage) and item.details is not None

@@ -42,6 +42,13 @@ class Settings:
     enable_item_receipt: bool = False
     enable_production_issue: bool = False
     max_total_tokens: int | None = None
+    context_window: int | None = None
+    context_reserve_tokens: int | None = None
+    context_threshold_ratio: float = 0.8
+    context_retain_ratio: float = 0.16
+    context_summary_max_tokens: int = 1024
+    spill_max_inline_tokens: int | None = None
+    spill_dir: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -79,6 +86,50 @@ class Settings:
             raise RuntimeError("AGENT_MAX_TOTAL_TOKENS must be a positive integer") from exc
         if max_total_tokens is not None and max_total_tokens <= 0:
             raise RuntimeError("AGENT_MAX_TOTAL_TOKENS must be a positive integer")
+
+        def positive_integer(name: str, default: int | None = None) -> int | None:
+            raw = os.environ.get(name)
+            try:
+                value = int(raw) if raw is not None else default
+            except ValueError as exc:
+                raise RuntimeError(f"{name} must be a positive integer") from exc
+            if value is not None and value <= 0:
+                raise RuntimeError(f"{name} must be a positive integer")
+            return value
+
+        def ratio(name: str, default: float) -> float:
+            raw = os.environ.get(name)
+            try:
+                value = float(raw) if raw is not None else default
+            except ValueError as exc:
+                raise RuntimeError(f"{name} must be a finite ratio") from exc
+            if not 0 < value <= 1:
+                raise RuntimeError(f"{name} must be a finite ratio greater than 0 and at most 1")
+            return value
+
+        context_window = positive_integer("AGENT_CONTEXT_WINDOW")
+        context_reserve_tokens = positive_integer("AGENT_CONTEXT_RESERVE_TOKENS")
+        if (context_window is not None and context_reserve_tokens is not None
+                and context_reserve_tokens >= context_window):
+            raise RuntimeError("AGENT_CONTEXT_RESERVE_TOKENS must be less than AGENT_CONTEXT_WINDOW")
+        context_threshold_ratio = ratio("AGENT_CONTEXT_THRESHOLD_RATIO", 0.8)
+        context_retain_ratio = ratio("AGENT_CONTEXT_RETAIN_RATIO", 0.16)
+        if context_retain_ratio >= context_threshold_ratio:
+            raise RuntimeError("AGENT_CONTEXT_RETAIN_RATIO must be less than AGENT_CONTEXT_THRESHOLD_RATIO")
+        context_summary_max_tokens = positive_integer("AGENT_CONTEXT_SUMMARY_MAX_TOKENS", 1024)
+        assert context_summary_max_tokens is not None
+        spill_max_inline_tokens = positive_integer("AGENT_SPILL_MAX_INLINE_TOKENS")
+        spill_dir = os.environ.get("AGENT_SPILL_DIR", "").strip()
+        if spill_max_inline_tokens is not None and not spill_dir:
+            raise RuntimeError("AGENT_SPILL_DIR must be configured when spill is enabled")
+        if spill_dir:
+            spill_path = Path(spill_dir)
+            if not spill_path.is_absolute():
+                raise RuntimeError("AGENT_SPILL_DIR must be an absolute path")
+            for db_name in ("AGENT_SESSION_DB", "AGENT_INVENTORY_DB"):
+                db_path = os.environ.get(db_name, "").strip()
+                if db_path and spill_path.resolve() == Path(db_path).resolve():
+                    raise RuntimeError(f"AGENT_SPILL_DIR must differ from {db_name}")
         return cls(
             model_api_key=api_key,
             model_base_url=model_base_url,
@@ -91,6 +142,13 @@ class Settings:
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
             max_total_tokens=max_total_tokens,
+            context_window=context_window,
+            context_reserve_tokens=context_reserve_tokens,
+            context_threshold_ratio=context_threshold_ratio,
+            context_retain_ratio=context_retain_ratio,
+            context_summary_max_tokens=context_summary_max_tokens,
+            spill_max_inline_tokens=spill_max_inline_tokens,
+            spill_dir=spill_dir,
         )
 
 

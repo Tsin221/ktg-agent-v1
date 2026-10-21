@@ -16,6 +16,7 @@ from ktg_agent.core.messages import (
     TextBlock,
     ToolCall,
     ToolResultMessage,
+    SystemMessage,
     UserMessage,
 )
 from ktg_agent.providers.base import (
@@ -131,6 +132,40 @@ def event_types(result: AgentRunResult) -> list[AgentEventType]:
     return [event.type for event in result.events]
 
 
+def test_new_messages_are_a_suffix_and_can_be_empty() -> None:
+    initial = UserMessage((TextBlock("start"),))
+    final = response(TextBlock("done"))
+    assert final.message is not None
+    with pytest.raises(ValueError, match="suffix"):
+        AgentRunResult((initial, final.message), final, (), new_messages=(final.message, initial))
+    assert AgentRunResult((initial,), final, ()).new_messages == ()
+
+
+def test_existing_history_is_preserved_before_new_messages() -> None:
+    old = UserMessage((TextBlock("old"),))
+    current = UserMessage((TextBlock("current"),))
+    final = response(TextBlock("done"))
+    result = asyncio.run(make_loop(FakeProvider((ScriptedTurn((ResponseCompleted(final),)),))).run(
+        run_id="run-1", messages=(old, current), new_input_count=1,
+    ))
+    assert result.messages[:1] == (old,)
+    assert result.new_messages == (current, final.message)
+    assert len(result.messages) == 1 + len(result.new_messages)
+
+
+def test_cancellation_before_any_new_message_allows_empty_suffix() -> None:
+    class Cancelled:
+        is_cancelled = True
+
+    original = SystemMessage((TextBlock("instructions"),))
+    result = asyncio.run(make_loop(FakeProvider(())).run(
+        run_id="run-1", messages=(original,), new_input_count=0, cancellation=Cancelled(),
+    ))
+    assert result.messages == (original,)
+    assert result.new_messages == ()
+    assert result.stop_reason is StopReason.CANCELLED
+
+
 def test_usage_snapshot_is_retained_when_provider_fails_after_reporting_it() -> None:
     observed: list[AgentEvent] = []
     provider = FakeProvider([ScriptedTurn(actions=(
@@ -201,6 +236,26 @@ def test_run_usage_counts_each_request_once_across_tool_turn_and_follow_up() -> 
     assert result.usage.unknown_request_count == 0
     assert result.usage.complete is True
     assert result.final_response.usage == Usage(8, 6, 2)
+    assert [message.content[0].text for message in result.new_messages
+            if isinstance(message, UserMessage)] == ["start", "more"]
+
+
+def test_steering_message_is_recorded_in_actual_order() -> None:
+    call = ToolCall("call-1", "test.lookup", {"value": 7})
+    tool_turn = response(call, stop_reason=StopReason.TOOL_CALL)
+    final = response(TextBlock("done"))
+    provider = FakeProvider((
+        ScriptedTurn((ResponseCompleted(tool_turn),)),
+        ScriptedTurn((ResponseCompleted(final),)),
+    ))
+    queue = InputQueue()
+    steer = UserMessage((TextBlock("steer"),))
+    queue.enqueue(InputMode.STEER, steer, None)
+    result = asyncio.run(make_loop(provider, RecordingTool()).run(
+        run_id="run-1", messages=(UserMessage((TextBlock("start"),)),), input_queue=queue,
+    ))
+    assert isinstance(result.new_messages[2], ToolResultMessage)
+    assert result.new_messages[3:] == (steer, final.message)
 
 
 def test_zero_usage_and_unknown_usage_have_distinct_run_results() -> None:
@@ -233,6 +288,7 @@ def test_cancelled_before_request_has_no_unknown_usage() -> None:
     assert result.usage.complete is True
     assert result.usage.unknown_request_count == 0
     assert result.final_response.usage is None
+    assert result.new_messages == (UserMessage((TextBlock("start"),)),)
 
 
 def test_provider_cancelled_before_dispatch_records_not_started() -> None:
@@ -307,6 +363,8 @@ def test_plain_text_response_returns_final_message_and_ordered_events() -> None:
     result = run(make_loop(provider))
 
     assert result.final_response == final
+    assert result.new_messages == (UserMessage((TextBlock("start"),)), final.message)
+    assert result.messages == result.new_messages
     assert result.messages[-1] == final.message
     assert event_types(result) == [
         AgentEventType.AGENT_START,
@@ -352,6 +410,10 @@ def test_single_tool_result_is_added_to_the_next_provider_request() -> None:
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.content == (TextBlock("result:7"),)
     assert result.messages[-1] == final.message
+    assert result.new_messages == (
+        UserMessage((TextBlock("start"),)), tool_turn.message, result.messages[2], final.message,
+    )
+    assert isinstance(result.new_messages[2], ToolResultMessage)
     ended_messages = [
         event.payload["message"]
         for event in result.events

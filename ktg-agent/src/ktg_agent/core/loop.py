@@ -132,6 +132,7 @@ class AgentRunResult:
     """Final response, complete run-local history, and emitted event trace."""
 
     messages: tuple[Message, ...]
+    new_messages: tuple[Message, ...] = field(default=(), kw_only=True)
     final_response: FinalResponse
     events: tuple[AgentEvent, ...]
     limit_reason: str | None = None
@@ -139,6 +140,10 @@ class AgentRunResult:
     unconsumed_inputs: tuple[QueuedInput, ...] = ()
     model_requests: tuple[ModelRequestUsage, ...] = ()
     usage: RunUsage = field(default_factory=RunUsage)
+
+    def __post_init__(self) -> None:
+        if self.new_messages and self.messages[-len(self.new_messages):] != self.new_messages:
+            raise ValueError("new_messages must be a suffix of messages")
 
     @property
     def stop_reason(self) -> StopReason:
@@ -186,8 +191,13 @@ class AgentLoop:
         input_queue: InputQueue | None = None,
         publisher: EventPublisher | None = None,
         close_inputs: Callable[[], None] | None = None,
+        new_input_count: int = 1,
     ) -> AgentRunResult:
         history = list(messages)
+        if type(new_input_count) is not int or not 0 <= new_input_count <= len(history):
+            raise ValueError("new_input_count must fit within messages")
+        # The current input is already present; only its explicit count marks the run boundary.
+        baseline = len(history) - new_input_count
         if not history:
             raise ValueError("agent run requires at least one message")
 
@@ -211,7 +221,7 @@ class AgentLoop:
                         close_inputs()
                     return await self._cancelled_result(
                         publisher=publisher,
-                        history=history,
+                        history=history, baseline=baseline,
                         turns=turn,
                         tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator,
@@ -228,7 +238,7 @@ class AgentLoop:
                     if close_inputs is not None:
                         close_inputs()
                     return await self._usage_unavailable_result(
-                        publisher=publisher, history=history, turns=turn,
+                        publisher=publisher, history=history, baseline=baseline, turns=turn,
                         tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
                     )
                 if limit_reason is not None:
@@ -236,7 +246,7 @@ class AgentLoop:
                         close_inputs()
                     return await self._limited_result(
                         publisher=publisher,
-                        history=history,
+                        history=history, baseline=baseline,
                         reason=limit_reason,
                         turns=turn,
                         tool_calls=tool_calls_started,
@@ -286,16 +296,16 @@ class AgentLoop:
                             close_inputs()
                         if budget_reason == "cancelled":
                             return await self._cancelled_result(
-                                publisher=publisher, history=history, turns=turn,
+                                publisher=publisher, history=history, baseline=baseline, turns=turn,
                                 tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
                             )
                         if budget_reason == "MODEL_USAGE_UNAVAILABLE":
                             return await self._usage_unavailable_result(
-                                publisher=publisher, history=history, turns=turn,
+                                publisher=publisher, history=history, baseline=baseline, turns=turn,
                                 tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
                             )
                         return await self._limited_result(
-                            publisher=publisher, history=history, reason=budget_reason,
+                            publisher=publisher, history=history, baseline=baseline, reason=budget_reason,
                             turns=turn, tool_calls=tool_calls_started,
                             usage_accumulator=usage_accumulator,
                         )
@@ -350,7 +360,7 @@ class AgentLoop:
                             close_inputs()
                         return await self._limited_result(
                             publisher=publisher,
-                            history=history,
+                            history=history, baseline=baseline,
                             reason=(
                                 "max_run_seconds"
                                 if time_exhausted or batch_time_exhausted
@@ -365,7 +375,7 @@ class AgentLoop:
                             close_inputs()
                         return await self._cancelled_result(
                             publisher=publisher,
-                            history=history,
+                            history=history, baseline=baseline,
                             turns=turn,
                             tool_calls=tool_calls_started,
                             usage_accumulator=usage_accumulator,
@@ -393,7 +403,7 @@ class AgentLoop:
                         close_inputs()
                     return await self._cancelled_result(
                         publisher=publisher,
-                        history=history,
+                        history=history, baseline=baseline,
                         turns=turn,
                         tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator,
@@ -402,14 +412,14 @@ class AgentLoop:
                     if close_inputs is not None:
                         close_inputs()
                     return await self._cancelled_result(
-                        publisher=publisher, history=history, turns=turn,
+                        publisher=publisher, history=history, baseline=baseline, turns=turn,
                         tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
                     )
                 if response.stop_reason is StopReason.LIMIT:
                     if close_inputs is not None:
                         close_inputs()
                     return await self._limited_result(
-                        publisher=publisher, history=history, reason="max_run_seconds",
+                        publisher=publisher, history=history, baseline=baseline, reason="max_run_seconds",
                         turns=turn, tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator,
                     )
@@ -422,6 +432,7 @@ class AgentLoop:
                     })
                     return AgentRunResult(
                         messages=tuple(history), final_response=response,
+                        new_messages=tuple(history[baseline:]),
                         events=publisher.events,
                         model_requests=tuple(usage_accumulator.requests),
                         usage=usage_accumulator.snapshot(),
@@ -431,12 +442,12 @@ class AgentLoop:
                         close_inputs()
                     if budget_reason == "MODEL_USAGE_UNAVAILABLE":
                         return await self._usage_unavailable_result(
-                            publisher=publisher, history=history, turns=turn,
+                            publisher=publisher, history=history, baseline=baseline, turns=turn,
                             tool_calls=tool_calls_started, usage_accumulator=usage_accumulator,
                             message=response.message,
                         )
                     return await self._limited_result(
-                        publisher=publisher, history=history, reason=budget_reason,
+                        publisher=publisher, history=history, baseline=baseline, reason=budget_reason,
                         turns=turn, tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator, message=response.message,
                     )
@@ -474,6 +485,7 @@ class AgentLoop:
                 )
                 return AgentRunResult(
                     messages=tuple(history),
+                    new_messages=tuple(history[baseline:]),
                     final_response=response,
                     events=publisher.events,
                     model_requests=tuple(usage_accumulator.requests),
@@ -695,6 +707,7 @@ class AgentLoop:
         *,
         publisher: EventPublisher,
         history: list[Message],
+        baseline: int,
         turns: int,
         tool_calls: int,
         usage_accumulator: _UsageAccumulator,
@@ -715,6 +728,7 @@ class AgentLoop:
         )
         return AgentRunResult(
             messages=tuple(history),
+            new_messages=tuple(history[baseline:]),
             final_response=response,
             events=publisher.events,
             model_requests=tuple(usage_accumulator.requests),
@@ -726,6 +740,7 @@ class AgentLoop:
         *,
         publisher: EventPublisher,
         history: list[Message],
+        baseline: int,
         reason: str,
         turns: int,
         tool_calls: int,
@@ -749,6 +764,7 @@ class AgentLoop:
         )
         return AgentRunResult(
             messages=tuple(history),
+            new_messages=tuple(history[baseline:]),
             final_response=response,
             events=publisher.events,
             limit_reason=reason,
@@ -758,7 +774,7 @@ class AgentLoop:
 
     @staticmethod
     async def _usage_unavailable_result(
-        *, publisher: EventPublisher, history: list[Message], turns: int,
+        *, publisher: EventPublisher, history: list[Message], baseline: int, turns: int,
         tool_calls: int, usage_accumulator: _UsageAccumulator,
         message: AssistantMessage | None = None,
     ) -> AgentRunResult:
@@ -770,6 +786,7 @@ class AgentLoop:
         })
         return AgentRunResult(
             messages=tuple(history), final_response=response,
+            new_messages=tuple(history[baseline:]),
             events=publisher.events, error_code="MODEL_USAGE_UNAVAILABLE",
             model_requests=tuple(usage_accumulator.requests),
             usage=usage_accumulator.snapshot(),
