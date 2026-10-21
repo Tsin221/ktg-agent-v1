@@ -1,4 +1,4 @@
-"""Application service for one authenticated, read-only Agent query."""
+"""Authenticated Agent queries and separately confirmed business actions."""
 
 from __future__ import annotations
 

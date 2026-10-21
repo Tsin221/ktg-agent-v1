@@ -1,6 +1,14 @@
 # 阶段 A 核心契约与阶段 B 交接
 
-本文描述核心契约和阶段 B 后续工作。仓库已提供 OpenAI 兼容 Provider、无状态查询入口、按当前 KTG 用户身份执行的三个固定只读工具，以及持久会话、运行准入、多轮历史与启动恢复。SSE、inputs/cancel 和会话运行中的业务写入恢复仍待实现。
+本文保留阶段 A 的历史交接说明。当前会话实现已提供 OpenAI 兼容 HTTP SSE 增量、持久 SSE/快照、inputs/cancel、逐调用用量及 run 预算。当前契约以本节及 [`T17-model-usage-contract.md`](T17-model-usage-contract.md)、[`T20-run-budgets.md`](T20-run-budgets.md)、[`T21-durable-usage.md`](T21-durable-usage.md) 为准；下方标为“阶段 B 交接”的清单是当时的计划，不表示当前缺失。
+
+## 当前真实流、用量与预算契约（2026-10-20）
+
+Provider 解析供应商 SSE 字节并逐段发出 `TextDelta`，只在正常完成时释放完整工具参数；它在请求开始前发 `RequestStarted`，收到供应商用量尾帧后发 `UsageReported`，取消或截止时关闭传输。协议错误、断流或 `length` 中的部分工具参数不会进入执行。没有静默非流式回退或自动重试。
+
+AgentLoop 以 `call_id` 对每次模型请求计量一次，管理模型轮次、工具启动次数、单调时钟运行截止和可选 `max_total_tokens`。steer/follow_up 属于同一 run，共用预算。token 阈值依据已经收到的真实用量决定后续工作，单次响应可能使累计值超额；缺失用量为 unknown，已知零才是零。完整工具调用若被预算或未知用量政策阻止，会得到未执行结果，实际工具启动次数为零。已经发出的写入等待真实回执，未知状态优先进入 `needs_reconciliation`，取消和预算不会自动重放。
+
+SessionRepository 的 SQLite schema v4 独立保存预算、逐调用及累计用量。持久事件先写入再经 SSE 回放；重连、快照读取和重启恢复不重新请求模型或重复计量。`GET /runs/{rid}` 与最后的 `run_settled` 提供预算、累计、完整性和逐调用快照；事件过期后仍可读取快照。网页只展示服务端事实，不把 delta 当完成消息，也不自行累计用量。旧 `/query` 共享 Provider/Core/预算，但保持同步 JSON 且不建立持久会话。
 
 ## 公开模块
 
@@ -17,7 +25,7 @@
 | `ktg_agent.core.events` | `AgentEventType`、`AgentEvent`、`EventPublisher`、`ToolProgressPublisher`、`EventSink` |
 | `ktg_agent.core` | `Agent`、`AgentState`、`AgentBusyError`、`AgentNotRunningError`、`CancellationToken`、`InputMode`、`InputQueue` |
 | `ktg_agent.ktg.client` | `KTGClient`、`KTGError`，使用请求携带的 Bearer token 调用固定 KTG 基址 |
-| `ktg_agent.ktg.queries` | `build_query_tools`，注册产品、库存和工单三个固定只读工具 |
+| `ktg_agent.ktg.queries` | `build_query_tools`，注册产品数量统计、产品查询、库存查询和工单查询四个固定只读工具 |
 | `ktg_agent.service` | `QueryService`，验证当前用户并执行一次无状态查询 |
 | `ktg_agent.server` | `Settings`、`create_service`、`AgentHTTPServer`，提供本地 health/query HTTP 入口 |
 
@@ -77,14 +85,14 @@
 
 `GET /health` 用于检查本地进程，`POST /agent-api/v1/query` 接受一次查询。每个查询请求必须携带当前网页用户的 Bearer token；`QueryService` 先调用 KTG `/getInfo` 验证当前身份，再创建短期客户端和 Agent。token 不写入消息、工具参数或持久化存储。
 
-模型只能选择 `ktg_search_items`、`ktg_query_stock` 和 `ktg_list_workorders` 三个白名单工具；工具分别映射到固定的产品、库存和工单 GET 接口。模型不能指定 KTG 基址、HTTP 方法或任意路径。`/query` 本身不保存会话和历史；另有 `/sessions`、`/runs` 入口负责持久多轮会话。
+模型的固定只读白名单包括 `ktg_count_products`、`ktg_search_items`、`ktg_query_stock` 和 `ktg_list_workorders`；产品数量统计与产品查询共用产品 GET 接口，另外两个分别映射库存和工单 GET 接口。模型不能指定 KTG 基址、HTTP 方法或任意路径。`/query` 本身不保存会话和历史；另有 `/sessions`、`/runs` 入口负责持久多轮会话。
 
 ## 当前已知限制
 
-- 真实模型仅提供 OpenAI 兼容 chat completions 适配；当前适配器把完整响应转换为核心事件，不提供模型侧实时增量流。尚无重试编排或 token 用量预算。
-- 真实 KTG 工具仅限三个固定只读查询；尚无写工具、细粒度工具权限策略或业务操作恢复。
+- 真实模型目前只有一个 OpenAI 兼容 chat completions 适配器；已支持实时增量流与可选 run token 阈值。没有自动重试、价格表或严格费用硬上限。
+- 默认启用四个固定只读 KTG 工具；库存收料与生产领料写工具须分别显式开启，仍无完整的细粒度工具权限策略或跨进程业务操作恢复。
 - SessionRepository 已持久保存会话、运行、消息和事件；运行协调器仅保证单 Python 进程内的调度，尚无跨进程单写者保证。
-- 持久事件有 run_id、seq、type、payload 和时间，但尚无 SSE 回放 HTTP 入口、保留期与完整事件信封。
+- 持久事件有 run_id、seq、type、payload 和时间，提供 SSE 回放 HTTP 入口与 30 天事件保留期；过期后仍可从 run 快照读计量和终态。
 - 取消信号是进程内布尔 token；工具和 Provider 必须主动观察它，已开始的外部副作用不会自动撤销。
 - `identity` 与 `ktg_client` 在核心层仍是不透明对象；会话 HTTP 入口每次调用 `/getInfo` 并检查所有权，长期凭据生命周期和完整权限编排仍待实现。
 - `ToolStatus.UNKNOWN` 和 operation 字段已有数据形状，但持久化意图、幂等键、回读核验与恢复状态机尚未实现。

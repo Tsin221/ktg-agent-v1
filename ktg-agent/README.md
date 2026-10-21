@@ -80,6 +80,8 @@ MODEL_ID=...
 KTG_BASE_URL=http://127.0.0.1:8080
 AGENT_HOST=127.0.0.1
 AGENT_PORT=8001
+# Optional positive integer. Stops later work after reported run tokens reach it.
+# AGENT_MAX_TOTAL_TOKENS=5000
 ```
 
 S3-08 库存操作默认关闭。启用前，先确认 Java 侧 S3-05～07 的执行与回执接口已经部署，配置可持久保存的绝对路径，并按动作分别开启：
@@ -102,13 +104,13 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs`、`GET /agent-api/v1/runs/{rid}`、`GET /agent-api/v1/runs/{rid}/events?after_seq=N`、`POST /agent-api/v1/runs/{rid}/cancel`、`POST/GET /agent-api/v1/runs/{rid}/inputs`。请求均使用请求头中的当前 KTG Bearer token，不能把 token 放进 URL；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
 
-取消和追加输入在会话服务校验身份与所有权，由仓储持久准入，协调器投递至运行中的 Agent。`cancel` 已接受返回 202，run 已终结的新取消返回 200 `already_settled`；取消只阻止后续动作，已发出的写入继续以真实结果收尾。`inputs` 的 `mode` 为 `follow_up` 或 `steer`，只在运行中接收；未就绪或已关闭接收门返回 409。`GET /runs/{rid}/inputs` 可查询 `queued`、`consumed`、`not_consumed` 及未消费原因，进程重启不自动重放。控制事件与核心事件使用同一持久 seq，`run_settled` 为最后事件。当前网页悬浮窗已接入停止、两种追加输入及输入状态恢复；实际浏览器与真实模型/MES 仍待环境验证。工单和库存确认是独立 HTTP 路径，不受聊天 run 取消自动撤销。
+取消和追加输入在会话服务校验身份与所有权，由仓储持久准入，协调器投递至运行中的 Agent。`cancel` 已接受返回 202，run 已终结的新取消返回 200 `already_settled`；取消只阻止后续动作，已发出的写入继续以真实结果收尾。`inputs` 的 `mode` 为 `follow_up` 或 `steer`，只在运行中接收；未就绪或已关闭接收门返回 409。`GET /runs/{rid}/inputs` 可查询 `queued`、`consumed`、`not_consumed` 及未消费原因，进程重启不自动重放。控制事件与核心事件使用同一持久 seq，`run_settled` 为最后事件。当前网页悬浮窗已接入停止、两种追加输入及输入状态恢复；停止、真实模型流、只读 MES 查询的浏览器验收见 T23 记录。工单和库存确认是独立 HTTP 路径，不受聊天 run 取消自动撤销。
 
 事件入口返回 `text/event-stream`，默认 `after_seq=0`，先读取持久事件，之后每 0.5 秒检查新事件；SSE `id` 是业务 seq，`event` 是事件类型，JSON 信封按多行 `data:` 发送。15 秒无业务事件时发送 `: heartbeat`，不会占用 seq。`run_settled` 送达后连接结束。历史确实被清理时返回 410 `EVENT_HISTORY_EXPIRED`，应改读 run 快照和最终消息。并发订阅上限为 32，超限返回 503 `SSE_CAPACITY_EXCEEDED`。断开订阅不会取消 run。
 
 创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手已接入会话接口和页面上下文采集。
 
-首次打开空文件时建立 `sessions`、`runs`、`messages`、`events`、`control_commands` 和索引，SQLite `user_version` 为 3；旧版 v1/v2 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
+首次打开空文件时建立会话、运行、消息、事件、控制命令及 `model_requests` 表，SQLite `user_version` 为 4；旧版 v1/v2/v3 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 
@@ -119,8 +121,9 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 uv run --locked python -m ktg_agent.server
 ```
 
-服务提供 `GET /health` 和 `POST /agent-api/v1/query`。查询请求必须携带当前网页用户的 `Authorization: Bearer <KTG token>`；服务先调用 KTG `/getInfo` 验证身份，然后只允许模型使用以下三个固定只读工具：
+服务提供 `GET /health` 和 `POST /agent-api/v1/query`。查询请求必须携带当前网页用户的 `Authorization: Bearer <KTG token>`；服务先调用 KTG `/getInfo` 验证身份。事实查询使用以下四个固定只读工具；模型还可使用工单草稿预览工具，库存预览工具按开关启用：
 
+- `ktg_count_products` → `GET /mes/md/mditem/list`（只统计产品）
 - `ktg_search_items` → `GET /mes/md/mditem/list`
 - `ktg_query_stock` → `GET /mes/wm/wmstock/list`
 - `ktg_list_workorders` → `GET /mes/pro/workorder/list`
@@ -134,7 +137,7 @@ src/ktg_agent/
   core/       消息、生命周期事件、AgentLoop、Agent 和输入队列
   providers/  Provider 协议、FakeProvider 和 OpenAI 兼容适配器
   tools/      工具定义、白名单注册表和受控执行器
-  ktg/        带身份验证的 KTG 客户端和三个固定只读查询工具
+  ktg/        带身份验证的 KTG 客户端和四个固定只读查询工具
   service.py  无状态查询服务，负责身份验证与 Agent 组装
   sessions/  会话存储、身份隔离、运行调度与重启收束
   server.py   本地 HTTP 入口、启动配置和会话装配
@@ -151,4 +154,6 @@ docs/         核心契约和阶段交接说明
 - 只有完整且最终停止原因为 `tool_call` 的工具调用会执行；截断输出不会执行流中出现的调用。
 - 阶段 A 的 `agent_end` 是低层循环结束事件；会话运行的 `run_settled` 在最终状态和消息落库时一并提交。两者不能互相替代。
 
-会话接口已实现持久化、用户隔离、幂等准入、多轮历史、重启收束、SSE 回放续接及 inputs/cancel 控制；会话运行中仍未开放真实业务写工具。这里完成的是离线 FakeProvider、假工具和本地 HTTP 验证，真实模型及 MES 联调需要另行验收。详见 [`docs/core-contracts.md`](docs/core-contracts.md#阶段-b-交接清单)。
+会话接口已实现持久化、用户隔离、幂等准入、多轮历史、重启收束、SSE 回放续接及 inputs/cancel 控制。真实模型使用 HTTP SSE 增量传输；每次请求和 run 的供应商用量、完整性及生效预算可从 `GET /runs/{rid}` 查询，`run_settled` 携带同一快照。`AGENT_MAX_TOTAL_TOKENS` 默认关闭；启用后根据已收到的真实用量停止后续工作，单轮可能越过阈值，这不是费用硬上限。缺失用量保留 unknown，不记为零。`/query` 共享核心预算政策，但不创建持久 run。写工具不暴露给模型；网页的独立确认接口可按既有授权和配置执行工单草稿或库存写入。
+
+2026-10-20 至 2026-10-21 T23 本机验收记录见 [`docs/T23-acceptance.md`](docs/T23-acceptance.md)：受控 HTTP 跨层流、真实模型短探针、浏览器代理增量与断线续接、登录后只读 MES 多工具、follow_up、刷新、停止及预算阈值均已实测；T17–T22 原交付文件和独立复审已完成。
