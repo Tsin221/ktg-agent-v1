@@ -20,6 +20,10 @@ export const getAgentSession = sessionId => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId), method: 'get'
 })
 
+export const getAgentSessionStats = sessionId => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/stats', method: 'get'
+})
+
 export const listAgentMessages = (sessionId, params) => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/messages', method: 'get', params
 })

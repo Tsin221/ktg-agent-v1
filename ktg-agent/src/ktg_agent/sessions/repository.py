@@ -21,6 +21,7 @@ from ktg_agent.core.messages import (
     JsonObject, Message, _json_object, _required_text, message_from_dict,
     message_to_dict,
 )
+from ktg_agent.context.window import group_messages
 
 T = TypeVar("T")
 ACTIVE = frozenset({"queued", "running", "cancelling"})
@@ -28,6 +29,9 @@ TERMINAL = frozenset({
     "completed", "needs_input", "failed", "cancelled", "needs_reconciliation",
 })
 EVENT_RETENTION_DAYS = 30
+SCHEMA_VERSION = 5
+SUMMARY_ACTIVE = "active"
+SUMMARY_SUPERSEDED = "superseded"
 STATUSES = ACTIVE | TERMINAL
 _SECRET_KEY = re.compile(
     r"(?:authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -72,6 +76,8 @@ class RunRecord:
     budget: JsonObject | None = None
     usage: JsonObject | None = None
     model_requests: tuple[JsonObject, ...] = ()
+    kind: str = "user"
+    context: JsonObject | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +86,26 @@ class MessageRecord:
     session_id: str
     run_id: str
     message: Message
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryRecord:
+    summary_id: str
+    session_id: str
+    owner_user_id: str
+    run_id: str
+    covers_start_message_id: int
+    covers_end_message_id: int
+    source_message_count: int
+    source_token_estimate: int
+    summary_text: str
+    summary_token_estimate: int
+    model: str
+    call_id: str
+    usage: JsonObject | None
+    status: str
+    superseded_by: str | None
     created_at: str
 
 
@@ -151,6 +177,13 @@ def _safe_json(value: object) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+def _safe_text(value: str, label: str) -> str:
+    _required_text(value, label)
+    if _SECRET_KEY.search(value) or _SECRET_VALUE.search(value):
+        raise ValueError("sensitive data must not be stored")
+    return value
+
+
 def _read_json(raw: str) -> JsonObject:
     return _json_object(json.loads(raw), "stored JSON")
 
@@ -191,9 +224,9 @@ class SessionRepository:
     def _migrate(self) -> None:
         with self._connect() as db:
             version = int(db.execute("PRAGMA user_version").fetchone()[0])
-            if version > 4:
+            if version > SCHEMA_VERSION:
                 raise RuntimeError("session database has a newer schema version")
-            if version == 4:
+            if version == SCHEMA_VERSION:
                 return
             if version == 1:
                 db.execute("ALTER TABLE runs ADD COLUMN replay_floor_seq INTEGER NOT NULL DEFAULT 1")
@@ -238,6 +271,38 @@ class SessionRepository:
                         PRIMARY KEY(run_id,call_id)
                     );
                     PRAGMA user_version=4;
+                    COMMIT;
+                """)
+                version = 4
+            if version == 4:
+                db.executescript("""BEGIN IMMEDIATE;
+                    ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
+                    ALTER TABLE runs ADD COLUMN context_json TEXT;
+                    UPDATE runs SET kind='compaction' WHERE kind='user'
+                        AND json_extract(request_summary_json,'$.kind')='compaction';
+                    CREATE TABLE context_summaries (
+                        summary_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        owner_user_id TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        covers_start_message_id INTEGER NOT NULL,
+                        covers_end_message_id INTEGER NOT NULL,
+                        source_message_count INTEGER NOT NULL,
+                        source_token_estimate INTEGER NOT NULL,
+                        summary_text TEXT NOT NULL,
+                        summary_token_estimate INTEGER NOT NULL,
+                        model TEXT NOT NULL,
+                        call_id TEXT NOT NULL,
+                        usage_json TEXT,
+                        status TEXT NOT NULL,
+                        superseded_by TEXT,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX one_active_summary_per_session
+                        ON context_summaries(session_id) WHERE status='active';
+                    CREATE UNIQUE INDEX one_summary_per_call
+                        ON context_summaries(session_id, call_id);
+                    PRAGMA user_version=5;
                     COMMIT;
                 """)
                 return
@@ -322,6 +387,68 @@ class SessionRepository:
             ).fetchone()
         return _session(row) if row else None
 
+    def session_stats(self, owner_user_id: str, session_id: str) -> JsonObject:
+        """Read one owner-scoped, transactionally consistent session snapshot."""
+        with self._connect() as db:
+            db.execute("BEGIN")
+            session = db.execute(
+                "SELECT id FROM sessions WHERE id=? AND owner_user_id=?",
+                (session_id, owner_user_id),
+            ).fetchone()
+            if session is None:
+                raise KeyError("session not found")
+            roles = {str(row["role"]): int(row["n"]) for row in db.execute(
+                "SELECT role,COUNT(*) n FROM messages WHERE session_id=? GROUP BY role",
+                (session_id,),
+            )}
+            runs = db.execute(
+                "SELECT id,status,kind FROM runs WHERE session_id=? ORDER BY position",
+                (session_id,),
+            ).fetchall()
+            statuses: dict[str, int] = {}
+            kinds: dict[str, int] = {}
+            by_kind: dict[str, list[JsonObject]] = {}
+            for run in runs:
+                status, kind = str(run["status"]), str(run["kind"])
+                statuses[status] = statuses.get(status, 0) + 1
+                kinds[kind] = kinds.get(kind, 0) + 1
+                by_kind.setdefault(kind, []).extend(self._model_requests(db, str(run["id"])))
+            summary_counts = {str(row["status"]): int(row["n"]) for row in db.execute(
+                "SELECT status,COUNT(*) n FROM context_summaries WHERE session_id=? GROUP BY status",
+                (session_id,),
+            )}
+            active_summary = db.execute(
+                "SELECT summary_id,covers_start_message_id,covers_end_message_id,"
+                "summary_token_estimate FROM context_summaries "
+                "WHERE session_id=? AND status='active'", (session_id,),
+            ).fetchone()
+            active_run = db.execute(
+                "SELECT id FROM runs WHERE session_id=? AND status IN ('queued','running','cancelling')",
+                (session_id,),
+            ).fetchone()
+            # Compaction runs never carry user spill counts; their context snapshot
+            # must not overwrite the last user-run assembly.
+            last_context = db.execute(
+                "SELECT context_json FROM runs WHERE session_id=? AND kind='user' "
+                "AND context_json IS NOT NULL ORDER BY position DESC LIMIT 1", (session_id,),
+            ).fetchone()
+        requests = tuple(request for group in by_kind.values() for request in group)
+        return {
+            "session_id": session_id, "message_count": sum(roles.values()),
+            "messages_by_role": cast(JsonObject, roles), "run_count": len(runs),
+            "runs_by_status": cast(JsonObject, statuses),
+            "runs_by_kind": cast(JsonObject, kinds),
+            "summary_counts": cast(JsonObject, summary_counts),
+            "compaction_count": kinds.get("compaction", 0),
+            "known_usage": self._usage_from_requests(requests),
+            "known_usage_by_kind": {kind: self._usage_from_requests(tuple(items))
+                                    for kind, items in by_kind.items()},
+            "active_summary": ({key: active_summary[key] for key in active_summary.keys()}
+                               if active_summary else None),
+            "active_run_id": str(active_run["id"]) if active_run else None,
+            "last_context": _read_json(last_context["context_json"]) if last_context else None,
+        }
+
     def list_sessions(self, owner_user_id: str, *, after: int | None = None, limit: int = 50) -> Page[SessionRecord]:
         _page_args(after, limit)
         with self._connect() as db:
@@ -335,20 +462,22 @@ class SessionRepository:
 
     def create_run(
         self, owner_user_id: str, session_id: str, request_id: str,
-        request_hash: str, request_summary: JsonObject,
+        request_hash: str, request_summary: JsonObject, *, kind: str = "user",
     ) -> RunRecord:
         _required_text(request_id, "request id")
         _required_text(request_hash, "request hash")
         _safe_json({"request_id": request_id, "request_hash": request_hash})
         summary = _safe_json(request_summary)
+        if kind not in {"user", "compaction"}:
+            raise ValueError("invalid run kind")
         run_id, now = str(uuid4()), _now()
         with self._connect() as db:
             cursor = db.execute(
                 "INSERT INTO runs(id,session_id,owner_user_id,request_id,request_hash,"
-                "request_summary_json,status,created_at,usage_json) "
-                "SELECT ?,s.id,s.owner_user_id,?,?,?,'queued',?,? FROM sessions s "
+                "request_summary_json,status,created_at,usage_json,kind) "
+                "SELECT ?,s.id,s.owner_user_id,?,?,?,'queued',?,?,? FROM sessions s "
                 "WHERE s.id=? AND s.owner_user_id=?",
-                (run_id, request_id, request_hash, summary, now, _safe_json(_empty_usage()),
+                (run_id, request_id, request_hash, summary, now, _safe_json(_empty_usage()), kind,
                  session_id, owner_user_id),
             )
             if cursor.rowcount != 1:
@@ -358,13 +487,15 @@ class SessionRepository:
 
     def admit_run(
         self, owner_user_id: str, session_id: str, request_id: str,
-        request_hash: str, request_summary: JsonObject,
+        request_hash: str, request_summary: JsonObject, *, kind: str = "user",
     ) -> tuple[RunRecord, bool]:
         """Atomically return an idempotent run or reserve the session for one new run."""
         _required_text(request_id, "request id")
         _required_text(request_hash, "request hash")
         _safe_json({"request_id": request_id, "request_hash": request_hash})
         summary = _safe_json(request_summary)
+        if kind not in {"user", "compaction"}:
+            raise ValueError("invalid run kind")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             session = db.execute(
@@ -391,14 +522,25 @@ class SessionRepository:
             run_id, now = str(uuid4()), _now()
             db.execute(
                 "INSERT INTO runs(id,session_id,owner_user_id,request_id,request_hash,"
-                "request_summary_json,status,created_at,usage_json) VALUES(?,?,?,?,?,?,'queued',?,?)",
+                "request_summary_json,status,created_at,usage_json,kind) VALUES(?,?,?,?,?,?,'queued',?,?,?)",
                 (run_id, session_id, owner_user_id, request_id, request_hash, summary, now,
-                 _safe_json(_empty_usage())),
+                 _safe_json(_empty_usage()), kind),
             )
             db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
         created = self.get_run(owner_user_id, run_id)
         assert created is not None
         return created, True
+
+    def find_run_by_request(self, owner_user_id: str, session_id: str,
+                            request_id: str) -> RunRecord | None:
+        """Read one idempotent run by request id without admitting or mutating state."""
+        _required_text(request_id, "request id")
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM runs WHERE owner_user_id=? AND session_id=? AND request_id=?",
+                (owner_user_id, session_id, request_id),
+            ).fetchone()
+        return _run(row) if row else None
 
     def get_run(self, owner_user_id: str, run_id: str) -> RunRecord | None:
         with self._connect() as db:
@@ -609,7 +751,8 @@ class SessionRepository:
                 }
                 requests = self._model_requests(db, str(row["id"]))
                 usage = self._usage_from_requests(requests) if requests else None
-                snapshot = db.execute("SELECT budget_json,usage_json FROM runs WHERE id=?", (row["id"],)).fetchone()
+                snapshot = db.execute("SELECT budget_json,usage_json,kind,context_json FROM runs WHERE id=?",
+                                      (row["id"],)).fetchone()
                 assert snapshot is not None
                 budget = _read_json(snapshot["budget_json"]) if snapshot["budget_json"] else None
                 if snapshot["usage_json"] is not None:
@@ -625,7 +768,10 @@ class SessionRepository:
                 seq = self._next_seq(db, str(row["id"]))
                 payload = _safe_json({"status": status, "stop_reason": "SERVICE_RESTARTED",
                                       "result_summary": summary, "budget": budget,
-                                      "usage": usage, "model_requests": list(requests)})
+                                      "usage": usage, "model_requests": list(requests),
+                                      "kind": snapshot["kind"],
+                                      "context": (_read_json(snapshot["context_json"])
+                                                  if snapshot["context_json"] else None)})
                 db.execute(
                     "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                     (row["id"], seq, "run_settled", payload, now),
@@ -687,8 +833,8 @@ class SessionRepository:
         return Page(tuple(_message(row) for row in rows[:limit]),
                     int(rows[limit - 1]["id"]) if len(rows) > limit else None)
 
-    def completed_history(self, owner_user_id: str, session_id: str) -> tuple[Message, ...]:
-        """Load canonical messages from completed runs in session order."""
+    def completed_message_records(self, owner_user_id: str, session_id: str) -> tuple[MessageRecord, ...]:
+        """Load canonical messages with stable IDs from completed runs."""
         with self._connect() as db:
             rows = db.execute(
                 "SELECT m.* FROM messages m JOIN runs r ON r.id=m.run_id "
@@ -696,17 +842,107 @@ class SessionRepository:
                 "AND r.status='completed' ORDER BY m.id",
                 (session_id, owner_user_id),
             ).fetchall()
-        return tuple(_message(row).message for row in rows)
+        return tuple(_message(row) for row in rows)
+
+    def completed_history(self, owner_user_id: str, session_id: str) -> tuple[Message, ...]:
+        return tuple(record.message for record in self.completed_message_records(owner_user_id, session_id))
+
+    def active_summary(self, owner_user_id: str, session_id: str) -> SummaryRecord | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT c.* FROM context_summaries c JOIN sessions s ON s.id=c.session_id "
+                "WHERE s.id=? AND s.owner_user_id=? AND c.status='active'",
+                (session_id, owner_user_id),
+            ).fetchone()
+        return _summary(row) if row else None
+
+    def list_summaries(self, owner_user_id: str, session_id: str) -> tuple[SummaryRecord, ...]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT c.* FROM context_summaries c JOIN sessions s ON s.id=c.session_id "
+                "WHERE s.id=? AND s.owner_user_id=? ORDER BY c.created_at,c.rowid",
+                (session_id, owner_user_id),
+            ).fetchall()
+        return tuple(_summary(row) for row in rows)
+
+    def commit_summary(
+        self, owner_user_id: str, session_id: str, *, run_id: str,
+        covers_start_message_id: int, covers_end_message_id: int,
+        source_message_count: int, source_token_estimate: int,
+        summary_text: str, summary_token_estimate: int, model: str,
+        call_id: str, usage: JsonObject | None,
+    ) -> SummaryRecord:
+        call_id = _required_text(call_id, "call id")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute("SELECT 1 FROM sessions WHERE id=? AND owner_user_id=?",
+                                 (session_id, owner_user_id)).fetchone()
+            if session is None:
+                raise KeyError("session not found")
+            prior = db.execute("SELECT * FROM context_summaries WHERE session_id=? AND call_id=?",
+                               (session_id, call_id)).fetchone()
+            if prior is not None:
+                return _summary(prior)
+            text = _safe_text(summary_text, "summary text")
+            model = _safe_text(model, "model")
+            encoded_usage = _safe_json(usage) if usage is not None else None
+            run = db.execute("SELECT 1 FROM runs WHERE id=? AND session_id=? AND kind='compaction'",
+                             (run_id, session_id)).fetchone()
+            if run is None:
+                raise ValueError("run must be a compaction run in this session")
+            if (type(covers_start_message_id) is not int or type(covers_end_message_id) is not int
+                    or covers_start_message_id > covers_end_message_id or source_message_count < 1):
+                raise ValueError("invalid summary coverage")
+            endpoints = db.execute(
+                "SELECT m.id FROM messages m JOIN runs r ON r.id=m.run_id "
+                "WHERE m.session_id=? AND r.status='completed' AND m.id IN (?,?)",
+                (session_id, covers_start_message_id, covers_end_message_id),
+            ).fetchall()
+            if {int(row["id"]) for row in endpoints} != {covers_start_message_id, covers_end_message_id}:
+                raise ValueError("summary endpoints must be completed session messages")
+            covered_rows = db.execute(
+                "SELECT m.* FROM messages m JOIN runs r ON r.id=m.run_id "
+                "WHERE m.session_id=? AND r.status='completed' AND m.id BETWEEN ? AND ? "
+                "ORDER BY m.id",
+                (session_id, covers_start_message_id, covers_end_message_id),
+            ).fetchall()
+            all_count = db.execute(
+                "SELECT count(*) FROM messages WHERE session_id=? AND id BETWEEN ? AND ?",
+                (session_id, covers_start_message_id, covers_end_message_id),
+            ).fetchone()[0]
+            if len(covered_rows) != all_count:
+                raise ValueError("summary coverage includes incomplete run messages")
+            try:
+                group_messages(tuple(_message(row).message for row in covered_rows))
+            except ValueError as error:
+                raise ValueError("summary coverage splits a tool group") from error
+            if source_token_estimate <= summary_token_estimate:
+                raise ValueError("SUMMARY_NOT_SMALLER")
+            summary_id, now = str(uuid4()), _now()
+            db.execute("UPDATE context_summaries SET status=?,superseded_by=? "
+                       "WHERE session_id=? AND status=?",
+                       (SUMMARY_SUPERSEDED, summary_id, session_id, SUMMARY_ACTIVE))
+            db.execute(
+                "INSERT INTO context_summaries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (summary_id, session_id, owner_user_id, run_id, covers_start_message_id,
+                 covers_end_message_id, source_message_count, source_token_estimate, text,
+                 summary_token_estimate, model, call_id, encoded_usage, SUMMARY_ACTIVE, None, now),
+            )
+            row = db.execute("SELECT * FROM context_summaries WHERE summary_id=?", (summary_id,)).fetchone()
+            assert row is not None
+            return _summary(row)
 
     def settle_run(
         self, owner_user_id: str, run_id: str, status: str, stop_reason: str,
-        result_summary: JsonObject, messages: tuple[Message, ...],
+        result_summary: JsonObject, messages: tuple[Message, ...], *,
+        context: JsonObject | None = None,
     ) -> RunRecord:
         """Commit final messages, outcome and the last event as one unit."""
         if status not in TERMINAL:
             raise ValueError("run status must be terminal")
         _required_text(stop_reason, "stop reason")
         encoded_summary = _safe_json(result_summary)
+        encoded_context = _safe_json(context) if context is not None else None
         encoded_messages = tuple((message.role.value, _safe_json(message_to_dict(message)))
                                  for message in messages)
         now = _now()
@@ -731,15 +967,15 @@ class SessionRepository:
                     "VALUES(?,?,?,?,?)", (session_id, run_id, role, payload, now),
                 )
             db.execute(
-                "UPDATE runs SET status=?,ended_at=?,stop_reason=?,result_summary_json=? WHERE id=?",
-                (status, now, stop_reason, encoded_summary, run_id),
+                "UPDATE runs SET status=?,ended_at=?,stop_reason=?,result_summary_json=?,context_json=? WHERE id=?",
+                (status, now, stop_reason, encoded_summary, encoded_context, run_id),
             )
             db.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
             reason = ("cancelled" if status == "cancelled" else
                       "limit" if stop_reason == "limit" else "run_failed" if status == "failed" else
                       "run_completed" if status == "completed" else "run_settled")
             self._finish_queued_inputs(db, run_id, reason, now)
-            snapshot = db.execute("SELECT budget_json,usage_json FROM runs WHERE id=?", (run_id,)).fetchone()
+            snapshot = db.execute("SELECT budget_json,usage_json,kind FROM runs WHERE id=?", (run_id,)).fetchone()
             assert snapshot is not None
             budget = _read_json(snapshot["budget_json"]) if snapshot["budget_json"] else None
             usage = (_read_json(snapshot["usage_json"]) if snapshot["usage_json"] else
@@ -748,7 +984,8 @@ class SessionRepository:
             seq = self._next_seq(db, run_id)
             settled = _safe_json({"status": status, "stop_reason": stop_reason,
                                   "result_summary": result_summary, "budget": budget,
-                                  "usage": usage, "model_requests": list(requests)})
+                                  "usage": usage, "model_requests": list(requests),
+                                  "kind": snapshot["kind"], "context": context})
             db.execute(
                 "INSERT INTO events(run_id,seq,type,payload_json,created_at) VALUES(?,?,?,?,?)",
                 (run_id, seq, "run_settled", settled, now),
@@ -905,7 +1142,19 @@ def _run(row: sqlite3.Row, requests: tuple[JsonObject, ...] = ()) -> RunRecord:
                      _read_json(row["budget_json"]) if row["budget_json"] is not None else None,
                      _read_json(row["usage_json"]) if row["usage_json"] is not None else
                      {"source": "legacy_unknown", "complete": False},
-                     requests)
+                     requests, row["kind"],
+                     _read_json(row["context_json"]) if row["context_json"] is not None else None)
+
+
+def _summary(row: sqlite3.Row) -> SummaryRecord:
+    return SummaryRecord(
+        row["summary_id"], row["session_id"], row["owner_user_id"], row["run_id"],
+        row["covers_start_message_id"], row["covers_end_message_id"],
+        row["source_message_count"], row["source_token_estimate"], row["summary_text"],
+        row["summary_token_estimate"], row["model"], row["call_id"],
+        _read_json(row["usage_json"]) if row["usage_json"] is not None else None,
+        row["status"], row["superseded_by"], row["created_at"],
+    )
 
 
 def _message(row: sqlite3.Row) -> MessageRecord:

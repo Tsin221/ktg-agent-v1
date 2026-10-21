@@ -82,7 +82,16 @@ AGENT_HOST=127.0.0.1
 AGENT_PORT=8001
 # Optional positive integer. Stops later work after reported run tokens reach it.
 # AGENT_MAX_TOTAL_TOKENS=5000
+# AGENT_CONTEXT_WINDOW=32768
+# AGENT_CONTEXT_RESERVE_TOKENS=1024
+# AGENT_CONTEXT_THRESHOLD_RATIO=0.8
+# AGENT_CONTEXT_RETAIN_RATIO=0.16
+# AGENT_CONTEXT_SUMMARY_MAX_TOKENS=1024
+# AGENT_SPILL_MAX_INLINE_TOKENS=4096
+# AGENT_SPILL_DIR=E:/ktg_agent/ktg_agent_v1/.runtime/agent-spill
 ```
+
+`AGENT_CONTEXT_WINDOW` 默认不设置，此时窗口估算、裁切和压缩关闭；设置后须为正整数。`AGENT_CONTEXT_RESERVE_TOKENS` 默认取模型输出上限（当前 1024），须小于窗口。阈值比例默认 0.8，近期保留比例默认 0.16，摘要输出上限默认 1024。`AGENT_SPILL_MAX_INLINE_TOKENS` 默认不设置，即工具结果 spill 关闭；启用时须同时给 `AGENT_SPILL_DIR` 一个绝对目录路径。非法配置会在启动时失败。上下文 token 是估算压力，不等于供应商报告的真实用量；摘要是派生且不可信的上下文，业务事实仍须用当前用户权限重新查询。
 
 S3-08 库存操作默认关闭。启用前，先确认 Java 侧 S3-05～07 的执行与回执接口已经部署，配置可持久保存的绝对路径，并按动作分别开启：
 
@@ -102,7 +111,7 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 启动时会创建或打开该库，并在对外服务前收束上次进程留下的活动 run：`queued` 变为 `cancelled`，`running/cancelling` 变为 `needs_reconciliation`。`GET /runs/{rid}` 返回 `SERVICE_RESTARTED` 原因和摘要，持久事件以 `run_settled` 收尾；服务绝不自动重放模型或工具调用。已经完成的消息和事件保留，用户可继续新一轮。`needs_reconciliation` 表示外部写入结果可能未知，必须先核验业务回执。
 
-当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`POST /agent-api/v1/sessions/{sid}/runs`、`GET /agent-api/v1/runs/{rid}`、`GET /agent-api/v1/runs/{rid}/events?after_seq=N`、`POST /agent-api/v1/runs/{rid}/cancel`、`POST/GET /agent-api/v1/runs/{rid}/inputs`。请求均使用请求头中的当前 KTG Bearer token，不能把 token 放进 URL；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
+当前 HTTP 会话入口为 `POST/GET /agent-api/v1/sessions`、`GET /agent-api/v1/sessions/{sid}`、`GET /agent-api/v1/sessions/{sid}/messages`、`GET /agent-api/v1/sessions/{sid}/stats`、`POST /agent-api/v1/sessions/{sid}/compact`、`POST /agent-api/v1/sessions/{sid}/runs`、`GET /agent-api/v1/runs/{rid}`、`GET /agent-api/v1/runs/{rid}/events?after_seq=N`、`POST /agent-api/v1/runs/{rid}/cancel`、`POST/GET /agent-api/v1/runs/{rid}/inputs`。请求均使用请求头中的当前 KTG Bearer token，不能把 token 放进 URL；创建 run 需提供 `request_id` 和 `message`。服务端保存最终消息和事件，并把已完成轮次作为下一轮的模型历史。相同用户和会话中，相同 `request_id` 与相同请求只返回已有 run；不同请求返回 409。同一会话同时只能有一个活动 run。现有 `/query` 仍是独立的单次查询入口。
 
 取消和追加输入在会话服务校验身份与所有权，由仓储持久准入，协调器投递至运行中的 Agent。`cancel` 已接受返回 202，run 已终结的新取消返回 200 `already_settled`；取消只阻止后续动作，已发出的写入继续以真实结果收尾。`inputs` 的 `mode` 为 `follow_up` 或 `steer`，只在运行中接收；未就绪或已关闭接收门返回 409。`GET /runs/{rid}/inputs` 可查询 `queued`、`consumed`、`not_consumed` 及未消费原因，进程重启不自动重放。控制事件与核心事件使用同一持久 seq，`run_settled` 为最后事件。当前网页悬浮窗已接入停止、两种追加输入及输入状态恢复；停止、真实模型流、只读 MES 查询的浏览器验收见 T23 记录。工单和库存确认是独立 HTTP 路径，不受聊天 run 取消自动撤销。
 
@@ -110,7 +119,7 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手已接入会话接口和页面上下文采集。
 
-首次打开空文件时建立会话、运行、消息、事件、控制命令及 `model_requests` 表，SQLite `user_version` 为 4；旧版 v1/v2/v3 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
+首次打开空文件时建立会话、运行、消息、事件、控制命令、`model_requests` 及 `context_summaries` 表，SQLite `user_version` 为 5；旧版 v1/v2/v3/v4 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 

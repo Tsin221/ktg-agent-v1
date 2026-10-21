@@ -10,6 +10,14 @@ AgentLoop 以 `call_id` 对每次模型请求计量一次，管理模型轮次�
 
 SessionRepository 的 SQLite schema v4 独立保存预算、逐调用及累计用量。持久事件先写入再经 SSE 回放；重连、快照读取和重启恢复不重新请求模型或重复计量。`GET /runs/{rid}` 与最后的 `run_settled` 提供预算、累计、完整性和逐调用快照；事件过期后仍可读取快照。网页只展示服务端事实，不把 delta 当完成消息，也不自行累计用量。旧 `/query` 共享 Provider/Core/预算，但保持同步 JSON 且不建立持久会话。
 
+## 上下文压缩契约（2026-10-21）
+
+SQLite schema v5 增加 `runs.kind`、`runs.context_json` 和独立的 `context_summaries`。canonical `messages` 永不改写；装配使用 active 摘要加覆盖区间之后的已完成消息。摘要必须比来源更小，旧摘要在新摘要提交的同一事务中变为 `superseded`。压缩是 `kind=compaction` 的正常 run，沿用所有权、预算、事件、逐调用用量和恢复语义。摘要及页面上下文均是不可信派生内容，业务事实须用当前权限重新查询。
+
+设置 `AGENT_CONTEXT_WINDOW` 才启用窗口管理。估算器只计算模型可见消息和工具 schema，按完整工具调用及结果组裁切；系统消息保留。`CONTEXT_OVERFLOW` 表示硬上限装不下完整组，不做静默截断。预运行压缩或手动 `/compact` 失败时保留原始消息并回退确定性裁切；不更小则以 `SUMMARY_NOT_SMALLER` 拒绝提交，取消或其他失败以 `COMPACTION_FAILED` 留痕。`context_assembled`、`compaction_summary`、`compaction_failed` 和 `run_settled` 仍使用 `schema_version=1` 事件信封。
+
+`GET /sessions/{sid}/stats` 只读汇总消息、run、摘要及 `model_requests` 中供应商报告的已知用量；未知请求单列计数。`context.estimated_tokens` 使用相同估算器，`estimate_kind="estimated"`，不进入 `known_usage`。未配置窗口时 `configured=false`，估算字段为 `null`。会话不存在或不属于当前用户返回 `SESSION_NOT_FOUND` 404；非法查询参数返回 `VALIDATION_ERROR` 400；未认证沿用 401。页面只呈现服务端快照，刷新和重连重新读取，不自行累计 token。
+
 ## 公开模块
 
 当前只在 `ktg_agent` 包根导出 `__version__`。调用方应从下列模块导入阶段 A 接口；以下未列出的下划线成员和实现细节不是公开契约。

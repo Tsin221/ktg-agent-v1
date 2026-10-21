@@ -108,6 +108,13 @@
             <div v-if="activeRun.usage.unknown_request_count">{{ activeRun.usage.unknown_request_count }} 次模型调用用量暂缺</div>
           </details>
         </div>
+        <div v-if="contextStatusText(contextStatus)" class="agent-context-status" role="status">
+          <details>
+            <summary>上下文状态</summary>
+            <div>{{ contextPressureText(contextStatus) }}</div>
+            <div>{{ contextStatusText(contextStatus) }}</div>
+          </details>
+        </div>
         <p v-if="confirmingPreviewId || confirmingInventoryId" class="agent-business-status" role="status">独立业务确认仍在核验结果；停止聊天运行不会撤销已发出的确认。</p>
         <div v-if="pendingSubmission" class="agent-message agent-message--assistant" role="status">
           问题提交回执未确认。<button type="button" :disabled="loading" @click="retryPendingRun">用同一请求重试</button>
@@ -142,13 +149,14 @@
 </template>
 
 <script>
-import { agentSession, createAgentSession, listAgentSessions, getAgentSession, listAgentMessages,
+import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
+  contextStatusText, contextPressureText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
 const requestId = () => (window.crypto && window.crypto.randomUUID)
@@ -178,6 +186,7 @@ export default {
       sessionId: '',
       activeRunId: '',
       activeRun: null,
+      sessionStats: null,
       pendingQuestion: '',
       pendingSubmission: null,
       inputMode: 'follow_up',
@@ -202,6 +211,12 @@ export default {
   },
   computed: {
     displayedMessages() { return [...this.messages, ...this.businessMessages] },
+    contextStatus() {
+      const context = this.sessionStats && this.sessionStats.context
+      if (!context || !context.configured) return null
+      const runContext = this.activeRun && this.activeRun.context
+      return runContext ? { ...context, spill_count: runContext.spill_count } : context
+    },
     displayedInputs() {
       const inputs = [...this.pastInputs, ...this.runInputs]
       if (this.inputAttempt && !inputs.some(item => item.request_id === this.inputAttempt.requestId)) {
@@ -237,7 +252,7 @@ export default {
   },
   methods: {
     isTerminalRun, inputStatusText,
-    runStatusText, usageText,
+    runStatusText, usageText, contextStatusText, contextPressureText,
     localKey() {
       return `ktg-agent-view:${this.$store.state.user.id}:${this.sessionId}`
     },
@@ -269,6 +284,7 @@ export default {
       if (this.inputAttempt) this.draft = this.inputAttempt.message
     },
     resetIdentity() {
+      this.sessionStats = null
       this.epoch++
       agentSession.checkIdentity()
       agentSession.close()
@@ -330,6 +346,7 @@ export default {
       this.businessMessages = []
       this.progress = { messages: [], tools: {}}
       this.activeRun = null
+      this.sessionStats = null
       this.activeRunId = ''
       this.messages = []
       try {
@@ -339,6 +356,7 @@ export default {
         if (!agentSession.getState() || agentSession.getState().sessionId !== sessionId) agentSession.setSession(sessionId)
         this.sessionId = sessionId
         this.restoreLocalState()
+        await this.refreshStats(epoch)
         const items = await allMessages(sessionId)
         if (epoch !== this.epoch) return
         this.messages = presentMessages(items)
@@ -364,6 +382,16 @@ export default {
         if (epoch === this.epoch) this.panelError = this.errorText(error, '会话读取失败，请重新选择。')
       } finally {
         if (epoch === this.epoch) this.sessionLoading = false
+      }
+    },
+    async refreshStats(epoch = this.epoch) {
+      const sessionId = this.sessionId
+      if (!sessionId) return
+      try {
+        const stats = await getAgentSessionStats(sessionId)
+        if (epoch === this.epoch && sessionId === this.sessionId) this.sessionStats = stats
+      } catch (error) {
+        if (epoch === this.epoch && sessionId === this.sessionId) this.sessionStats = null
       }
     },
     selectSession(sessionId) {
@@ -400,6 +428,7 @@ export default {
             if (epoch !== this.epoch) return
             this.streamError = false
             this.panelError = ''
+            this.refreshStats(epoch)
           },
           onEvent: event => {
             if (epoch !== this.epoch || event.run_id !== this.activeRunId) return
@@ -422,6 +451,7 @@ export default {
           onSnapshot: snapshot => {
             if (epoch !== this.epoch || snapshot.run.run_id !== this.activeRunId) return
             this.activeRun = snapshot.run
+            this.refreshStats(epoch)
             this.messages = presentMessages(snapshot.messages.items)
             this.runInputs = snapshot.inputs
             this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
@@ -915,6 +945,8 @@ export default {
 .agent-run-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: #606266; font-size: 12px; }
 .agent-run-usage__details { width: 100%; }
 .agent-run-usage__details summary { color: #337ecc; cursor: pointer; }
+.agent-context-status { margin-top: 8px; color: #606266; font-size: 12px; }
+.agent-context-status summary { color: #337ecc; cursor: pointer; }
 
 .agent-example {
   display: block;

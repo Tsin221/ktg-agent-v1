@@ -36,7 +36,7 @@ class AfterToolHook(Protocol):
         tool: ToolDefinition,
         arguments: Mapping[str, Any],
         result: ToolResult,
-    ) -> Awaitable[None]: ...
+    ) -> Awaitable[ToolResult | None]: ...
 
 
 class ToolRunner:
@@ -147,7 +147,11 @@ class ToolRunner:
             result = self._validate_output(tool, result, context)
 
         for after_hook in self._after_hooks:
-            await after_hook(context, tool, call.arguments, result)
+            replacement = await after_hook(context, tool, call.arguments, result)
+            if replacement is not None:
+                if not isinstance(replacement, ToolResult):
+                    raise TypeError("after hook must return ToolResult or None")
+                result = replacement
         return result
 
     def _validate_output(

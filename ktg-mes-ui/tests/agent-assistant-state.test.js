@@ -18,6 +18,10 @@ let pointer = null
 let resolveWorkorder
 let resolveInventory
 let inputFailure = null
+let statsReads = 0
+const statsSnapshot = { context: { configured: true, window_tokens: 8192,
+  threshold_tokens: 6553, estimated_tokens: 100, estimate_kind: 'estimated',
+  summary_id: null, spill_count: 0 } }
 const controls = []
 const client = {
   checkIdentity: () => true,
@@ -55,6 +59,7 @@ const api = {
   createAgentSession: async () => ({ session_id: `session-${++createCount}`, title: null }),
   listAgentSessions: async () => ({ items: [{ session_id: 'session-1', title: '第一轮' }] }),
   getAgentSession: async () => ({ session_id: 'session-1', active_run_id: null }),
+  getAgentSessionStats: async () => { statsReads++; return statsSnapshot },
   listAgentMessages: async () => ({ items: [
     { message_id: 1, run_id: 'run-1', role: 'user', content: [{ type: 'text', text: '第一轮' }] },
     { message_id: 2, run_id: 'run-1', role: 'tool', details: { kind: 'stock', rows: [], total: 0 }, content: [] },
@@ -99,6 +104,7 @@ Object.defineProperty(view, 'busy', { get: () => options.computed.busy.call(view
 for (const name of ['canInput', 'canCancel', 'composerBusy', 'displayedMessages', 'displayedInputs']) {
   Object.defineProperty(view, name, { get: () => options.computed[name].call(view) })
 }
+Object.defineProperty(view, 'contextStatus', { get: () => options.computed.contextStatus.call(view) })
 assert.strictEqual(view.errorText({ response: { status: 500 } }, '提交状态未确认'), '提交状态未确认')
 
 async function settle(number, answer) {
@@ -202,6 +208,8 @@ async function main() {
   handlers.onConnectionRestored()
   assert.strictEqual(view.streamError, false)
   assert.strictEqual(view.panelError, '')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.contextStatus, statsSnapshot.context)
   await settle(1, '第一轮回答')
   view.runInputs = [{ request_id: 'not-consumed-1', mode: 'follow_up', message: '保留问题', status: 'not_consumed' }]
   view.draft = '第二轮'
@@ -223,6 +231,8 @@ async function main() {
   pointer = null
   await view.bootstrap()
   assert.strictEqual(view.sessionId, 'session-1')
+  assert.strictEqual(view.contextStatus, statsSnapshot.context)
+  assert.ok(statsReads >= 2)
   assert.strictEqual(view.businessMessages[0].text, '工单确认成功')
   assert.strictEqual(view.pastInputs[0].status, 'not_consumed')
   assert.strictEqual(view.messages[1].text, '第一轮回答')

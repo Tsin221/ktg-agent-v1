@@ -116,9 +116,12 @@ class Agent:
         identity: object | None = None,
         ktg_client: object | None = None,
         on_inputs_closed: Callable[[], None] | None = None,
+        publisher: EventPublisher | None = None,
     ) -> AgentRunResult:
         if self.is_running:
             raise AgentBusyError()
+        if publisher is not None and publisher.run_id != run_id:
+            raise ValueError("event publisher run id does not match the agent run")
 
         user_message = self._user_message(message)
         self._state = AgentState.RUNNING
@@ -130,7 +133,7 @@ class Agent:
         if self._abort_on_start:
             self._cancellation.cancel()
             self._abort_on_start = False
-        self._publisher = EventPublisher(run_id, self._dispatch_event)
+        self._publisher = publisher if publisher is not None else EventPublisher(run_id, self._dispatch_event)
         self._accepting_inputs = True
         self._on_inputs_closed = on_inputs_closed
         try:

@@ -8,7 +8,7 @@ const transformed = transformFileSync(filename, { babelrc: false, configFile: fa
 const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
-  visibleInputs, inputStatusText, usageText } = moduleRef.exports
+  visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText } = moduleRef.exports
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'
@@ -66,6 +66,14 @@ assert.strictEqual(usageText({ source: 'legacy_unknown', complete: false }), '�
 assert.strictEqual(usageText(null), '用量：暂缺')
 assert.strictEqual(usageText({ known_total_tokens: 0, complete: true }), '已知用量 0 token · 统计完整')
 assert.match(usageText({ known_total_tokens: 8, complete: false, unknown_request_count: 1 }), /未完整统计/)
+assert.strictEqual(contextStatusText(null), '')
+assert.strictEqual(contextPressureText({ configured: false }), '')
+const contextSnapshot = { configured: true, window_tokens: 8192, threshold_tokens: 6553,
+  estimated_tokens: 7000, estimate_kind: 'estimated', summary_id: '12345678-abcd',
+  covers_start_message_id: 1, covers_end_message_id: 9, spill_count: 2 }
+assert.match(contextPressureText(contextSnapshot), /估算值，非已知用量/)
+assert.match(contextStatusText(contextSnapshot), /12345678，覆盖 1-9/)
+assert.match(contextStatusText(contextSnapshot), /spill 2/)
 for (const [reason, phrase] of Object.entries({
   length: '单次模型输出', max_run_seconds: '运行时间', max_model_turns: '模型调用次数',
   max_tool_calls: '工具启动次数', cancelled: '用户取消', USAGE_PERSISTENCE_FAILED: '用量记录失败'

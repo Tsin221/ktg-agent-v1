@@ -86,6 +86,24 @@ export function usageText(usage) {
   return `${known} · ${usage.complete ? '统计完整' : '未完整统计（部分用量暂缺）'}`
 }
 
+export function contextPressureText(context) {
+  if (!context || !context.configured) return ''
+  const parts = [`窗口 ${context.window_tokens}`, `阈值 ${context.threshold_tokens}`]
+  if (context.estimate_kind === 'estimated' && Number.isSafeInteger(context.estimated_tokens)) {
+    parts.push(`估算 ${context.estimated_tokens} token（估算值，非已知用量）`)
+  }
+  return parts.join(' · ')
+}
+
+export function contextStatusText(context) {
+  if (!context || !context.configured) return ''
+  const summary = context.summary_id
+    ? `摘要 是（${context.summary_id.slice(0, 8)}，覆盖 ${context.covers_start_message_id}-${context.covers_end_message_id}）`
+    : '摘要 否'
+  const spill = Number.isSafeInteger(context.spill_count) ? context.spill_count : '暂缺'
+  return `${summary} · spill ${spill}`
+}
+
 export function runStatusText(run) {
   if (!run) return ''
   const summary = run.result_summary || {}

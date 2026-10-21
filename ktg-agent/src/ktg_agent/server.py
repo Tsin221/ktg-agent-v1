@@ -14,9 +14,12 @@ from pathlib import Path
 from threading import BoundedSemaphore, Event
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
-from ktg_agent.core.events import EventSink
+from ktg_agent.core.events import EventPublisher, EventSink
+from ktg_agent.context.compaction import PreparedCompaction
 from ktg_agent.core.loop import AgentRunResult, RunLimits
 from ktg_agent.core.messages import JsonObject, Message
+from ktg_agent.context.spill import SpillSettings
+from ktg_agent.context.window import ContextPolicy
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.providers import OpenAICompatibleProvider
@@ -163,6 +166,20 @@ def create_session_repository(settings: Settings) -> SessionRepository:
 
 
 def create_service(settings: Settings) -> QueryService:
+    model_config = ModelConfig(model=settings.model_id, max_output_tokens=1024)
+    context_policy = None
+    if settings.context_window is not None:
+        try:
+            context_policy = ContextPolicy(
+                window_tokens=settings.context_window,
+                reserve_tokens=(settings.context_reserve_tokens
+                                if settings.context_reserve_tokens is not None
+                                else model_config.max_output_tokens),
+                threshold_ratio=settings.context_threshold_ratio,
+                retain_ratio=settings.context_retain_ratio,
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"invalid context configuration: {exc}") from exc
     provider = OpenAICompatibleProvider(
         api_key=settings.model_api_key,
         base_url=settings.model_base_url,
@@ -184,13 +201,16 @@ def create_service(settings: Settings) -> QueryService:
         raise RuntimeError("AGENT_INVENTORY_DB must be an absolute path when inventory actions are enabled")
     return QueryService(
         provider=provider,
-        model_config=ModelConfig(
-            model=settings.model_id,
-            max_output_tokens=1024,
-        ),
+        model_config=model_config,
         ktg_client_factory=client_factory,
         inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
         inventory_actions=actions,
+        spill_settings=(
+            SpillSettings(settings.spill_max_inline_tokens, Path(settings.spill_dir))
+            if settings.spill_max_inline_tokens is not None and settings.spill_dir else None
+        ),
+        context_policy=context_policy,
+        summary_max_tokens=settings.context_summary_max_tokens,
         limits=RunLimits(max_model_turns=8, max_tool_calls=12,
                          max_run_seconds=90, max_parallel_reads=3,
                          max_total_tokens=settings.max_total_tokens),
@@ -214,8 +234,21 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
             on_agent_ready=register_agent,
         )
 
+    async def compact(run_id: str, prepared: PreparedCompaction, event_sink: EventSink,
+                      publisher: EventPublisher, register_agent: RegisterAgent) -> AgentRunResult:
+        return await service.run_compaction(
+            run_id, prepared, event_sink=event_sink, publisher=publisher,
+            on_agent_ready=register_agent)
+
     return SessionService(repository, client_factory,
-                          RunCoordinator(repository, execute, service.budget_snapshot))
+                          RunCoordinator(repository, execute, service.budget_snapshot,
+                                         compaction_planner=service.plan_compaction,
+                                         compaction_executor=compact,
+                                         system_prompt_builder=service.build_system_prompt,
+                                         summary_budget_snapshot=service.summary_budget_snapshot),
+                          context_policy=service.context_policy,
+                          system_prompt_builder=service.build_system_prompt,
+                          tool_schemas=service.model_tool_schemas)
 
 
 class AgentHTTPServer(ThreadingHTTPServer):
@@ -283,6 +316,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_run_create = (path.startswith("/agent-api/v1/sessions/")
                          and len(run_segments) == 2 and bool(run_segments[0])
                          and run_segments[1] == "runs" and not urlsplit(self.path).query)
+        is_compact = (path.startswith("/agent-api/v1/sessions/")
+                      and len(run_segments) == 2 and bool(run_segments[0])
+                      and run_segments[1] == "compact" and not urlsplit(self.path).query)
         cancel_segments = path.removeprefix("/agent-api/v1/runs/").split("/")
         is_cancel = (path.startswith("/agent-api/v1/runs/")
                      and len(cancel_segments) == 2 and bool(cancel_segments[0])
@@ -290,7 +326,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_input = (path.startswith("/agent-api/v1/runs/")
                     and len(cancel_segments) == 2 and bool(cancel_segments[0])
                     and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
-        if not is_run_create and not is_cancel and not is_input and self.path not in {
+        if not is_run_create and not is_compact and not is_cancel and not is_input and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
@@ -303,7 +339,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > 64 * 1024:
-            self._write_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "请求内容无效。")
+            self._write_error(HTTPStatus.BAD_REQUEST,
+                              "VALIDATION_ERROR" if is_compact else "INVALID_REQUEST",
+                              "请求内容无效。")
             return
         try:
             payload = json.loads(self.rfile.read(length))
@@ -325,6 +363,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     authorization, run_segments[0], payload.get("request_id"),
                     payload.get("message"), payload.get("page_context"),
                 ))
+            elif is_compact:
+                if set(payload) != {"request_id"}:
+                    raise ValueError("压缩请求仅允许 request_id。")
+                response = asyncio.run(self.server.session_service.request_compaction(
+                    authorization, run_segments[0], payload["request_id"]))
             elif is_cancel:
                 if set(payload) != {"request_id"}:
                     raise ValueError("取消请求仅允许 request_id。")
@@ -389,7 +432,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             )
             return
         status = (HTTPStatus.CREATED if self.path == "/agent-api/v1/sessions"
-                  else HTTPStatus.ACCEPTED if is_run_create or is_input or
+                  else HTTPStatus.ACCEPTED if is_run_create or is_compact or is_input or
                   (is_cancel and response["cancel_status"] == "accepted") else HTTPStatus.OK)
         self._write_json(status, response)
 
@@ -555,6 +598,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             elif len(segments) == 2 and segments[0] and segments[1] == "messages":
                 response = asyncio.run(self.server.session_service.messages(
                     authorization, segments[0], cursor=cursor, limit=limit))
+            elif len(segments) == 2 and segments[0] and segments[1] == "stats":
+                if params:
+                    raise ValueError("stats 不接受查询参数。")
+                response = asyncio.run(self.server.session_service.stats(
+                    authorization, segments[0]))
             else:
                 self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
                 return

@@ -201,10 +201,12 @@ def test_provider_and_storage_failure_never_complete(tmp_path: Path) -> None:
     original = repo.settle_run
 
     def fail_success(owner_user_id: str, run_id: str, status: str, stop_reason: str,
-                     result_summary: JsonObject, messages: tuple[Message, ...]) -> RunRecord:
+                     result_summary: JsonObject, messages: tuple[Message, ...], *,
+                     context: JsonObject | None = None) -> RunRecord:
         if status == "completed":
             raise OSError("database unavailable")
-        return original(owner_user_id, run_id, status, stop_reason, result_summary, messages)
+        return original(owner_user_id, run_id, status, stop_reason, result_summary, messages,
+                        context=context)
 
     repo.settle_run = fail_success  # type: ignore[method-assign]
     next_run, _ = repo.admit_run("id:7", session.id, "r2", "h2", {})
@@ -261,7 +263,8 @@ def test_execution_and_settlement_failures_are_diagnosed_and_recovered(
 
     failing, _ = repo.admit_run("id:7", session.id, "r2", "h2", {})
     def unavailable(owner_user_id: str, run_id: str, status: str, stop_reason: str,
-                    result_summary: JsonObject, messages: tuple[Message, ...]) -> RunRecord:
+                    result_summary: JsonObject, messages: tuple[Message, ...], *,
+                    context: JsonObject | None = None) -> RunRecord:
         raise OSError("Bearer secret-token database unavailable")
     repo.settle_run = unavailable  # type: ignore[method-assign]
     coordinator = RunCoordinator(repo, broken_executor)

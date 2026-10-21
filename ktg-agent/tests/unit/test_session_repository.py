@@ -11,6 +11,33 @@ from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.repository import ControlConflictError, ControlRecord, ControlStateError
 
 
+def test_session_stats_only_counts_reported_usage_and_checks_owner(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "stats.sqlite3")
+    session = repo.create_session("alice")
+    run = repo.create_run("alice", session.id, "one", "one", {})
+    repo.append_event("alice", run.id, 1, "model_request_started",
+                      {"call_id": "known", "turn": 1, "model": "fake"})
+    repo.append_event("alice", run.id, 2, "model_usage_reported",
+                      {"call_id": "known", "turn": 1, "input_tokens": 5,
+                       "output_tokens": 2, "cached_input_tokens": 1})
+    repo.append_event("alice", run.id, 3, "model_request_started",
+                      {"call_id": "unknown", "turn": 2, "model": "fake"})
+    repo.settle_run("alice", run.id, "completed", "completed", {},
+                    (UserMessage((TextBlock("hello"),)),))
+    stats = repo.session_stats("alice", session.id)
+    usage = stats["known_usage"]
+    assert isinstance(usage, dict)
+    assert usage["known_total_tokens"] == 7
+    assert usage["unknown_request_count"] == 1
+    assert usage["complete"] is False
+    assert stats["message_count"] == 1
+    assert stats["summary_counts"] == {}
+    with pytest.raises(KeyError):
+        repo.session_stats("bob", session.id)
+    with pytest.raises(KeyError):
+        repo.session_stats("alice", "missing")
+
+
 def test_repository_reopens_with_ordered_history(tmp_path: Path) -> None:
     path = tmp_path / "sessions.sqlite3"
     with SessionRepository(path) as repo:
@@ -268,8 +295,11 @@ def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: 
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE model_requests")
         db.execute("DROP TABLE control_commands")
+        db.execute("DROP TABLE context_summaries")
         db.execute("ALTER TABLE runs DROP COLUMN budget_json")
         db.execute("ALTER TABLE runs DROP COLUMN usage_json")
+        db.execute("ALTER TABLE runs DROP COLUMN kind")
+        db.execute("ALTER TABLE runs DROP COLUMN context_json")
         db.execute("PRAGMA user_version=2")
     migrated = SessionRepository(path)
     restored = migrated.get_run("alice", run.id)
@@ -277,7 +307,7 @@ def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: 
     assert restored.usage == {"source": "legacy_unknown", "complete": False}
     assert restored.budget is None
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
         assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None
 
 

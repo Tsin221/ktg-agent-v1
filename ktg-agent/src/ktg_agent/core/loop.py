@@ -7,8 +7,10 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
 from math import isfinite
 from time import monotonic
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+if TYPE_CHECKING:
+    from ktg_agent.context.window import ContextPolicy
 from ktg_agent.core.events import (
     AgentEvent,
     AgentEventType,
@@ -21,7 +23,9 @@ from ktg_agent.core.messages import (
     JsonObject,
     Message,
     StopReason,
+    TextBlock,
     ToolCall,
+    ToolResultMessage,
     message_to_dict,
     project_model_messages,
 )
@@ -166,6 +170,7 @@ class AgentLoop:
         model_config: ModelConfig,
         event_sink: EventSink | None = None,
         limits: RunLimits | None = None,
+        context_policy: ContextPolicy | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._provider = provider
@@ -174,6 +179,7 @@ class AgentLoop:
         self._model_config = model_config
         self._event_sink = event_sink
         self._limits = limits or RunLimits()
+        self._context_policy = context_policy
         self._clock = clock
 
     @property
@@ -193,6 +199,8 @@ class AgentLoop:
         close_inputs: Callable[[], None] | None = None,
         new_input_count: int = 1,
     ) -> AgentRunResult:
+        from ktg_agent.context.window import ContextOverflowError
+
         history = list(messages)
         if type(new_input_count) is not int or not 0 <= new_input_count <= len(history):
             raise ValueError("new_input_count must fit within messages")
@@ -491,6 +499,20 @@ class AgentLoop:
                     model_requests=tuple(usage_accumulator.requests),
                     usage=usage_accumulator.snapshot(),
                 )
+        except ContextOverflowError:
+            if close_inputs is not None:
+                close_inputs()
+            await self._emit_agent_end_once(publisher, {
+                "status": "failed", "stop_reason": "error",
+                "error_code": "CONTEXT_OVERFLOW", "turns": turn,
+            })
+            return AgentRunResult(
+                messages=tuple(history), new_messages=tuple(history[baseline:]),
+                final_response=FinalResponse(None, StopReason.ERROR),
+                events=publisher.events, error_code="CONTEXT_OVERFLOW",
+                model_requests=tuple(usage_accumulator.requests),
+                usage=usage_accumulator.snapshot(),
+            )
         except BaseException as exc:
             if close_inputs is not None:
                 close_inputs()
@@ -802,6 +824,49 @@ class AgentLoop:
         usage_accumulator: _UsageAccumulator,
         started_at: float,
     ) -> FinalResponse:
+        from ktg_agent.context.tokens import estimate_tools_tokens
+        from ktg_agent.context.window import ContextOverflowError, fit_window
+
+        projected = project_model_messages(history)
+        schemas = self._tool_registry.model_schemas()
+        if self._context_policy is not None:
+            # Projection removes invisible messages and clears result details. Preserve
+            # the original spill markers in the projected sequence's coordinates.
+            visible = (
+                message for message in history
+                if any(isinstance(block, ToolCall)
+                       or isinstance(block, TextBlock) and block.model_visible
+                       for block in message.content)
+            )
+            spill_flags = tuple(
+                isinstance(message, ToolResultMessage)
+                and isinstance(message.details, dict) and "spill" in message.details
+                for message in visible
+            )
+            try:
+                plan = fit_window(
+                    projected, self._context_policy,
+                    tool_schema_tokens=estimate_tools_tokens(schemas),
+                    spill_flags=spill_flags,
+                )
+            except ContextOverflowError as exc:
+                await publisher.emit(AgentEventType.CONTEXT_OVERFLOW, {
+                    "estimated_tokens": exc.estimated_tokens,
+                    "available_tokens": exc.available_tokens,
+                    "largest_group_tokens": exc.largest_group_tokens,
+                })
+                raise
+            await publisher.emit(AgentEventType.CONTEXT_ASSEMBLED, {
+                "estimated_tokens": plan.estimated_after,
+                "threshold_tokens": plan.threshold_tokens,
+                "summary_id": None,
+                "retained_message_count": plan.retained_message_count,
+                "spill_count": plan.spill_count,
+                "trimmed": plan.trimmed,
+            })
+            request_messages = plan.messages
+        else:
+            request_messages = projected
         await publisher.emit(AgentEventType.TURN_START, {"turn": turn})
         message_id = f"{publisher.events[0].run_id}:message:{turn}"
         await publisher.emit(
@@ -853,8 +918,8 @@ class AgentLoop:
                 })
                 return response
             request = ProviderRequest(
-                messages=project_model_messages(history),
-                tools=self._tool_registry.model_schemas(),
+                messages=request_messages,
+                tools=schemas,
                 config=self._model_config,
                 cancellation=cancellation,
                 call_id=call_id,
