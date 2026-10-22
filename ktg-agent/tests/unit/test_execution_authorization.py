@@ -97,7 +97,8 @@ def test_hidden_confirmation_rechecks_permission_and_switch() -> None:
         catalog = build_legacy_catalog((tool,))
         switches = CatalogSwitches({"wm": True}, {tool.name: True})
         permissions: dict[str, frozenset[str] | None] = {
-            "value": frozenset({"mes:wm:itemrecpt:edit"})}
+            "value": frozenset({"mes:wm:itemrecpt:edit", "mes:wm:itemrecpt:query",
+                                "mes:wm:wmstock:list"})}
         current_switches = {"value": switches}
 
         async def authorize(context: ToolContext) -> CallAuthorization:
@@ -118,7 +119,8 @@ def test_hidden_confirmation_rechecks_permission_and_switch() -> None:
         assert (await runner.run(call, trusted)).error_code == "PERMISSION_DENIED"
         permissions["value"] = None
         assert (await runner.run(call, trusted)).error_code == "PERMISSION_UNAVAILABLE"
-        permissions["value"] = frozenset({"mes:wm:itemrecpt:edit"})
+        permissions["value"] = frozenset({"mes:wm:itemrecpt:edit",
+                                          "mes:wm:itemrecpt:query", "mes:wm:wmstock:list"})
         current_switches["value"] = CatalogSwitches({"wm": True}, {tool.name: False})
         assert (await runner.run(call, trusted)).error_code == "TOOL_DISABLED"
         assert execute.calls == 1
