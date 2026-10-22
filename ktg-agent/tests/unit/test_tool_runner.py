@@ -27,6 +27,7 @@ from ktg_agent.tools import (
     ToolRunner,
     ToolStatus,
 )
+from ktg_agent.tools.registry import ToolChannel, RetryPolicy
 
 
 INPUT_SCHEMA: JsonObject = {
@@ -132,6 +133,100 @@ def test_unregistered_tool_does_not_execute_any_registered_callable() -> None:
     assert result.status is ToolStatus.FAILED
     assert result.error_code == "TOOL_NOT_FOUND"
     assert execute.calls == 0
+
+
+def test_hidden_tool_requires_server_confirmation_context() -> None:
+    execute = CountingTool()
+    hidden = ToolDefinition(
+        name="ktg.hidden", version="1.0", description="Hidden action", label="Action",
+        input_schema=INPUT_SCHEMA, output_schema=None, required_permissions=("stock:write",),
+        effect=ToolEffect.WRITE, execution_mode=ExecutionMode.SEQUENTIAL,
+        timeout_seconds=1, execute=execute, expose_to_model=False,
+    )
+    runner = ToolRunner(ToolRegistry([hidden]))
+    call = ToolCall("call-1", "ktg.hidden", {"item_id": 42, "confirmed": True})
+    model_result = asyncio.run(runner.run(call, ToolContext(
+        run_id="run-1", tool_call_id=call.id, operation_id="guessed")))
+    assert model_result.error_code == "TOOL_NOT_FOUND"
+    assert execute.calls == 0
+
+    invalid = asyncio.run(runner.run(
+        ToolCall("call-2", "ktg.hidden", {"item_id": 42}),
+        ToolContext(run_id="run-1", tool_call_id="call-2", operation_id="guessed",
+                    channel=ToolChannel.TRUSTED_CONFIRMATION),
+    ))
+    assert invalid.error_code == "CONFIRMATION_INVALID"
+    assert execute.calls == 0
+
+    valid = asyncio.run(runner.run(
+        ToolCall("call-3", "ktg.hidden", {"item_id": 42}),
+        ToolContext(run_id="run-1", tool_call_id="call-3", operation_id="op-1",
+                    identity={"userId": 7}, channel=ToolChannel.TRUSTED_CONFIRMATION,
+                    confirmation_id="confirmation-1"),
+    ))
+    assert valid.status is ToolStatus.SUCCEEDED
+    assert valid.operation_id == "op-1"
+    assert execute.calls == 1
+
+
+def test_write_timeout_is_unknown_and_not_retried() -> None:
+    class SlowWrite:
+        calls = 0
+
+        async def __call__(self, context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            return ToolResult(content="done")
+
+    execute = SlowWrite()
+    base = definition(execute)
+    write = ToolDefinition(
+        name=base.name, version=base.version, description=base.description,
+        label=base.label, input_schema=base.input_schema, output_schema=None,
+        required_permissions=base.required_permissions, effect=ToolEffect.WRITE,
+        execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=0.001,
+        execute=execute, retry_policy=RetryPolicy.RECONCILE_FIRST,
+    )
+    result = run(ToolRunner(ToolRegistry([write])), ToolCall("call-1", write.name, {"item_id": 42}))
+    assert result.status is ToolStatus.UNKNOWN
+    assert result.error_code == "RESULT_UNKNOWN"
+    assert execute.calls == 1
+
+
+def test_bounded_read_retries_once_but_sequential_preview_does_not() -> None:
+    class FailsOnce:
+        calls = 0
+
+        async def __call__(self, context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("temporary timeout")
+            return ToolResult(content="read succeeded")
+
+    read_execute = FailsOnce()
+    base = definition(read_execute)
+    bounded = ToolDefinition(
+        name=base.name, version=base.version, description=base.description,
+        label=base.label, input_schema=base.input_schema, output_schema=None,
+        required_permissions=base.required_permissions, effect=ToolEffect.READ,
+        execution_mode=ExecutionMode.PARALLEL, timeout_seconds=1,
+        execute=read_execute, retry_policy=RetryPolicy.BOUNDED_READ,
+    )
+    result = run(ToolRunner(ToolRegistry([bounded])), ToolCall("call-1", bounded.name, {"item_id": 42}))
+    assert result.status is ToolStatus.SUCCEEDED
+    assert read_execute.calls == 2
+
+    preview_execute = FailsOnce()
+    preview = ToolDefinition(
+        name=base.name, version=base.version, description=base.description,
+        label=base.label, input_schema=base.input_schema, output_schema=None,
+        required_permissions=base.required_permissions, effect=ToolEffect.READ,
+        execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=1,
+        execute=preview_execute, retry_policy=RetryPolicy.BOUNDED_READ,
+    )
+    result = run(ToolRunner(ToolRegistry([preview])), ToolCall("call-2", preview.name, {"item_id": 42}))
+    assert result.status is ToolStatus.FAILED
+    assert preview_execute.calls == 1
 
 
 def test_missing_required_argument_does_not_execute() -> None:

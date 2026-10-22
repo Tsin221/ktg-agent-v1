@@ -29,6 +29,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.ktg.common.annotation.Log;
 import com.ktg.common.core.controller.BaseController;
@@ -77,8 +78,11 @@ public class ProFeedbackController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('mes:pro:feedback:list')")
     @GetMapping("/list")
-    public TableDataInfo list(ProFeedback proFeedback)
+    public TableDataInfo list(ProFeedback proFeedback,
+                             @RequestParam(name = "fromTime", required = false) String fromTime,
+                             @RequestParam(name = "toTime", required = false) String toTime)
     {
+        ProFeedbackTimeRange.apply(proFeedback, fromTime, toTime);
         startPage();
         List<ProFeedback> list = proFeedbackService.selectProFeedbackList(proFeedback);
         return getDataTable(list);

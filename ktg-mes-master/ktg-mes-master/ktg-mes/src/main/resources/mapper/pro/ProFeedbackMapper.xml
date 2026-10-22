@@ -77,10 +77,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="nickName != null  and nickName != ''"> and nick_name like concat('%', #{nickName}, '%')</if>
             <if test="feedbackChannel != null  and feedbackChannel != ''"> and feedback_channel = #{feedbackChannel}</if>
             <if test="feedbackTime != null "> and feedback_time = #{feedbackTime}</if>
+            <if test="params.feedbackFrom != null"> and feedback_time &gt;= #{params.feedbackFrom}</if>
+            <if test="params.feedbackTo != null"> and feedback_time &lt; #{params.feedbackTo}</if>
             <if test="recordUser != null "> and record_user = #{recordUser}</if>
             <if test="recordNick != null "> and record_nick = #{recordNick}</if>
             <if test="status != null "> and status = #{status}</if>
         </where>
+        order by record_id asc
     </select>
     
     <select id="selectProFeedbackByRecordId" parameterType="Long" resultMap="ProFeedbackResult">

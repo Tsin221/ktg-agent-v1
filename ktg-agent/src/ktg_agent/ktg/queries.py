@@ -108,7 +108,12 @@ def _tool(
             "required": ["kind", "rows", "total", "page", "page_size", "queried_at"],
             "additionalProperties": False,
         },
-        required_permissions=(),
+        required_permissions=({
+            "ktg_count_products": "mes:md:mditem:list",
+            "ktg_search_items": "mes:md:mditem:list",
+            "ktg_query_stock": "mes:wm:wmstock:list",
+            "ktg_list_workorders": "mes:pro:workorder:list",
+        }[name],),
         effect=ToolEffect.READ,
         execution_mode=ExecutionMode.PARALLEL,
         retry_policy=RetryPolicy.BOUNDED_READ,

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from jsonschema import Draft202012Validator
 
 from ktg_agent.core.messages import JsonObject, ToolCall
+from ktg_agent.tools.catalog import CandidateSnapshot, CatalogSwitches, ToolCatalog
+from ktg_agent.tools.permissions import PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.registry import (
     ExecutionMode,
     ToolContext,
@@ -17,6 +20,8 @@ from ktg_agent.tools.registry import (
     ToolRegistry,
     ToolResult,
     ToolStatus,
+    ToolChannel,
+    RetryPolicy,
 )
 
 
@@ -39,6 +44,17 @@ class AfterToolHook(Protocol):
     ) -> Awaitable[ToolResult | None]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class CallAuthorization:
+    permissions: frozenset[str] | None
+    switches: CatalogSwitches
+    candidate: CandidateSnapshot | None = None
+    active_names: frozenset[str] | None = None
+
+
+type AuthorizationProvider = Callable[[ToolContext], Awaitable[CallAuthorization]]
+
+
 class ToolRunner:
     def __init__(
         self,
@@ -46,10 +62,16 @@ class ToolRunner:
         *,
         before_hooks: Sequence[BeforeToolHook] = (),
         after_hooks: Sequence[AfterToolHook] = (),
+        catalog: ToolCatalog | None = None,
+        authorization_provider: AuthorizationProvider | None = None,
     ) -> None:
+        if (catalog is None) != (authorization_provider is None):
+            raise ValueError("catalog and authorization provider must be configured together")
         self._registry = registry
         self._before_hooks = tuple(before_hooks)
         self._after_hooks = tuple(after_hooks)
+        self._catalog = catalog
+        self._authorization_provider = authorization_provider
 
     def can_run_batch_in_parallel(self, calls: Sequence[ToolCall]) -> bool:
         """Only independent, explicitly parallel reads may overlap."""
@@ -77,10 +99,55 @@ class ToolRunner:
             tool = self._registry.get(call.name)
         except KeyError:
             return self._error(
-                f"Tool is not available: {call.name}",
+                "Tool is not available.",
                 "TOOL_NOT_FOUND",
                 context,
             )
+
+        if context.channel is ToolChannel.MODEL and not tool.expose_to_model:
+            return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+        if context.channel is ToolChannel.TRUSTED_CONFIRMATION and (
+            tool.expose_to_model or context.identity is None
+            or context.confirmation_id is None or context.operation_id is None
+        ):
+            return self._error("Confirmation is invalid.", "CONFIRMATION_INVALID", context)
+
+        if self._catalog is not None and self._authorization_provider is not None:
+            if context.identity is None:
+                return self._error("Permission service is unavailable.", "PERMISSION_UNAVAILABLE", context)
+            try:
+                manifest = self._catalog.manifest(call.name)
+            except KeyError:
+                return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+            if manifest.version != tool.version:
+                return self._error("Tool version changed.", "TOOL_VERSION_MISMATCH", context)
+            if (context.channel is ToolChannel.TRUSTED_CONFIRMATION
+                    and manifest.confirmation_policy != "trusted_confirmation"):
+                return self._error("Confirmation is invalid.", "CONFIRMATION_INVALID", context)
+            try:
+                authorization = await self._authorization_provider(context)
+            except Exception:
+                return self._error("Permission service is unavailable.", "PERMISSION_UNAVAILABLE", context)
+            if not isinstance(authorization, CallAuthorization) or not isinstance(authorization.switches, CatalogSwitches):
+                return self._error("Permission service is unavailable.", "PERMISSION_UNAVAILABLE", context)
+            if not manifest.expose_to_model and context.channel is not ToolChannel.TRUSTED_CONFIRMATION:
+                return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+            if not authorization.switches.enabled(manifest):
+                return self._error("Tool is disabled.", "TOOL_DISABLED", context)
+            decision = evaluate_permission_policy(manifest.permission_policy, authorization.permissions)
+            if decision is not PermissionDecision.ALLOWED:
+                return self._error("Permission is unavailable." if decision is PermissionDecision.UNAVAILABLE
+                                   else "Permission denied.", decision.value, context)
+            if context.channel is ToolChannel.MODEL:
+                candidate = authorization.candidate
+                if candidate is None or candidate.run_id != context.run_id:
+                    return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+                if candidate.catalog_version != self._catalog.catalog_version:
+                    return self._error("Tool version changed.", "TOOL_VERSION_MISMATCH", context)
+                if candidate.candidates.get(call.name) != manifest.version:
+                    return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+                if authorization.active_names is None or call.name not in authorization.active_names:
+                    return self._error("Tool is not active.", "TOOL_NOT_ACTIVE", context)
 
         validation_error = next(
             iter(Draft202012Validator(tool.input_schema).iter_errors(call.arguments)),
@@ -119,19 +186,26 @@ class ToolRunner:
                 )
 
         try:
-            if tool.effect is ToolEffect.WRITE:
-                result = await tool.execute(context, call.arguments)
-            else:
-                async with asyncio.timeout(tool.timeout_seconds):
-                    result = await tool.execute(context, call.arguments)
+            attempts = 2 if (
+                tool.effect is ToolEffect.READ
+                and tool.execution_mode is ExecutionMode.PARALLEL
+                and tool.retry_policy is RetryPolicy.BOUNDED_READ
+            ) else 1
+            for attempt in range(attempts):
+                try:
+                    async with asyncio.timeout(tool.timeout_seconds):
+                        result = await tool.execute(context, call.arguments)
+                    break
+                except TimeoutError:
+                    if attempt + 1 == attempts:
+                        raise
             if not isinstance(result, ToolResult):
                 raise TypeError("tool execute must return ToolResult")
         except TimeoutError:
-            result = self._error(
-                "Tool execution timed out.",
-                "TOOL_TIMEOUT",
-                context,
-            )
+            result = (ToolResult(content="Tool result is unknown.", status=ToolStatus.UNKNOWN,
+                                 error_code="RESULT_UNKNOWN", operation_id=context.operation_id)
+                      if tool.effect is ToolEffect.WRITE else self._error(
+                          "Tool execution timed out.", "TOOL_TIMEOUT", context))
         except Exception as exc:
             result = ToolResult(
                 content="Tool execution failed.",

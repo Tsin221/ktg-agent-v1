@@ -222,10 +222,15 @@ def _preview_tool(
             "additionalProperties": False,
         },
         output_schema=None,
-        required_permissions=(),
+        # Catalog authorization covers every supported input path (ID or search).
+        required_permissions=(
+            "mes:md:mditem:list", "mes:md:mditem:query",
+            *(("mes:pro:workorder:add",) if name == "ktg_preview_create_workorder_draft"
+              else ("mes:pro:workorder:edit", "mes:pro:workorder:list", "mes:pro:workorder:query")),
+        ),
         effect=ToolEffect.READ,
         execution_mode=ExecutionMode.SEQUENTIAL,
-        retry_policy=RetryPolicy.BOUNDED_READ,
+        retry_policy=RetryPolicy.NEVER,
         timeout_seconds=20,
         execute=cast(ToolExecute, execute),
     )
@@ -251,6 +256,8 @@ def _write_tool(
         output_schema=None,
         required_permissions=(
             "mes:pro:workorder:add" if action == "create" else "mes:pro:workorder:edit",
+            "mes:pro:workorder:list", "mes:pro:workorder:query",
+            "mes:md:bom:list", "mes:pro:workorderbom:list",
         ),
         effect=ToolEffect.WRITE,
         execution_mode=ExecutionMode.SEQUENTIAL,

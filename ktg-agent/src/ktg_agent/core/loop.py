@@ -51,6 +51,7 @@ from ktg_agent.tools import (
     ToolEffect,
     ToolStatus,
 )
+from ktg_agent.tools.discovery import RunToolDiscovery
 
 
 class AgentLoopError(RuntimeError):
@@ -171,6 +172,7 @@ class AgentLoop:
         event_sink: EventSink | None = None,
         limits: RunLimits | None = None,
         context_policy: ContextPolicy | None = None,
+        discovery: RunToolDiscovery | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._provider = provider
@@ -180,6 +182,7 @@ class AgentLoop:
         self._event_sink = event_sink
         self._limits = limits or RunLimits()
         self._context_policy = context_policy
+        self._discovery = discovery
         self._clock = clock
 
     @property
@@ -216,7 +219,10 @@ class AgentLoop:
             raise ValueError("event publisher run id does not match the agent run")
         await publisher.emit(
             AgentEventType.AGENT_START,
-            {"message_count": len(history)},
+            {"message_count": len(history),
+             **({"catalog_version": self._discovery.candidate.catalog_version,
+                 "candidate_count": len(self._discovery.candidate.candidates)}
+                if self._discovery is not None else {})},
         )
         agent_status = "failed"
         turn = 0
@@ -334,6 +340,7 @@ class AgentLoop:
                             identity=identity,
                             cancellation=cancellation,
                             ktg_client=ktg_client,
+                            active_snapshot_id=f"{run_id}:{turn}" if self._discovery else None,
                         )
                     )
                     tool_calls_started += batch_started
@@ -559,6 +566,7 @@ class AgentLoop:
         identity: object | None,
         cancellation: CancellationSignal | None,
         ktg_client: object | None,
+        active_snapshot_id: str | None,
     ) -> tuple[tuple[ToolResult, ...], int, bool]:
         started_count = 0
         time_limit_reached = False
@@ -568,6 +576,7 @@ class AgentLoop:
 
         async def execute(call: ToolCall) -> ToolResult:
             nonlocal started_count
+            tool_started_at = self._clock()
             try:
                 tool = self._tool_registry.get(call.name)
             except KeyError:
@@ -588,18 +597,28 @@ class AgentLoop:
                 tool_name=call.name,
             )
             try:
-                result = (self._cancelled_tool_result() if cancellation is not None
-                          and cancellation.is_cancelled else await self._tool_runner.run(
-                    call,
-                    ToolContext(
+                active_names = (self._discovery.active_names(active_snapshot_id)
+                                if self._discovery is not None else None)
+                if cancellation is not None and cancellation.is_cancelled:
+                    result = self._cancelled_tool_result()
+                elif (self._discovery is not None and call.name in self._discovery.candidate.candidates
+                      and call.name not in (active_names or frozenset())):
+                    result = ToolResult("Tool is not active.", status=ToolStatus.FAILED,
+                                        error_code="TOOL_NOT_ACTIVE")
+                elif self._discovery is not None and call.name in ("search_tools", "load_tools"):
+                    result = await self._discovery.execute(call)
+                else:
+                    result = await self._tool_runner.run(call, ToolContext(
                         run_id=run_id,
                         tool_call_id=call.id,
                         identity=identity,
                         cancellation=cancellation,
                         progress_publisher=progress,
                         ktg_client=ktg_client,
-                    ),
-                ))
+                        candidate_snapshot_id=(self._discovery.candidate.catalog_version
+                                               if self._discovery else None),
+                        active_snapshot_id=active_snapshot_id,
+                    ))
             except BaseException as exc:
                 await publisher.emit(
                     AgentEventType.TOOL_EXECUTION_END,
@@ -619,6 +638,7 @@ class AgentLoop:
                 "tool_name": call.name,
                 "effect": tool.effect.value if tool is not None else "unavailable",
                 "status": result.status.value,
+                "duration_ms": max(0, int((self._clock() - tool_started_at) * 1000)),
             }
             if result.error_code is not None:
                 end_payload["error_code"] = result.error_code
@@ -628,6 +648,16 @@ class AgentLoop:
                 end_payload["verification"] = result.verification
             if result.details is not None:
                 end_payload["result"] = result.details
+            if self._discovery is not None and call.name in ("search_tools", "load_tools"):
+                event_name = ("tool_rejected" if result.status is not ToolStatus.SUCCEEDED
+                              else "tool_searched" if call.name == "search_tools"
+                              else "tool_activated")
+                await progress.publish(
+                    event_name,
+                    details={"status": result.status.value,
+                             "error_code": result.error_code,
+                             "duration_ms": end_payload["duration_ms"]},
+                )
             await publisher.emit(AgentEventType.TOOL_EXECUTION_END, end_payload)
             return result
 
@@ -769,6 +799,46 @@ class AgentLoop:
         usage_accumulator: _UsageAccumulator,
         message: AssistantMessage | None = None,
     ) -> AgentRunResult:
+        if message is None or not any(
+            isinstance(block, TextBlock) and block.text.strip() for block in message.content
+        ):
+            # No extra provider call after a hard budget. Preserve the limited
+            # outcome while giving the UI a truthful, bounded partial response.
+            summaries: list[str] = []
+            calls = {block.id: block.name for entry in history[baseline:]
+                     if isinstance(entry, AssistantMessage)
+                     for block in entry.content if isinstance(block, ToolCall)}
+            for entry in history[baseline:]:
+                if not isinstance(entry, ToolResultMessage) or entry.is_error:
+                    continue
+                name = calls.get(entry.tool_call_id)
+                if name == "load_tools":
+                    continue
+                if name == "search_tools":
+                    items = (entry.details or {}).get("items")
+                    if isinstance(items, list):
+                        labels = [str(item["label"])[:80] for item in items
+                                  if isinstance(item, dict) and isinstance(item.get("label"), str)]
+                        if labels:
+                            summaries.append("已发现的可用能力（不代表已执行业务）：" + "、".join(labels[:8]))
+                else:
+                    text = " ".join(block.text for block in entry.content if isinstance(block, TextBlock))
+                    if text:
+                        summaries.append(text[:600])
+            text = "本轮已达到执行上限，尚未完成你的请求。"
+            if summaries:
+                text += "\n以下为已取得的部分结果：\n" + "\n".join(dict.fromkeys(summaries[-3:]))
+            text += "\n请缩小查询范围或指定一个具体目标后继续。未执行的操作不会自动继续。"
+            message = AssistantMessage((TextBlock(text),))
+            history.append(message)
+            message_id = f"{publisher.run_id}:limit-summary"
+            await publisher.emit(AgentEventType.MESSAGE_START, {
+                "turn": turns, "message_id": message_id, "role": "assistant",
+            })
+            await publisher.emit(AgentEventType.MESSAGE_END, {
+                "turn": turns, "message_id": message_id,
+                "message": message_to_dict(message), "stop_reason": StopReason.LIMIT.value,
+            })
         response = FinalResponse(
             message=message,
             stop_reason=StopReason.LIMIT,
@@ -828,7 +898,8 @@ class AgentLoop:
         from ktg_agent.context.window import ContextOverflowError, fit_window
 
         projected = project_model_messages(history)
-        schemas = self._tool_registry.model_schemas()
+        schemas = (self._discovery.begin_request(f"{publisher.run_id}:{turn}").schemas
+                   if self._discovery is not None else self._tool_registry.model_schemas())
         if self._context_policy is not None:
             # Projection removes invisible messages and clears result details. Preserve
             # the original spill markers in the projected sequence's coordinates.

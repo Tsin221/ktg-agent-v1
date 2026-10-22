@@ -45,6 +45,8 @@ class Settings:
     enable_item_receipt: bool = False
     enable_production_issue: bool = False
     max_total_tokens: int | None = None
+    max_tool_calls: int = 12
+    max_model_turns: int = 8
     context_window: int | None = None
     context_reserve_tokens: int | None = None
     context_threshold_ratio: float = 0.8
@@ -52,6 +54,8 @@ class Settings:
     context_summary_max_tokens: int = 1024
     spill_max_inline_tokens: int | None = None
     spill_dir: str = ""
+    max_active_tools: int = 8
+    max_schema_tokens: int = 6000
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -145,6 +149,8 @@ class Settings:
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
             max_total_tokens=max_total_tokens,
+            max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 12) or 12,
+            max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 8) or 8,
             context_window=context_window,
             context_reserve_tokens=context_reserve_tokens,
             context_threshold_ratio=context_threshold_ratio,
@@ -152,6 +158,8 @@ class Settings:
             context_summary_max_tokens=context_summary_max_tokens,
             spill_max_inline_tokens=spill_max_inline_tokens,
             spill_dir=spill_dir,
+            max_active_tools=positive_integer("AGENT_MAX_ACTIVE_TOOLS", 8) or 8,
+            max_schema_tokens=positive_integer("AGENT_MAX_TOOL_SCHEMA_TOKENS", 6000) or 6000,
         )
 
 
@@ -211,7 +219,9 @@ def create_service(settings: Settings) -> QueryService:
         ),
         context_policy=context_policy,
         summary_max_tokens=settings.context_summary_max_tokens,
-        limits=RunLimits(max_model_turns=8, max_tool_calls=12,
+        max_active_tools=settings.max_active_tools,
+        max_schema_tokens=settings.max_schema_tokens,
+        limits=RunLimits(max_model_turns=settings.max_model_turns, max_tool_calls=settings.max_tool_calls,
                          max_run_seconds=90, max_parallel_reads=3,
                          max_total_tokens=settings.max_total_tokens),
     )
@@ -279,6 +289,15 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/agent-api/v1/tools" and not urlsplit(self.path).query:
+            try:
+                response = asyncio.run(self.server.query_service.available_tools(
+                    self.headers.get("Authorization", "")))
+            except KTGError as exc:
+                self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
+                return
+            self._write_json(HTTPStatus.OK, response)
+            return
         if path.startswith("/agent-api/v1/runs/"):
             if path.endswith("/events"):
                 self._get_events(path)

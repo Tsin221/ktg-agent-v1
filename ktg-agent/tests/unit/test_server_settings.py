@@ -12,6 +12,18 @@ def _set_valid_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KTG_BASE_URL", "http://127.0.0.1:8080")
 
 
+@pytest.mark.parametrize("name", ["AGENT_MAX_TOOL_CALLS", "AGENT_MAX_MODEL_TURNS"])
+def test_execution_budget_configuration(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    _set_valid_environment(monkeypatch)
+    monkeypatch.setenv(name, "17")
+    limits = create_service(Settings.from_env())._limits
+    assert getattr(limits, "max_tool_calls" if name.endswith("CALLS") else "max_model_turns") == 17
+    for invalid in ("0", "-1", "abc"):
+        monkeypatch.setenv(name, invalid)
+        with pytest.raises(RuntimeError, match=name):
+            Settings.from_env()
+
+
 @pytest.mark.parametrize("name", ("MODEL_API_KEY", "MODEL_ID"))
 def test_settings_rejects_unchanged_example_placeholders(
     monkeypatch: pytest.MonkeyPatch, name: str

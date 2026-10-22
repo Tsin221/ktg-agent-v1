@@ -34,19 +34,30 @@ from ktg_agent.ktg import (
 from ktg_agent.ktg.inventory import (
     ISSUE, RECEIPT, InventoryStore, build_inventory_tools, inventory_result,
 )
+from ktg_agent.ktg.client import KTGError
 from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
+from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches
+from ktg_agent.tools.discovery import RunToolDiscovery, directory_definitions
+from ktg_agent.tools.legacy_catalog import build_legacy_catalog
+from ktg_agent.tools.permissions import PermissionDecision, evaluate_permission_policy
+from ktg_agent.tools.runner import CallAuthorization
+from ktg_agent.tools.registry import ToolChannel, ToolStatus
 
 
 type KTGClientFactory = Callable[[str], KTGClient]
 
 
 SYSTEM_PROMPT = """你是 KTG MES 的业务助手。
+用户问“你能做什么”时，用 search_tools(query="") 查看当前权限下的能力，直接按返回说明回答，不为介绍能力加载或执行业务工具。
+搜索可使用中文关键词；module 只能使用工具 schema 中的内部键。只复制搜索结果中的准确工具名和版本，不猜名称、不改版本。
+搜索未匹配时的备选能力不代表支持原请求。若已发现的工具需要用户尚未提供的必填条件，应询问该条件；不要通过反复搜索猜测另一个工具。
+例如现有分仓库存查询要求物料编码；“全部库存”不能擅自当成单个物料查询或声称支持全库汇总。
 必须通过已注册工具查询事实，不得猜测产品、库存或工单数据。
 所有查询都使用当前网页登录用户的身份和权限；权限不足时如实说明，不能改用其他身份。
 允许查询产品资料、分仓库存和生产工单，也可以为用户明确要求的工单草稿创建或编辑生成预览。
 创建或编辑前必须调用对应预览工具；产品不唯一时必须让用户按编码选择，不能自行猜测。
-预览工具不会写入。实际写入只能由网页上的确认操作触发，不能要求用户在对话中提供确认令牌，不能声称自己已经写入。
+预览工具不会创建或编辑工单，但自动编号可能推进编号流水。实际业务单据写入只能由网页上的确认操作触发，不能要求用户在对话中提供确认令牌，不能声称自己已经写入。
 对于已准备的物料入库单和生产领料单，可以按准确单据编号或 ID 生成只读执行预览；执行只能由网页确认触发，结果必须以持久回执为准。
 库存结果要说明仓库、数量和单位；分页结果必须说明当前返回条数与总数，不能把当前页合计称为全部库存。
 询问产品总数时使用 ktg_count_products 返回的总数，不要求用户提供筛选词；产品与物料分别统计，不得混为一谈。
@@ -66,6 +77,9 @@ class QueryService:
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
         summary_max_tokens: int = 1024,
+        switches_provider: Callable[[], CatalogSwitches] | None = None,
+        max_active_tools: int = 8,
+        max_schema_tokens: int = 6000,
     ) -> None:
         self._provider = provider
         self._model_config = model_config
@@ -80,16 +94,86 @@ class QueryService:
             max_model_turns=8, max_tool_calls=12,
             max_run_seconds=90, max_parallel_reads=3,
         )
-        self._registry = ToolRegistry(
-            (*build_query_tools(), *build_workorder_tools(self._preview_store),
-             *(build_inventory_tools(inventory_store, inventory_actions) if inventory_store else ()))
+        definitions = (*build_query_tools(), *build_workorder_tools(self._preview_store),
+                       *(build_inventory_tools(inventory_store, inventory_actions)
+                         if inventory_store else ()))
+        self._registry = ToolRegistry(definitions)
+        self._catalog = build_legacy_catalog(definitions)
+        enabled_modules = {"md": True, "wm": True, "pro": True}
+        enabled_tools = {definition.name: True for definition in definitions}
+        self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
+        self._max_active_tools = max_active_tools
+        self._max_schema_tokens = max_schema_tokens
+
+    @staticmethod
+    async def _current_permissions(client: KTGClient, identity: object) -> frozenset[str] | None:
+        payload = await client.get("/getInfo")
+        user = payload.get("user")
+        if (not isinstance(user, dict) or not isinstance(identity, dict)
+                or not isinstance(identity.get("userId"), int)
+                or user.get("userId") != identity.get("userId")):
+            return None
+        raw = payload.get("permissions")
+        if not isinstance(raw, list | set | tuple) or any(not isinstance(item, str) for item in raw):
+            return None
+        return frozenset(raw)
+
+    def _tool_runner(self, candidate: CandidateSnapshot | None = None,
+                     discovery: RunToolDiscovery | None = None,
+                     registry: ToolRegistry | None = None) -> ToolRunner:
+        async def authorization_provider(context: ToolContext) -> CallAuthorization:
+            client = context.ktg_client
+            permissions = (await self._current_permissions(client, context.identity)
+                           if isinstance(client, KTGClient) else None)
+            return CallAuthorization(
+                permissions=permissions, switches=self._switches_provider(),
+                candidate=candidate,
+                active_names=(discovery.active_names(context.active_snapshot_id)
+                              if discovery is not None else
+                              frozenset(candidate.candidates) if candidate is not None else None),
+            )
+        return ToolRunner(
+            registry or self._registry,
+            after_hooks=(SpillAfterHook(self._spill),) if self._spill else (),
+            catalog=self._catalog,
+            authorization_provider=authorization_provider,
         )
 
-    def _tool_runner(self) -> ToolRunner:
-        return ToolRunner(
-            self._registry,
-            after_hooks=(SpillAfterHook(self._spill),) if self._spill else (),
+    def _run_discovery(
+        self, candidate: CandidateSnapshot, client: KTGClient, identity: object,
+        page_context: JsonObject | None = None,
+    ) -> tuple[RunToolDiscovery, ToolRegistry, ToolRunner]:
+        registry = ToolRegistry()
+
+        async def current_access() -> tuple[frozenset[str] | None, CatalogSwitches]:
+            return await self._current_permissions(client, identity), self._switches_provider()
+
+        page_module = page_context.get("module") if page_context else None
+        discovery = RunToolDiscovery(
+            self._catalog, candidate, registry, current_access,
+            max_active_tools=self._max_active_tools,
+            max_schema_tokens=self._max_schema_tokens,
+            page_module=page_module if isinstance(page_module, str) else None,
         )
+        return discovery, registry, self._tool_runner(candidate, discovery, registry)
+
+    async def available_tools(self, authorization: str) -> JsonObject:
+        """Authenticated, user-filtered catalog diagnostics (no admin metadata)."""
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        permissions = await self._current_permissions(client, identity)
+        if permissions is None:
+            raise KTGError("PERMISSION_UNAVAILABLE", "权限服务不可用。", status=503)
+        candidate = self._catalog.candidate_snapshot(
+            CatalogIdentity(permissions, str(uuid4())), self._switches_provider())
+        items: list[JsonValue] = [
+            {"name": name, "version": version,
+             "module": self._catalog.manifest(name).module,
+             "label": self._catalog.manifest(name).label,
+             "description": self._catalog.manifest(name).description}
+            for name, version in candidate.candidates.items()
+        ]
+        return {"catalog_version": candidate.catalog_version, "items": items}
 
     @property
     def budget_snapshot(self) -> JsonObject:
@@ -111,7 +195,7 @@ class QueryService:
 
     @property
     def model_tool_schemas(self) -> tuple[ToolSchema, ...]:
-        return tuple(self._registry.model_schemas())
+        return tuple(definition.model_schema() for definition in directory_definitions())
 
     @property
     def max_run_seconds(self) -> float:
@@ -136,7 +220,7 @@ class QueryService:
         if self._context_policy is None:
             return None
         return prepare_compaction(frame, self._context_policy,
-                                  tool_schema_tokens=estimate_tools_tokens(self._registry.model_schemas()))
+                                  tool_schema_tokens=estimate_tools_tokens(self.model_tool_schemas))
 
     async def run_compaction(self, run_id: str, prepared: PreparedCompaction, *,
                              event_sink: EventSink, publisher: EventPublisher,
@@ -172,15 +256,21 @@ class QueryService:
 
         client = self._ktg_client_factory(authorization)
         identity = await client.get_current_user()
+        run_id = str(uuid4())
+        permissions = (await self._current_permissions(client, identity)
+                       if isinstance(client, KTGClient) else None)
+        candidate = self._catalog.candidate_snapshot(
+            CatalogIdentity(permissions, run_id), self._switches_provider())
+        discovery, registry, runner = self._run_discovery(candidate, client, identity)
         loop = AgentLoop(
             provider=self._provider,
-            tool_registry=self._registry,
-            tool_runner=self._tool_runner(),
+            tool_registry=registry,
+            tool_runner=runner,
             model_config=self._model_config,
             limits=self._limits,
             context_policy=self._context_policy,
+            discovery=discovery,
         )
-        run_id = str(uuid4())
         result = await loop.run(
             run_id=run_id,
             messages=(
@@ -203,7 +293,8 @@ class QueryService:
 
         business_results: list[JsonValue] = []
         for item in result.messages:
-            if isinstance(item, ToolResultMessage) and item.details is not None:
+            if (isinstance(item, ToolResultMessage) and item.details is not None
+                    and "catalog_version" not in item.details):
                 business_results.append(item.details)
 
         username = identity.get("userName")
@@ -229,14 +320,20 @@ class QueryService:
         """Run an authenticated turn with durable session history."""
         client = self._ktg_client_factory(authorization)
         identity = await client.get_current_user()
+        permissions = (await self._current_permissions(client, identity)
+                       if isinstance(client, KTGClient) else None)
+        candidate = self._catalog.candidate_snapshot(
+            CatalogIdentity(permissions, run_id), self._switches_provider())
+        discovery, registry, runner = self._run_discovery(candidate, client, identity, page_context)
         loop = AgentLoop(
             provider=self._provider,
-            tool_registry=self._registry,
-            tool_runner=self._tool_runner(),
+            tool_registry=registry,
+            tool_runner=runner,
             model_config=self._model_config,
             event_sink=event_sink,
             limits=self._limits,
             context_policy=self._context_policy,
+            discovery=discovery,
         )
         system_prompt = self.build_system_prompt(page_context)
         agent = Agent(loop)
@@ -283,13 +380,16 @@ class QueryService:
                 run_id=str(uuid4()),
                 tool_call_id=call_id,
                 operation_id=clean_preview_id,
+                channel=ToolChannel.TRUSTED_CONFIRMATION,
+                confirmation_id=call_id,
                 identity=identity,
                 ktg_client=client,
             ),
         )
         details = result.details or {
             "kind": "workorder_draft_result",
-            "outcome": "failed" if result.is_error else "succeeded",
+            "outcome": ("unknown" if result.status is ToolStatus.UNKNOWN else
+                        "failed" if result.is_error else "succeeded"),
             "label": result.content,
             "preview_id": clean_preview_id,
         }
@@ -315,16 +415,35 @@ class QueryService:
         result = await self._tool_runner().run(
             ToolCall(call_id, name, {"operation_id": operation_id}),
             ToolContext(run_id=str(uuid4()), tool_call_id=call_id, operation_id=operation_id,
-                        identity=identity, ktg_client=client),
+                        identity=identity, ktg_client=client,
+                        channel=ToolChannel.TRUSTED_CONFIRMATION, confirmation_id=call_id),
         )
-        return {"result": result.details or {"kind": "inventory_result", "operation_id": operation_id,
-                                               "outcome": "unknown", "label": "库存结果待核实。"}}
+        return {"result": result.details or {
+            "kind": "inventory_result", "operation_id": operation_id,
+            "outcome": ("unknown" if result.status is ToolStatus.UNKNOWN else
+                        "succeeded" if result.status is ToolStatus.SUCCEEDED else "failed"),
+            "label": result.content, "error_code": result.error_code,
+        }}
 
     async def get_inventory_result(self, *, operation_id: str, authorization: str) -> JsonObject:
         if self._inventory_store is None:
             raise ValueError("库存操作未启用。")
         client = self._ktg_client_factory(authorization)
         identity = await client.get_current_user()
+        row = self._inventory_store.get(operation_id, self._identity_key(identity))
+        if row is not None:
+            if row["action"] not in self._inventory_actions:
+                raise KTGError("TOOL_DISABLED", "库存操作未启用。", status=403)
+            preview_name = ("ktg_preview_item_receipt" if row["action"] == RECEIPT
+                            else "ktg_preview_production_issue")
+            manifest = self._catalog.manifest(preview_name)
+            if not self._switches_provider().enabled(manifest):
+                raise KTGError("TOOL_DISABLED", "库存操作未启用。", status=403)
+            permissions = await self._current_permissions(client, identity)
+            decision = evaluate_permission_policy(manifest.permission_policy, permissions)
+            if decision is not PermissionDecision.ALLOWED:
+                raise KTGError(decision.value, "库存回执读取权限不可用或不足。",
+                               status=503 if decision is PermissionDecision.UNAVAILABLE else 403)
         result = await inventory_result(
             self._inventory_store,
             ToolContext(run_id=str(uuid4()), tool_call_id=str(uuid4()),

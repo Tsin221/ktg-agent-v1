@@ -468,7 +468,7 @@ def test_cancel_waits_for_started_write_and_preserves_outcome(tmp_path: Path) ->
             name="test.write", version="1.0", description="write", label="write",
             input_schema={"type": "object", "properties": {}}, output_schema=None,
             required_permissions=(), effect=ToolEffect.WRITE,
-            execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=0.01,
+            execution_mode=ExecutionMode.SEQUENTIAL, timeout_seconds=5,
             execute=fake_write,
         ),))
         repo = SessionRepository(tmp_path / f"{outcome.value}.sqlite3")

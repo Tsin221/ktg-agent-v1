@@ -15,7 +15,8 @@ def test_legacy_query_returns_token_stop_reasons_without_running_tools() -> None
             _url: str, _headers: Mapping[str, str], _params: Mapping[str, object],
             _timeout_seconds: float,
         ) -> object:
-            return {"code": 200, "user": {"userId": 7, "userName": "alice"}}
+            return {"code": 200, "user": {"userId": 7, "userName": "alice"},
+                    "permissions": ["*:*:*"]}
 
         provider = FakeProvider([ScriptedTurn((ResponseCompleted(FinalResponse(
             AssistantMessage((ToolCall("call-1", "ktg_query_stock", {"item_code": "A-01"}),)),
@@ -61,7 +62,8 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
         _timeout_seconds: float,
     ) -> object:
         if url.endswith("/getInfo"):
-            return {"code": 200, "user": {"userId": 7, "userName": "alice"}}
+            return {"code": 200, "user": {"userId": 7, "userName": "alice"},
+                    "permissions": ["*:*:*"]}
         if url.endswith("/mes/md/mditem/list"):
             return {
                 "code": 200,
@@ -113,6 +115,12 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
 
     provider = FakeProvider(
         (
+            ScriptedTurn((ResponseCompleted(FinalResponse(
+                message=AssistantMessage((ToolCall(
+                    id="load-preview", name="load_tools",
+                    arguments={"tools": [{"name": "ktg_preview_create_workorder_draft",
+                                           "version": "1.0"}]},
+                ),)), stop_reason=StopReason.TOOL_CALL, usage=Usage(2, 1))),)),
             ScriptedTurn(
                 (
                     ResponseCompleted(FinalResponse(
@@ -160,9 +168,10 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
         authorization="Bearer current-user-token",
     )
 
-    tool_names = {tool.name for tool in provider.requests[0].tools}
+    assert {tool.name for tool in provider.requests[0].tools} == {"search_tools", "load_tools"}
+    tool_names = {tool.name for tool in provider.requests[1].tools}
     assert "ktg_preview_create_workorder_draft" in tool_names
-    assert "ktg_preview_edit_workorder_draft" in tool_names
+    assert "ktg_preview_edit_workorder_draft" not in tool_names
     assert "ktg_create_workorder_draft" not in tool_names
     assert "ktg_edit_workorder_draft" not in tool_names
     results = response["results"]
@@ -193,7 +202,8 @@ async def _query_service_scenario() -> None:
     ) -> dict[str, object]:
         requested_urls.append(url)
         if url.endswith("/getInfo"):
-            return {"code": 200, "user": {"userId": 7, "userName": "alice"}}
+            return {"code": 200, "user": {"userId": 7, "userName": "alice"},
+                    "permissions": ["*:*:*"]}
         return {
             "code": 200,
             "total": 1,
@@ -210,6 +220,11 @@ async def _query_service_scenario() -> None:
 
     provider = FakeProvider(
         (
+            ScriptedTurn((ResponseCompleted(FinalResponse(
+                message=AssistantMessage((ToolCall(
+                    id="load-stock", name="load_tools",
+                    arguments={"tools": [{"name": "ktg_query_stock", "version": "1.0"}]},
+                ),)), stop_reason=StopReason.TOOL_CALL, usage=Usage(2, 1))),)),
             ScriptedTurn(
                 (
                     ResponseCompleted(FinalResponse(
@@ -267,7 +282,5 @@ async def _query_service_scenario() -> None:
     first_result = results[0]
     assert isinstance(first_result, dict)
     assert first_result["kind"] == "stock"
-    assert requested_urls == [
-        "http://127.0.0.1:8080/getInfo",
-        "http://127.0.0.1:8080/mes/wm/wmstock/list",
-    ]
+    assert requested_urls[-1] == "http://127.0.0.1:8080/mes/wm/wmstock/list"
+    assert all(url.endswith("/getInfo") for url in requested_urls[:-1])

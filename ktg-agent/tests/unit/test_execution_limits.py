@@ -328,6 +328,10 @@ def test_tool_call_limit_does_not_start_excess_calls() -> None:
     assert started == ["call-1"]
     assert result.limit_reason == "max_tool_calls"
     assert len(provider.requests) == 1
+    assert result.final_message is not None
+    assert any(isinstance(block, TextBlock) and "尚未完成" in block.text
+               for block in result.final_message.content)
+    assert result.stop_reason is StopReason.LIMIT
 
 
 def test_total_time_limit_stops_before_first_model_request() -> None:

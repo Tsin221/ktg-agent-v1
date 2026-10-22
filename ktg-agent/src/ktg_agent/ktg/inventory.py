@@ -122,8 +122,11 @@ def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tup
                 "document_code": {"type": "string", "minLength": 1, "maxLength": 100},
             }, "oneOf": [{"required": ["document_id"]}, {"required": ["document_code"]}],
                 "additionalProperties": False},
-            output_schema=None, required_permissions=(permission,), effect=ToolEffect.READ,
-            execution_mode=ExecutionMode.SEQUENTIAL, retry_policy=RetryPolicy.BOUNDED_READ,
+            output_schema=None, required_permissions=(
+                permission, permission.rsplit(":", 1)[0] + ":list",
+                permission.rsplit(":", 1)[0] + ":query", "mes:wm:wmstock:list",
+            ), effect=ToolEffect.READ,
+            execution_mode=ExecutionMode.SEQUENTIAL, retry_policy=RetryPolicy.NEVER,
             timeout_seconds=25, execute=preview,
         ))
 
@@ -143,7 +146,9 @@ def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tup
             description="仅执行当前用户已确认并持久绑定的库存单据预览。",
             input_schema={"type": "object", "properties": {"operation_id": {"type": "string"}},
                           "required": ["operation_id"], "additionalProperties": False},
-            output_schema=None, required_permissions=(permission,), effect=ToolEffect.WRITE,
+            output_schema=None, required_permissions=(
+                permission, permission.rsplit(":", 1)[0] + ":query", "mes:wm:wmstock:list",
+            ), effect=ToolEffect.WRITE,
             execution_mode=ExecutionMode.SEQUENTIAL, retry_policy=RetryPolicy.RECONCILE_FIRST,
             timeout_seconds=45, execute=execute, expose_to_model=False,
         ))

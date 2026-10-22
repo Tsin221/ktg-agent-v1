@@ -48,6 +48,11 @@ class ToolStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ToolChannel(StrEnum):
+    MODEL = "model"
+    TRUSTED_CONFIRMATION = "trusted_confirmation"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """Server-owned execution data that is never supplied by the model."""
@@ -59,12 +64,22 @@ class ToolContext:
     cancellation: object | None = None
     progress_publisher: object | None = None
     ktg_client: object | None = None
+    channel: ToolChannel = ToolChannel.MODEL
+    candidate_snapshot_id: str | None = None
+    active_snapshot_id: str | None = None
+    confirmation_id: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run id")
         _required_text(self.tool_call_id, "tool call id")
         if self.operation_id is not None:
             _required_text(self.operation_id, "operation id")
+        if not isinstance(self.channel, ToolChannel):
+            raise ToolDefinitionError("invalid tool channel")
+        for label in ("candidate_snapshot_id", "active_snapshot_id", "confirmation_id"):
+            value = getattr(self, label)
+            if value is not None:
+                _required_text(value, label)
 
 
 @dataclass(frozen=True, slots=True)

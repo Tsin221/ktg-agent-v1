@@ -9,6 +9,7 @@ from ktg_agent.core.messages import ToolCall
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore, build_inventory_tools, inventory_result
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
+from ktg_agent.tools.registry import ToolChannel
 
 
 def test_preview_confirm_replay_and_restart() -> None:
@@ -105,9 +106,16 @@ async def _scenario(*, stale: bool, action: str) -> None:
         assert state["writes"] == 0
         if stale:
             state["quantity"] = 6
+        model_attempt = await runner.run(
+            ToolCall("model-write", "ktg_execute_item_receipt" if action == RECEIPT else "ktg_execute_production_issue", {"operation_id": operation_id}),
+            ToolContext(run_id="run", tool_call_id="model-write", operation_id=operation_id,
+                        identity=identity, ktg_client=client))
+        assert model_attempt.error_code == "TOOL_NOT_FOUND"
+        assert state["writes"] == 0
         confirmed = await runner.run(
             ToolCall("confirm", "ktg_execute_item_receipt" if action == RECEIPT else "ktg_execute_production_issue", {"operation_id": operation_id}),
             ToolContext(run_id="run", tool_call_id="confirm", operation_id=operation_id,
+                        channel=ToolChannel.TRUSTED_CONFIRMATION, confirmation_id=operation_id,
                         identity=identity, ktg_client=client))
         assert confirmed.details is not None
         assert confirmed.details["outcome"] == ("failed" if stale else "succeeded")
@@ -118,6 +126,7 @@ async def _scenario(*, stale: bool, action: str) -> None:
         replay = await runner.run(
             ToolCall("repeat", "ktg_execute_item_receipt" if action == RECEIPT else "ktg_execute_production_issue", {"operation_id": operation_id}),
             ToolContext(run_id="run", tool_call_id="repeat", operation_id=operation_id,
+                        channel=ToolChannel.TRUSTED_CONFIRMATION, confirmation_id=operation_id,
                         identity=identity, ktg_client=client))
         assert replay.details is not None
         assert replay.details["outcome"] == confirmed.details["outcome"]
