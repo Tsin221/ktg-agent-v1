@@ -55,12 +55,16 @@ def test_query_service_exposes_preview_but_not_write_tools_to_model() -> None:
 
 
 async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
+    receipt: dict[str, object] | None = None
+
     async def ktg_transport(
         url: str,
         _headers: Mapping[str, str],
         _params: Mapping[str, object],
         _timeout_seconds: float,
     ) -> object:
+        if "/mes/pro/workorder/operations/" in url:
+            return {"code": 200, "data": receipt} if receipt else {"code": 404}
         if url.endswith("/getInfo"):
             return {"code": 200, "user": {"userId": 7, "userName": "alice"},
                     "permissions": ["*:*:*"]}
@@ -106,12 +110,16 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
         method: str,
         url: str,
         _headers: Mapping[str, str],
-        _body: Mapping[str, object],
+        body: Mapping[str, object],
         _timeout_seconds: float,
     ) -> dict[str, object]:
+        nonlocal receipt
         assert method == "POST"
-        assert url.endswith("/mes/pro/workorder")
-        return {"code": 200, "data": 51}
+        assert url.endswith("/mes/pro/workorder/operations")
+        receipt = {"operationId": body["operationId"], "action": body["action"],
+                   "requestDigest": body["requestDigest"], "expectedVersion": body["expectedVersion"],
+                   "outcome": "succeeded", "workorderId": 51, "workorderCode": "WO-001"}
+        return {"code": 200, "data": receipt}
 
     provider = FakeProvider(
         (

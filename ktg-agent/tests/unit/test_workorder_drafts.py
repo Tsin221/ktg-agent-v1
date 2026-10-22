@@ -19,6 +19,7 @@ def test_create_preview_resolves_product_and_confirmation_writes_once() -> None:
 
 async def _create_preview_resolves_product_and_confirmation_writes_once() -> None:
     writes: list[tuple[str, str, Mapping[str, object]]] = []
+    receipt: dict[str, object] | None = None
 
     async def read_transport(
         url: str,
@@ -26,6 +27,8 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
         params: Mapping[str, object],
         _timeout: float,
     ) -> object:
+        if "/mes/pro/workorder/operations/" in url:
+            return {"code": 200, "data": receipt} if receipt else {"code": 404}
         if url.endswith("/mes/md/mditem/list"):
             return {
                 "code": 200,
@@ -58,8 +61,12 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
         body: Mapping[str, object],
         _timeout: float,
     ) -> dict[str, object]:
+        nonlocal receipt
         writes.append((method, url, body))
-        return {"code": 200, "data": 51}
+        receipt = {"operationId": body["operationId"], "action": body["action"],
+                   "requestDigest": body["requestDigest"], "expectedVersion": body["expectedVersion"],
+                   "outcome": "succeeded", "workorderId": 51, "workorderCode": "WO-20261011-001"}
+        return {"code": 200, "data": receipt}
 
     client = KTGClient(
         base_url="http://127.0.0.1:8080",
@@ -111,16 +118,19 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
     assert len(writes) == 1
     method, url, body = writes[0]
     assert method == "POST"
-    assert url.endswith("/mes/pro/workorder")
-    assert body == {
-        "workorderCode": "WO-20261011-001",
-        "workorderName": "产品 A 工单",
-        "workorderType": "SELF",
-        "orderSource": "MANUAL",
-        "productId": 11,
-        "quantity": "100",
-        "requestDate": "2026-10-31",
-        "parentId": 0,
+    assert url.endswith("/mes/pro/workorder/operations")
+    assert body["operationId"] == preview_id
+    assert body["action"] == "CREATE_DRAFT"
+    assert body["expectedVersion"] is None
+    draft = body["draft"]
+    assert isinstance(draft, Mapping)
+    assert body["requestDigest"] == KTGClient.workorder_operation_digest(
+        "CREATE_DRAFT", draft
+    )
+    assert draft == {
+        "workorderCode": "WO-20261011-001", "workorderName": "产品 A 工单",
+        "workorderType": "SELF", "orderSource": "MANUAL", "productId": 11,
+        "quantity": "100", "requestDate": "2026-10-31", "parentId": 0,
     }
 
 
@@ -342,6 +352,7 @@ def test_create_timeout_reconciles_by_stable_workorder_code_without_retry() -> N
 
 async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() -> None:
     write_attempts = 0
+    operation_ids: list[str] = []
 
     async def read_transport(
         url: str,
@@ -349,6 +360,8 @@ async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() ->
         _params: Mapping[str, object],
         _timeout: float,
     ) -> object:
+        if "/mes/pro/workorder/operations/" in url:
+            return {"code": 404}
         if url.endswith("/mes/md/mditem/list"):
             return {"code": 200, "total": 1, "rows": [_product()]}
         if url.endswith("/system/autocode/get/WORKORDER_CODE"):
@@ -399,9 +412,8 @@ async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() ->
         {"preview_id": preview_id},
     )
 
-    assert result.status is ToolStatus.SUCCEEDED
-    assert result.verification is not None
-    assert result.verification["reconciled_after_error"] is True
+    assert result.status is ToolStatus.UNKNOWN
+    assert result.details is not None and result.details["outcome"] == "unknown"
     assert write_attempts == 1
 
 
@@ -411,6 +423,7 @@ def test_create_timeout_with_failed_reconciliation_stays_unknown_without_retry()
 
 async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry() -> None:
     write_attempts = 0
+    operation_ids: list[str] = []
 
     async def read_transport(
         url: str,
@@ -418,6 +431,8 @@ async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry
         _params: Mapping[str, object],
         _timeout: float,
     ) -> object:
+        if "/mes/pro/workorder/operations/" in url:
+            return {"code": 404}
         if url.endswith("/mes/md/mditem/list"):
             return {"code": 200, "total": 1, "rows": [_product()]}
         if url.endswith("/system/autocode/get/WORKORDER_CODE"):
@@ -430,11 +445,12 @@ async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry
         _method: str,
         _url: str,
         _headers: Mapping[str, str],
-        _body: Mapping[str, object],
+        body: Mapping[str, object],
         _timeout: float,
     ) -> dict[str, object]:
         nonlocal write_attempts
         write_attempts += 1
+        operation_ids.append(str(body["operationId"]))
         raise KTGError("KTG_CONNECTION_ERROR", "写入响应中断")
 
     client = KTGClient(
@@ -473,7 +489,8 @@ async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry
     assert result.details["label"] == "待核实"
     assert result.verification == {"reconciled_after_error": True}
     assert repeated.details == result.details
-    assert write_attempts == 1
+    assert write_attempts == 2
+    assert operation_ids == [preview_id, preview_id]
 
 
 def test_edit_preview_merges_allowed_change_and_checks_version_before_write() -> None:
@@ -483,6 +500,7 @@ def test_edit_preview_merges_allowed_change_and_checks_version_before_write() ->
 async def _edit_preview_merges_allowed_change_and_checks_version_before_write() -> None:
     detail_reads = 0
     written_body: Mapping[str, object] | None = None
+    receipt: dict[str, object] | None = None
 
     async def read_transport(
         url: str,
@@ -491,6 +509,8 @@ async def _edit_preview_merges_allowed_change_and_checks_version_before_write() 
         _timeout: float,
     ) -> object:
         nonlocal detail_reads
+        if "/mes/pro/workorder/operations/" in url:
+            return {"code": 200, "data": receipt} if receipt else {"code": 404}
         if url.endswith("/mes/pro/workorder/list"):
             return {"code": 200, "total": 1, "rows": [_editable_workorder(100, 3)]}
         if url.endswith("/mes/pro/workorder/51"):
@@ -518,11 +538,14 @@ async def _edit_preview_merges_allowed_change_and_checks_version_before_write() 
         body: Mapping[str, object],
         _timeout: float,
     ) -> dict[str, object]:
-        nonlocal written_body
-        assert method == "PUT"
-        assert url.endswith("/mes/pro/workorder")
+        nonlocal written_body, receipt
+        assert method == "POST"
+        assert url.endswith("/mes/pro/workorder/operations")
         written_body = body
-        return {"code": 200, "data": 1}
+        receipt = {"operationId": body["operationId"], "action": body["action"],
+                   "requestDigest": body["requestDigest"], "expectedVersion": body["expectedVersion"],
+                   "outcome": "succeeded", "workorderId": 51, "workorderCode": "WO-001"}
+        return {"code": 200, "data": receipt}
 
     client = KTGClient(
         base_url="http://127.0.0.1:8080",
@@ -551,10 +574,15 @@ async def _edit_preview_merges_allowed_change_and_checks_version_before_write() 
 
     assert result.status is ToolStatus.SUCCEEDED
     assert written_body is not None
-    assert written_body["workorderId"] == 51
-    assert written_body["version"] == 3
-    assert written_body["quantity"] == "120"
-    assert "status" not in written_body
+    assert written_body["operationId"] == preview_id
+    assert written_body["action"] == "EDIT_DRAFT"
+    assert written_body["expectedVersion"] == 3
+    draft = written_body["draft"]
+    assert isinstance(draft, Mapping)
+    assert draft["workorderId"] == 51
+    assert draft["version"] == 3
+    assert draft["quantity"] == "120"
+    assert "status" not in draft
 
 
 def _editable_workorder(quantity: int, version: int) -> dict[str, object]:
@@ -629,3 +657,122 @@ def _preview_only_client() -> KTGClient:
         authorization="Bearer current-user-token",
         transport=read_transport,
     )
+
+
+def test_persistent_preview_store_survives_agent_store_reconstruction() -> None:
+    from pathlib import Path
+    from uuid import uuid4
+
+    path = Path(".runtime") / f"mes10-{uuid4()}.sqlite3"
+    first = PreviewStore(path=path)
+    from ktg_agent.core.messages import JsonObject
+    from typing import cast
+
+    draft = cast(JsonObject, {"workorderCode": "WO-PERSIST", "version": 4})
+    preview_id = first.create(user_key="id:7", action="edit", request=draft,
+                              preview={"kind": "workorder_draft_preview"})
+    second = PreviewStore(path=path)
+    assert second.action_for(preview_id=preview_id, user_key="id:7") == "edit"
+    record, cached = second.begin(preview_id=preview_id, user_key="id:7", action="edit")
+    assert cached is None
+    assert record.preview_id == preview_id
+    assert record.request == draft
+    assert record.request["version"] == 4
+    try:
+        second.action_for(preview_id=preview_id, user_key="id:8")
+    except PreviewError as error:
+        assert error.code == "APPROVAL_IDENTITY_MISMATCH"
+    else:
+        raise AssertionError("another user read the persisted preview")
+    path.unlink(missing_ok=True)
+
+
+def test_persistent_preview_expires_and_unknown_result_can_resume_same_id() -> None:
+    from pathlib import Path
+    from time import sleep
+    from uuid import uuid4
+
+    path = Path(".runtime") / f"mes10-expire-{uuid4()}.sqlite3"
+    try:
+        expiring = PreviewStore(path=path, ttl_seconds=0.01)
+        expired_id = expiring.create(user_key="id:7", action="create", request={}, preview={})
+        sleep(0.02)
+        try:
+            PreviewStore(path=path).action_for(preview_id=expired_id, user_key="id:7")
+        except PreviewError as error:
+            assert error.code == "APPROVAL_EXPIRED"
+        else:
+            raise AssertionError("expired proposal remained confirmable")
+    finally:
+        path.unlink(missing_ok=True)
+
+    path = Path(".runtime") / f"mes10-completed-expire-{uuid4()}.sqlite3"
+    try:
+        from ktg_agent.tools import ToolResult
+
+        expiring = PreviewStore(path=path, ttl_seconds=0.01)
+        completed_id = expiring.create(
+            user_key="id:7", action="create", request={}, preview={})
+        completed = ToolResult(content="已完成", status=ToolStatus.SUCCEEDED,
+                               operation_id=completed_id)
+        expiring.finish(completed_id, completed)
+        sleep(0.02)
+
+        restored = PreviewStore(path=path, ttl_seconds=0.01)
+        assert restored.action_for(preview_id=completed_id, user_key="id:7") == "create"
+        record, cached = restored.begin(
+            preview_id=completed_id, user_key="id:7", action="create")
+        assert record.state == "completed"
+        assert cached is not None and cached.content == "已完成"
+    finally:
+        path.unlink(missing_ok=True)
+
+    path = Path(".runtime") / f"mes10-unknown-{uuid4()}.sqlite3"
+    try:
+        store = PreviewStore(path=path)
+        preview_id = store.create(user_key="id:7", action="create", request={
+            "workorderCode": "WO-UNKNOWN"}, preview={})
+        unknown = ToolStatus.UNKNOWN
+        from ktg_agent.tools import ToolResult
+        store.finish(preview_id, ToolResult(
+            content="待核实", status=unknown, error_code="WRITE_RESULT_UNKNOWN",
+            operation_id=preview_id,
+        ))
+        resumed, cached = PreviewStore(path=path).begin(
+            preview_id=preview_id, user_key="id:7", action="create")
+        assert resumed.preview_id == preview_id
+        assert cached is None
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_persistent_preview_rejects_changed_digest_and_expected_version() -> None:
+    from pathlib import Path
+    import sqlite3
+    from uuid import uuid4
+    from ktg_agent.core.messages import JsonObject
+    from typing import cast
+
+    path = Path(".runtime") / f"mes10-binding-{uuid4()}.sqlite3"
+    try:
+        store = PreviewStore(path=path)
+        request = cast(JsonObject, {
+            "workorderId": 51, "version": 4, "workorderCode": "WO-EDIT",
+            "workorderName": "Edit", "workorderType": "SELF", "orderSource": "MANUAL",
+            "productId": 11, "quantity": "10", "requestDate": "2026-10-31", "parentId": 0,
+        })
+        preview_id = store.create(user_key="id:7", action="edit", request=request, preview={})
+        db = sqlite3.connect(path)
+        try:
+            with db:
+                db.execute("UPDATE workorder_previews SET expected_version=5 WHERE preview_id=?", (preview_id,))
+        finally:
+            db.close()
+        try:
+            PreviewStore(path=path).begin(preview_id=preview_id, user_key="id:7", action="edit")
+        except PreviewError as error:
+            assert error.code == "APPROVAL_CHANGED"
+        else:
+            raise AssertionError("changed expected version was accepted")
+    finally:
+        path.unlink(missing_ok=True)

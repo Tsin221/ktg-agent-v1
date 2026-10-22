@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from ktg_agent.tools import (
 
 RECEIPT = "ITEM_RECEIPT_EXECUTE"
 ISSUE = "PRODUCTION_ISSUE_EXECUTE"
+PREVIEW_TTL_SECONDS = 15 * 60
 _ACTIONS = {
     RECEIPT: ("itemrecpt", "recptId", "recptCode", "additions", "mes:wm:itemrecpt:edit"),
     ISSUE: ("issueheader", "issueId", "issueCode", "movements", "mes:wm:issueheader:edit"),
@@ -46,8 +48,15 @@ class InventoryStore:
                 operation_id TEXT PRIMARY KEY, user_key TEXT NOT NULL,
                 action TEXT NOT NULL, document_id INTEGER NOT NULL,
                 digest TEXT NOT NULL, preview_json TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'prepared', result_json TEXT
+                state TEXT NOT NULL DEFAULT 'prepared', result_json TEXT,
+                created_at REAL NOT NULL, expires_at REAL NOT NULL
             )""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(inventory_previews)")}
+            # Legacy previews have no known creation time; expire them safely.
+            if "created_at" not in columns:
+                db.execute("ALTER TABLE inventory_previews ADD COLUMN created_at REAL NOT NULL DEFAULT 0")
+            if "expires_at" not in columns:
+                db.execute("ALTER TABLE inventory_previews ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -61,11 +70,15 @@ class InventoryStore:
 
     def create(self, user_key: str, action: str, proposal: JsonObject) -> str:
         operation_id = str(uuid4())
+        now = time.time()
         with self._connect() as db:
             db.execute(
-                "INSERT INTO inventory_previews VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL)",
+                "INSERT INTO inventory_previews "
+                "(operation_id,user_key,action,document_id,digest,preview_json,state,result_json,created_at,expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL, ?, ?)",
                 (operation_id, user_key, action, proposal["documentId"],
-                 _digest(proposal), json.dumps(proposal, ensure_ascii=False)),
+                 _digest(proposal), json.dumps(proposal, ensure_ascii=False),
+                 now, now + PREVIEW_TTL_SECONDS),
             )
         return operation_id
 
@@ -155,6 +168,45 @@ def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tup
     return tuple(tools)
 
 
+def build_inventory_result_tool(store: InventoryStore) -> ToolDefinition:
+    """Build the read-only inventory result tool for explicit catalog wiring."""
+    async def read_result(context: ToolContext, arguments: Mapping[str, object]) -> ToolResult:
+        operation_id = arguments.get("operation_id")
+        if not isinstance(operation_id, str):
+            return _failure("操作 ID 无效。", "VALIDATION_ERROR")
+        try:
+            result = await inventory_result(store, context, operation_id)
+        except ValueError:
+            return _failure("操作 ID 无效。", "VALIDATION_ERROR")
+        if result.get("kind") == "inventory_preview":
+            return ToolResult(
+                content="库存操作尚未提交，等待用户确认。",
+                details={"kind": "inventory_result", "operation_id": operation_id,
+                         "outcome": "prepared"},
+                status=ToolStatus.UNKNOWN, error_code="OPERATION_PENDING",
+                operation_id=operation_id,
+            )
+        outcome = result.get("outcome")
+        status = ToolStatus.SUCCEEDED if outcome == "succeeded" else ToolStatus.UNKNOWN if outcome == "unknown" else ToolStatus.FAILED
+        return ToolResult(
+            content=cast(str, result["label"]), details=result, status=status,
+            error_code=None if status is ToolStatus.SUCCEEDED else cast(str, result.get("error_code", "RESULT_UNKNOWN")),
+            operation_id=operation_id,
+        )
+
+    return ToolDefinition(
+        name="ktg_wm_operation_result", version="1.0", label="查询库存操作回执",
+        description="查询当前用户有权读取的库存入库或领料操作回执。",
+        input_schema={"type": "object", "properties": {
+            "operation_id": {"type": "string", "minLength": 36, "maxLength": 36},
+        }, "required": ["operation_id"], "additionalProperties": False},
+        output_schema=None, required_permissions=("mes:wm:wmstock:list",),
+        effect=ToolEffect.READ, execution_mode=ExecutionMode.SEQUENTIAL,
+        retry_policy=RetryPolicy.BOUNDED_READ, timeout_seconds=25,
+        execute=read_result,
+    )
+
+
 async def _read_proposal(context: ToolContext, action: str, arguments: Mapping[str, object]) -> JsonObject:
     client = context.ktg_client
     if not isinstance(client, KTGClient):
@@ -202,6 +254,16 @@ async def confirm_inventory(store: InventoryStore, context: ToolContext, operati
         return _result(operation_id, "failed", "预览不存在或不属于当前用户。", "PREVIEW_NOT_FOUND")
     if row["state"] != "prepared":
         return await inventory_result(store, context, operation_id)
+    try:
+        await client.get(
+            f"/mes/wm/inventory-operations/documents/{action}/{row['document_id']}"
+        )
+    except KTGError:
+        return _result(operation_id, "failed", "无权读取此库存单据或操作不存在。", "PREVIEW_NOT_FOUND")
+    if cast(float, row["expires_at"]) <= time.time():
+        result = _bound_result(row, _result(operation_id, "failed", "预览已过期，请重新预览。", "PREVIEW_EXPIRED"))
+        store.finish(operation_id, result)
+        return result
     document_id = cast(int, row["document_id"])
     try:
         current = await _read_proposal(context, action, {"document_id": document_id})
@@ -234,12 +296,27 @@ async def inventory_result(store: InventoryStore, context: ToolContext, operatio
     row = store.get(str(UUID(operation_id)), _user_key(context.identity))
     if row is None:
         return _result(operation_id, "failed", "操作不存在或不属于当前用户。", "OPERATION_NOT_FOUND")
+    # Local proposal/result data is sensitive. Recheck current MES read rights
+    # for its bound document before returning any of it, including cached data.
+    action = cast(str, row["action"])
+    if action not in _ACTIONS:
+        return _result(operation_id, "failed", "操作不存在或不属于当前用户。", "OPERATION_NOT_FOUND")
+    try:
+        await client.get(
+            f"/mes/wm/inventory-operations/documents/{action}/{row['document_id']}"
+        )
+    except KTGError:
+        return _result(operation_id, "failed", "无权读取此库存单据或操作不存在。", "OPERATION_NOT_FOUND")
     if row["state"] == "prepared":
+        if cast(float, row["expires_at"]) <= time.time():
+            expired = _bound_result(row, _result(operation_id, "failed", "预览已过期，请重新预览。", "PREVIEW_EXPIRED"))
+            store.finish(operation_id, expired)
+            return expired
         return {"kind": "inventory_preview", "action_type": row["action"],
                 "operation_id": operation_id, **json.loads(cast(str, row["preview_json"]))}
     if row["state"] == "finished" and row["result_json"]:
         stored = json.loads(cast(str, row["result_json"]))
-        if stored.get("error_code") == "PREVIEW_STALE":
+        if stored.get("error_code") in {"PREVIEW_STALE", "PREVIEW_EXPIRED"}:
             return cast(JsonObject, stored)
     try:
         receipt = await client.inventory_operation_result(operation_id)

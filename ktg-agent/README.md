@@ -109,7 +109,10 @@ AGENT_ENABLE_PRODUCTION_ISSUE=true
 
 ```dotenv
 AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
+AGENT_WORKORDER_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-workorders.sqlite3
 ```
+
+工单预览和操作结果使用独立的 `AGENT_WORKORDER_DB` SQLite 文件；未显式设置时，若设置了 `AGENT_SESSION_DB`，服务使用与会话库同目录下的 `agent-workorders.sqlite3`；否则使用用户目录下 `.ktg-agent/agent-workorders.sqlite3`。启动脚本会设置 `.runtime/agent-workorders.sqlite3`。该文件不能与会话库或库存库共用，备份和恢复时须单独保留。
 
 启动时会创建或打开该库，并在对外服务前收束上次进程留下的活动 run：`queued` 变为 `cancelled`，`running/cancelling` 变为 `needs_reconciliation`。`GET /runs/{rid}` 返回 `SERVICE_RESTARTED` 原因和摘要，持久事件以 `run_settled` 收尾；服务绝不自动重放模型或工具调用。已经完成的消息和事件保留，用户可继续新一轮。`needs_reconciliation` 表示外部写入结果可能未知，必须先核验业务回执。
 
@@ -121,7 +124,7 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-sessions.sqlite3
 
 创建 run 时可附带 `page_context`，例如 `{"route_name":"WmStock","filters":{"itemCode":"A"}}`。服务端只接受白名单字段，把它作为**本轮**定位提示交给模型；下一轮不会把旧页面状态当作当前状态。页面内容不可信，产品、库存和工单事实仍须通过当前用户权限下的工具查询。当前 Vue 助手已接入会话接口和页面上下文采集。
 
-首次打开空文件时建立会话、运行、消息、事件、控制命令、`model_requests` 及 `context_summaries` 表，SQLite `user_version` 为 5；旧版 v1/v2/v3/v4 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留两份文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
+首次打开空文件时建立会话、运行、消息、事件、控制命令、`model_requests` 及 `context_summaries` 表，SQLite `user_version` 为 5；旧版 v1/v2/v3/v4 库会升级，未知已有表或更新版本会被拒绝。升级前备份数据库。备份时先停止 Agent，再复制 `AGENT_SESSION_DB` 指向的文件；复制 `AGENT_WORKORDER_DB`（未配置时按上文规则确定默认路径）；若启用了库存操作，也复制 `AGENT_INVENTORY_DB` 指向的文件。分别保留这些文件、记录备份时间及对应部署版本，恢复时先停止 Agent、还原文件再启动，不要把两个数据库互换。若必须在线备份，使用 SQLite backup API 获取一致快照，不要在写入期间直接复制数据库文件。
 
 读取详细回执还要求当前页面账号同时具备对应单据的 `query` 权限与库存查询权限（现有菜单 `mes:wm:wmstock:list`，或 `mes:wm:wmstock:query`）；仅有执行编辑权限不足以核实结果。S3-07 与 S3-08 已在独立测试库完成验收，正式环境仍需按环境配置并保持动作开关受控。
 
@@ -140,6 +143,14 @@ uv run --locked python -m ktg_agent.server
 - `ktg_list_workorders` → `GET /mes/pro/workorder/list`
 
 模型 API Key 只保留在 Python 服务进程中，不发送到浏览器或 KTG。模型不能指定 KTG 地址、HTTP 方法或任意接口路径。
+
+### MES 工具目录与进度试验
+
+服务在每轮运行时按当前 KTG 用户权限与模块/工具开关构建候选快照。模型先用 `search_tools` 查询，再用 `load_tools` 加载；加载后的业务 schema 从下一次模型请求开始提供。默认上限为 8 个已加载工具和 6000 个 schema token，可通过 `AGENT_MAX_ACTIVE_TOOLS`、`AGENT_MAX_TOOL_SCHEMA_TOKENS` 调整。当前用户候选诊断入口为 `GET /agent-api/v1/tools`。
+
+MES-06 的五个工单、任务和报工查询按各自 `query`/`list` 权限发现。启用对应库存动作和 `AGENT_INVENTORY_DB` 后，目录还提供入库/领料预览及 `ktg_wm_operation_result` 回执读取；内部确认执行定义保持隐藏，实际写入仅由网页确认卡触发。工单预览同样只生成预览，确认调用既有 `/agent-api/v1/workorder-drafts/confirm` 持久操作流程。
+
+`ktg_pro_workorder_progress` 默认关闭。仅评测或受控演示时显式设置 `AGENT_ENABLE_WORKORDER_PROGRESS=true` 并重启 Agent；该工具还要求工单详情、任务列表和报工列表三项权限。候选是否出现仍取决于当前用户授权。该事实视图由多次独立读取组成，不能当成同一时点快照或已确认的工序进度规则。
 
 ## 项目结构
 

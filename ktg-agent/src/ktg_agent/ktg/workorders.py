@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+import json
+import sqlite3
 from threading import Lock
-from time import monotonic
+from time import time
 from typing import cast
 from uuid import uuid4
 
@@ -39,87 +43,160 @@ class _PendingPreview:
     action: str
     request: JsonObject
     preview: JsonObject
+    request_digest: str
+    expected_version: int | None
     expires_at: float
     state: str = "pending"
     result: ToolResult | None = None
 
 
 class PreviewStore:
-    """Process-local one-time approvals bound to one authenticated KTG user."""
+    """SQLite-backed approvals bound to a user and stable MES operation ID."""
 
-    def __init__(self, *, ttl_seconds: float = 600) -> None:
+    def __init__(self, *, ttl_seconds: float = 600, path: str | Path = ":memory:") -> None:
         if ttl_seconds <= 0:
             raise ValueError("preview ttl must be positive")
         self._ttl_seconds = ttl_seconds
-        self._items: dict[str, _PendingPreview] = {}
+        self.path = str(path)
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        self._memory_db = (sqlite3.connect(":memory:", timeout=10, check_same_thread=False)
+                           if self.path == ":memory:" else None)
+        if self._memory_db is not None:
+            self._memory_db.row_factory = sqlite3.Row
+        with self._connect() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS workorder_previews (
+                preview_id TEXT PRIMARY KEY, user_key TEXT NOT NULL, action TEXT NOT NULL,
+                request_json TEXT NOT NULL, preview_json TEXT NOT NULL,
+                request_digest TEXT NOT NULL, contract_version TEXT NOT NULL,
+                workorder_id INTEGER, expected_version INTEGER,
+                expires_at REAL NOT NULL, state TEXT NOT NULL, result_json TEXT
+            )""")
+            # An interrupted confirmation is safe to resume because every attempt
+            # reuses preview_id as MES operationId and first reads its receipt.
+            db.execute("UPDATE workorder_previews SET state='pending' WHERE state='executing'")
 
-    def create(
-        self,
-        *,
-        user_key: str,
-        action: str,
-        request: JsonObject,
-        preview: JsonObject,
-    ) -> str:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        db = self._memory_db or sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            if self._memory_db is None:
+                db.close()
+
+    @staticmethod
+    def _encode(value: object) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+    @staticmethod
+    def _result_json(result: ToolResult | None) -> str | None:
+        if result is None:
+            return None
+        return PreviewStore._encode({
+            "content": result.content, "details": result.details,
+            "status": result.status.value, "error_code": result.error_code,
+            "operation_id": result.operation_id, "verification": result.verification,
+        })
+
+    @staticmethod
+    def _result(value: str | None) -> ToolResult | None:
+        if value is None:
+            return None
+        row = json.loads(value)
+        return ToolResult(
+            content=row["content"], details=row["details"],
+            status=ToolStatus(row["status"]), error_code=row["error_code"],
+            operation_id=row["operation_id"], verification=row["verification"],
+        )
+
+    def _record(self, row: sqlite3.Row) -> _PendingPreview:
+        if row["contract_version"] != "contract-v1":
+            raise PreviewError("APPROVAL_CONTRACT_UNSUPPORTED", "提案契约已变化，请重新预览。")
+        request = cast(JsonObject, json.loads(row["request_json"]))
+        action = row["action"]
+        action_code = "CREATE_DRAFT" if action == "create" else "EDIT_DRAFT"
+        expected_version = request.get("version") if action == "edit" else None
+        if (KTGClient.workorder_operation_digest(action_code, request) != row["request_digest"]
+                or request.get("workorderId") != row["workorder_id"]
+                or expected_version != row["expected_version"]):
+            raise PreviewError("APPROVAL_CHANGED", "提案内容已变化，请重新预览。")
+        return _PendingPreview(
+            preview_id=row["preview_id"], user_key=row["user_key"], action=action,
+            request=request, preview=cast(JsonObject, json.loads(row["preview_json"])),
+            request_digest=row["request_digest"], expected_version=row["expected_version"],
+            expires_at=row["expires_at"], state=row["state"],
+            result=self._result(row["result_json"]),
+        )
+
+    def create(self, *, user_key: str, action: str, request: JsonObject,
+               preview: JsonObject) -> str:
         preview_id = str(uuid4())
-        with self._lock:
-            self._purge_expired()
-            self._items[preview_id] = _PendingPreview(
-                preview_id=preview_id,
-                user_key=user_key,
-                action=action,
-                request=deepcopy(request),
-                preview=deepcopy(preview),
-                expires_at=monotonic() + self._ttl_seconds,
+        action_code = "CREATE_DRAFT" if action == "create" else "EDIT_DRAFT"
+        digest = KTGClient.workorder_operation_digest(action_code, request)
+        workorder_id = request.get("workorderId")
+        expected_version = request.get("version") if action == "edit" else None
+        with self._lock, self._connect() as db:
+            now = time()
+            # Expired approvals may be pruned, but completed operation receipts
+            # remain addressable so callers can recover the durable outcome.
+            db.execute(
+                "DELETE FROM workorder_previews WHERE expires_at<=? AND state='pending'",
+                (now,),
+            )
+            db.execute(
+                """INSERT INTO workorder_previews (
+                    preview_id, user_key, action, request_json, preview_json,
+                    request_digest, contract_version, workorder_id, expected_version,
+                    expires_at, state, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, 'contract-v1', ?, ?, ?, 'pending', NULL)""",
+                (preview_id, user_key, action, self._encode(request), self._encode(preview),
+                 digest, workorder_id, expected_version, now + self._ttl_seconds),
             )
         return preview_id
 
-    def begin(
-        self, *, preview_id: str, user_key: str, action: str
-    ) -> tuple[_PendingPreview, ToolResult | None]:
-        with self._lock:
-            record = self._items.get(preview_id)
-            if record is None or record.expires_at <= monotonic():
-                self._items.pop(preview_id, None)
+    def begin(self, *, preview_id: str, user_key: str, action: str
+              ) -> tuple[_PendingPreview, ToolResult | None]:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM workorder_previews WHERE preview_id=?", (preview_id,)).fetchone()
+            if row is None:
                 raise PreviewError("APPROVAL_EXPIRED", "预览已过期，请重新生成。")
+            record = self._record(row)
             if record.user_key != user_key:
-                raise PreviewError(
-                    "APPROVAL_IDENTITY_MISMATCH", "该预览不属于当前登录用户。"
-                )
+                raise PreviewError("APPROVAL_IDENTITY_MISMATCH", "该预览不属于当前登录用户。")
             if record.action != action:
                 raise PreviewError("APPROVAL_ACTION_MISMATCH", "预览操作类型不匹配。")
-            if record.state == "completed":
+            if record.state == "completed" and record.result is not None and record.result.status is not ToolStatus.UNKNOWN:
                 return record, record.result
+            if record.expires_at <= time():
+                db.execute("DELETE FROM workorder_previews WHERE preview_id=?", (preview_id,))
+                raise PreviewError("APPROVAL_EXPIRED", "预览已过期，请重新生成。")
             if record.state == "executing":
                 raise PreviewError("APPROVAL_IN_PROGRESS", "该操作正在执行，请勿重复提交。")
+            db.execute("UPDATE workorder_previews SET state='executing' WHERE preview_id=?", (preview_id,))
             record.state = "executing"
             return record, None
 
     def finish(self, preview_id: str, result: ToolResult) -> None:
-        with self._lock:
-            record = self._items.get(preview_id)
-            if record is not None:
-                record.state = "completed"
-                record.result = result
+        state = "completed" if result.status is not ToolStatus.UNKNOWN else "pending"
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE workorder_previews SET state=?, result_json=? WHERE preview_id=?",
+                       (state, self._result_json(result), preview_id))
 
     def action_for(self, *, preview_id: str, user_key: str) -> str:
-        with self._lock:
-            record = self._items.get(preview_id)
-            if record is None or record.expires_at <= monotonic():
-                self._items.pop(preview_id, None)
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM workorder_previews WHERE preview_id=?", (preview_id,)).fetchone()
+            if row is None:
                 raise PreviewError("APPROVAL_EXPIRED", "预览已过期，请重新生成。")
-            if record.user_key != user_key:
-                raise PreviewError(
-                    "APPROVAL_IDENTITY_MISMATCH", "该预览不属于当前登录用户。"
-                )
-            return record.action
-
-    def _purge_expired(self) -> None:
-        now = monotonic()
-        expired = [key for key, value in self._items.items() if value.expires_at <= now]
-        for key in expired:
-            del self._items[key]
+            if row["user_key"] != user_key:
+                raise PreviewError("APPROVAL_IDENTITY_MISMATCH", "该预览不属于当前登录用户。")
+            if row["state"] != "completed" and row["expires_at"] <= time():
+                db.execute("DELETE FROM workorder_previews WHERE preview_id=?", (preview_id,))
+                raise PreviewError("APPROVAL_EXPIRED", "预览已过期，请重新生成。")
+            return cast(str, row["action"])
 
 
 def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
@@ -432,82 +509,41 @@ async def _execute_approved(
             and change.get("field") in {"productId", "quantity"}
             for change in cast(list[object], record.preview.get("changes", []))
         )
-        try:
-            response = (
-                await client.post("/mes/pro/workorder", record.request)
-                if action == "create"
-                else await client.put("/mes/pro/workorder", record.request)
+        action_code = "CREATE_DRAFT" if action == "create" else "EDIT_DRAFT"
+        operation = {
+            "operationId": preview_id,
+            "action": action_code,
+            "requestDigest": record.request_digest,
+            "expectedVersion": record.expected_version,
+            "draft": record.request,
+        }
+        receipt = await client.execute_workorder_operation(operation)
+        outcome = receipt.get("outcome")
+        if outcome == "failed":
+            code = receipt.get("errorCode")
+            result = _failure(
+                "工单操作未执行。", code if isinstance(code, str) else "WORKORDER_OPERATION_FAILED",
+                details={"kind": "workorder_draft_result", "outcome": "failed",
+                         "label": "写入失败", "preview_id": preview_id},
+                operation_id=preview_id,
             )
-        except (KTGError, TimeoutError) as exc:
-            if isinstance(exc, KTGError) and exc.code not in {
-                "KTG_CONNECTION_ERROR",
-                "KTG_HTTP_ERROR",
-            }:
-                raise
-            result = await _reconcile_after_uncertain_write(
-                client, action, record.request, preview_id, verify_bom=verify_bom
-            )
+        elif outcome != "succeeded":
+            result = _unknown_result(record.request, preview_id, reconciled=True)
         else:
-            try:
-                workorder_id = (
-                    response.get("data")
-                    if action == "create"
-                    else record.request.get("workorderId")
-                )
-                if not isinstance(workorder_id, int) or workorder_id <= 0:
-                    raise PreviewError(
-                        "KTG_INVALID_RESPONSE", "KTG 未返回有效的工单 ID。"
-                    )
+            workorder_id = receipt.get("workorderId")
+            if not isinstance(workorder_id, int) or workorder_id <= 0:
+                result = _unknown_result(record.request, preview_id, reconciled=True)
+            else:
                 result = await _verified_result(
-                    client,
-                    action,
-                    record.request,
-                    workorder_id,
-                    preview_id,
-                    reconciled=False,
-                    verify_bom=verify_bom,
+                    client, action, record.request, workorder_id, preview_id,
+                    reconciled=False, verify_bom=verify_bom,
                 )
-            except (KTGError, PreviewError):
-                result = _unknown_result(record.request, preview_id, reconciled=False)
     except PreviewError as exc:
         result = _failure(str(exc), exc.code, operation_id=preview_id)
     except KTGError as exc:
         result = _failure(str(exc), exc.code, operation_id=preview_id)
     store.finish(preview_id, result)
     return result
-
-
-async def _reconcile_after_uncertain_write(
-    client: KTGClient,
-    action: str,
-    request: Mapping[str, object],
-    preview_id: str,
-    *,
-    verify_bom: bool,
-) -> ToolResult:
-    workorder_id: object
-    try:
-        if action == "create":
-            code = request.get("workorderCode")
-            if not isinstance(code, str):
-                raise PreviewError("WRITE_RESULT_UNKNOWN", "写入结果待核实。")
-            found = await _find_workorder(client, code)
-            workorder_id = found.get("workorderId")
-        else:
-            workorder_id = request.get("workorderId")
-        if not isinstance(workorder_id, int) or workorder_id <= 0:
-            raise PreviewError("WRITE_RESULT_UNKNOWN", "写入结果待核实。")
-        return await _verified_result(
-            client,
-            action,
-            request,
-            workorder_id,
-            preview_id,
-            reconciled=True,
-            verify_bom=verify_bom,
-        )
-    except (KTGError, PreviewError):
-        return _unknown_result(request, preview_id, reconciled=True)
 
 
 def _unknown_result(

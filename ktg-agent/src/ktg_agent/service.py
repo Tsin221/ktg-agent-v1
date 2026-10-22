@@ -32,15 +32,19 @@ from ktg_agent.ktg import (
     build_workorder_tools,
 )
 from ktg_agent.ktg.inventory import (
-    ISSUE, RECEIPT, InventoryStore, build_inventory_tools, inventory_result,
+    ISSUE, RECEIPT, InventoryStore, build_inventory_result_tool, build_inventory_tools, inventory_result,
 )
+from ktg_agent.ktg.production_queries import (build_production_query_tools,
+    production_query_factories, production_query_manifests)
+from ktg_agent.ktg.workorder_progress import (build_workorder_progress_tool,
+    workorder_progress_factories, workorder_progress_manifests)
 from ktg_agent.ktg.client import KTGError
 from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
-from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches
+from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches, ToolManifest
 from ktg_agent.tools.discovery import RunToolDiscovery, directory_definitions
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
-from ktg_agent.tools.permissions import PermissionDecision, evaluate_permission_policy
+from ktg_agent.tools.permissions import PermissionAny, PermissionAll, PermissionLeaf, PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.runner import CallAuthorization
 from ktg_agent.tools.registry import ToolChannel, ToolStatus
 
@@ -73,6 +77,7 @@ class QueryService:
         ktg_client_factory: KTGClientFactory,
         inventory_store: InventoryStore | None = None,
         inventory_actions: frozenset[str] = frozenset(),
+        workorder_store: PreviewStore | None = None,
         limits: RunLimits | None = None,
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
@@ -80,11 +85,12 @@ class QueryService:
         switches_provider: Callable[[], CatalogSwitches] | None = None,
         max_active_tools: int = 8,
         max_schema_tokens: int = 6000,
+        enable_workorder_progress: bool = False,
     ) -> None:
         self._provider = provider
         self._model_config = model_config
         self._ktg_client_factory = ktg_client_factory
-        self._preview_store = PreviewStore(ttl_seconds=600)
+        self._preview_store = workorder_store or PreviewStore(ttl_seconds=600)
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
         self._spill = spill_settings
@@ -96,11 +102,36 @@ class QueryService:
         )
         definitions = (*build_query_tools(), *build_workorder_tools(self._preview_store),
                        *(build_inventory_tools(inventory_store, inventory_actions)
-                         if inventory_store else ()))
+                         if inventory_store else ()),
+                       *build_production_query_tools())
+        if inventory_store and inventory_actions:
+            definitions = (*definitions, build_inventory_result_tool(inventory_store))
+        progress = build_workorder_progress_tool()
+        definitions = (*definitions, progress)
         self._registry = ToolRegistry(definitions)
-        self._catalog = build_legacy_catalog(definitions)
+        extra_factories = {**production_query_factories(), **workorder_progress_factories()}
+        extra_manifests = (*production_query_manifests(), *workorder_progress_manifests())
+        if inventory_store and inventory_actions:
+            result_tool = next(item for item in definitions if item.name == "ktg_wm_operation_result")
+            stock = PermissionAny((PermissionLeaf("mes:wm:wmstock:list"), PermissionLeaf("mes:wm:wmstock:query")))
+            policy = PermissionAny((
+                PermissionAll((PermissionLeaf("mes:wm:itemrecpt:query"), stock)),
+                PermissionAll((PermissionLeaf("mes:wm:issueheader:query"), stock)),
+            ))
+            result_manifest = ToolManifest(
+                name=result_tool.name, version=result_tool.version, module="wm", domain="operation_result",
+                label=result_tool.label, description=result_tool.description, permission_policy=policy,
+                effect=result_tool.effect, execution_mode=result_tool.execution_mode,
+                retry_policy=result_tool.retry_policy, timeout_seconds=result_tool.timeout_seconds,
+                expose_to_model=True, confirmation_policy="none", proposal_store_effect=False,
+                handler_ref="inventory:operation_result")
+            extra_factories["inventory:operation_result"] = lambda: result_tool
+            extra_manifests = (*extra_manifests, result_manifest)
+        self._catalog = build_legacy_catalog(definitions, extra_manifests=extra_manifests,
+                                             extra_factories=extra_factories)
         enabled_modules = {"md": True, "wm": True, "pro": True}
-        enabled_tools = {definition.name: True for definition in definitions}
+        enabled_tools = {definition.name: (enable_workorder_progress or definition.name != "ktg_pro_workorder_progress")
+                         for definition in definitions}
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
         self._max_active_tools = max_active_tools
         self._max_schema_tokens = max_schema_tokens

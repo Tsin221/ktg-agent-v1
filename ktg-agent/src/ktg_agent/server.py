@@ -22,6 +22,7 @@ from ktg_agent.context.spill import SpillSettings
 from ktg_agent.context.window import ContextPolicy
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
+from ktg_agent.ktg.workorders import PreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -44,6 +45,7 @@ class Settings:
     session_db_path: str = ""
     enable_item_receipt: bool = False
     enable_production_issue: bool = False
+    enable_workorder_progress: bool = False
     max_total_tokens: int | None = None
     max_tool_calls: int = 12
     max_model_turns: int = 8
@@ -56,6 +58,7 @@ class Settings:
     spill_dir: str = ""
     max_active_tools: int = 8
     max_schema_tokens: int = 6000
+    workorder_db_path: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -146,8 +149,10 @@ class Settings:
             port=port,
             inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
             session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
+            workorder_db_path=os.environ.get("AGENT_WORKORDER_DB", "").strip(),
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
+            enable_workorder_progress=os.environ.get("AGENT_ENABLE_WORKORDER_PROGRESS", "false").lower() == "true",
             max_total_tokens=max_total_tokens,
             max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 12) or 12,
             max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 8) or 8,
@@ -207,12 +212,31 @@ def create_service(settings: Settings) -> QueryService:
     )
     if actions and not Path(settings.inventory_db_path).is_absolute():
         raise RuntimeError("AGENT_INVENTORY_DB must be an absolute path when inventory actions are enabled")
+    workorder_db_path = settings.workorder_db_path
+    if not workorder_db_path:
+        if settings.session_db_path:
+            session_path = Path(settings.session_db_path)
+            if not session_path.is_absolute():
+                raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
+            workorder_db_path = str(session_path.with_name("agent-workorders.sqlite3"))
+        else:
+            workorder_db_path = str(
+                Path.home() / ".ktg-agent" / "agent-workorders.sqlite3")
+    if workorder_db_path:
+        proposal_path = Path(workorder_db_path)
+        if not proposal_path.is_absolute():
+            raise RuntimeError("AGENT_WORKORDER_DB must be an absolute path")
+        for db_name, db_path in (("AGENT_SESSION_DB", settings.session_db_path),
+                                 ("AGENT_INVENTORY_DB", settings.inventory_db_path)):
+            if db_path and proposal_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError(f"AGENT_WORKORDER_DB must differ from {db_name}")
     return QueryService(
         provider=provider,
         model_config=model_config,
         ktg_client_factory=client_factory,
         inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
         inventory_actions=actions,
+        workorder_store=PreviewStore(path=workorder_db_path or ":memory:"),
         spill_settings=(
             SpillSettings(settings.spill_max_inline_tokens, Path(settings.spill_dir))
             if settings.spill_max_inline_tokens is not None and settings.spill_dir else None
@@ -221,6 +245,7 @@ def create_service(settings: Settings) -> QueryService:
         summary_max_tokens=settings.context_summary_max_tokens,
         max_active_tools=settings.max_active_tools,
         max_schema_tokens=settings.max_schema_tokens,
+        enable_workorder_progress=settings.enable_workorder_progress,
         limits=RunLimits(max_model_turns=settings.max_model_turns, max_tool_calls=settings.max_tool_calls,
                          max_run_seconds=90, max_parallel_reads=3,
                          max_total_tokens=settings.max_total_tokens),

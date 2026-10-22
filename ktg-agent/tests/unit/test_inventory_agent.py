@@ -1,14 +1,15 @@
 """Fake KTG contract for durable inventory preview and confirmation."""
 
 import asyncio
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ktg_agent.core.messages import ToolCall
 from ktg_agent.ktg.client import KTGClient, KTGError
-from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore, build_inventory_tools, inventory_result
-from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
+from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore, build_inventory_result_tool, build_inventory_tools, confirm_inventory, inventory_result
+from ktg_agent.tools import RetryPolicy, ToolContext, ToolEffect, ToolRegistry, ToolRunner
 from ktg_agent.tools.registry import ToolChannel
 
 
@@ -18,6 +19,16 @@ def test_preview_confirm_replay_and_restart() -> None:
 
 def test_production_issue_preview_confirm_and_restart() -> None:
     asyncio.run(_scenario(stale=False, action=ISSUE))
+
+
+def test_operation_result_tool_is_read_only_and_separate_for_mes12_catalog_wiring(tmp_path: Path) -> None:
+    store = InventoryStore(str(tmp_path / "inventory.db"))
+    tool = build_inventory_result_tool(store)
+    assert tool.name == "ktg_wm_operation_result"
+    assert tool.effect is ToolEffect.READ
+    assert tool.retry_policy is RetryPolicy.BOUNDED_READ
+    assert tool.expose_to_model is True
+    assert tool.required_permissions == ("mes:wm:wmstock:list",)
 
 
 def test_changed_lines_block_write_and_replay() -> None:
@@ -53,6 +64,74 @@ def test_ambiguous_code_and_missing_read_permission_do_not_prepare_write() -> No
             assert "403" in denied.content
             with store._connect() as db:
                 assert db.execute("SELECT COUNT(*) FROM inventory_previews").fetchone()[0] == 0
+
+    asyncio.run(scenario())
+
+
+def test_result_rechecks_document_read_permission_before_returning_cached_data() -> None:
+    async def scenario() -> None:
+        with TemporaryDirectory() as folder:
+            proposal = {"documentId": 12, "documentCode": "IR-12", "documentStatus": "APPROVED",
+                        "documentVersion": 4, "additions": [{"sourceDocLineId": 1, "quantity": 2}]}
+            denied_urls: list[str] = []
+
+            async def read(url: str, _headers: Mapping[str, str],
+                           _params: Mapping[str, object], _timeout: float) -> object:
+                denied_urls.append(url)
+                raise KTGError("KTG_HTTP_ERROR", "forbidden")
+
+            store = InventoryStore(str(Path(folder) / "operations.sqlite3"))
+            operation_id = store.create("id:7", RECEIPT, proposal)
+            context = ToolContext(run_id="run", tool_call_id="result", identity={"userId": 7},
+                                  ktg_client=KTGClient(base_url="http://localhost", authorization="Bearer test",
+                                                       transport=read))
+            pending = await inventory_result(store, context, operation_id)
+            assert pending["error_code"] == "OPERATION_NOT_FOUND"
+            assert "documentCode" not in pending
+            with store._connect() as db:
+                db.execute("UPDATE inventory_previews SET state='finished', result_json=? WHERE operation_id=?",
+                           ('{"kind":"inventory_result","operation_id":"' + operation_id + '","outcome":"succeeded","label":"ok","receipt":{"secret":true}}', operation_id))
+            cached = await inventory_result(store, context, operation_id)
+            assert cached["error_code"] == "OPERATION_NOT_FOUND"
+            assert "receipt" not in cached
+            assert len(denied_urls) == 2
+            assert all("/documents/ITEM_RECEIPT_EXECUTE/12" in url for url in denied_urls)
+
+    asyncio.run(scenario())
+
+
+def test_expired_preview_cannot_be_confirmed_or_returned_as_prepared() -> None:
+    async def scenario() -> None:
+        with TemporaryDirectory() as folder:
+            proposal = {"documentId": 12, "documentCode": "IR-12", "documentStatus": "APPROVED",
+                        "documentVersion": 4, "additions": [{"sourceDocLineId": 1, "quantity": 2}]}
+            writes = 0
+
+            async def read(url: str, _headers: Mapping[str, str],
+                           _params: Mapping[str, object], _timeout: float) -> object:
+                if url.endswith("/documents/ITEM_RECEIPT_EXECUTE/12"):
+                    return {"code": 200, "data": {"readable": True}}
+                raise AssertionError(url)
+
+            async def write(_method: str, _url: str, _headers: Mapping[str, str],
+                            _body: Mapping[str, object], _timeout: float) -> dict[str, object]:
+                nonlocal writes
+                writes += 1
+                raise AssertionError("expired proposal must not execute")
+
+            store = InventoryStore(str(Path(folder) / "operations.sqlite3"))
+            operation_id = store.create("id:7", RECEIPT, proposal)
+            with store._connect() as db:
+                db.execute("UPDATE inventory_previews SET expires_at=? WHERE operation_id=?", (time.time() - 1, operation_id))
+            context = ToolContext(run_id="run", tool_call_id="confirm", identity={"userId": 7},
+                                  ktg_client=KTGClient(base_url="http://localhost", authorization="Bearer test",
+                                                       transport=read, write_transport=write))
+            expired = await inventory_result(store, context, operation_id)
+            assert expired["error_code"] == "PREVIEW_EXPIRED"
+            assert "documentCode" not in expired
+            confirmed = await confirm_inventory(store, context, operation_id, RECEIPT)
+            assert confirmed["error_code"] == "PREVIEW_EXPIRED"
+            assert writes == 0
 
     asyncio.run(scenario())
 
