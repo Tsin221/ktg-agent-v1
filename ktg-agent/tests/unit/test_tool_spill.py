@@ -24,6 +24,7 @@ from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.repository import SessionRepository
 from ktg_agent.ktg import KTGClient
+from ktg_agent.tools.legacy_catalog import build_legacy_catalog
 
 
 def _split_spilled(content: str, target: Path) -> tuple[str, str, int]:
@@ -131,11 +132,16 @@ def test_session_persists_spill_or_original_on_io_failure(
     async def execute_tool(context: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
         return ToolResult(original, details={"rows": 7})
 
-    tool = ToolDefinition("read", "1", "read", "read", {"type": "object"}, None,
-                          (), ToolEffect.READ, ExecutionMode.SEQUENTIAL, 1, execute_tool)
+    tool = ToolDefinition("ktg_count_products", "1", "统计产品", "统计产品数量", {"type": "object"}, None,
+                          ("mes:md:mditem:list",), ToolEffect.READ, ExecutionMode.SEQUENTIAL, 1, execute_tool)
     provider = FakeProvider((
         ScriptedTurn((ResponseCompleted(FinalResponse(
-            AssistantMessage((ToolCall("call-1", "read", {}),)),
+            AssistantMessage((ToolCall("load", "load_tools", {"tools": [
+                {"name": "ktg_count_products", "version": "1"}]}),)),
+            StopReason.TOOL_CALL, Usage(2, 1),
+        )),)),
+        ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((ToolCall("call-1", "ktg_count_products", {}),)),
             StopReason.TOOL_CALL, Usage(2, 1),
         )),)),
         ScriptedTurn((ResponseCompleted(FinalResponse(
@@ -143,17 +149,21 @@ def test_session_persists_spill_or_original_on_io_failure(
         )),)),
     ))
 
-    class FakeClient:
-        async def get_current_user(self) -> dict[str, object]:
-            return {"userId": 7}
+    async def transport(url: str, _headers: Mapping[str, str],
+                        _params: Mapping[str, object], _timeout: float) -> object:
+        assert url.endswith("/getInfo")
+        return {"code": 200, "user": {"userId": 7},
+                "permissions": ["mes:md:mditem:list"]}
 
     spill_dir = tmp_path / "spill"
     if blocked_directory:
         spill_dir.write_text("existing file", encoding="utf-8")
     service = QueryService(provider=provider, model_config=ModelConfig("fake", 128),
-                           ktg_client_factory=lambda _: cast(KTGClient, FakeClient()),
+                           ktg_client_factory=lambda token: KTGClient(
+                               base_url="http://127.0.0.1:8080", authorization=token,
+                               transport=transport),
                            spill_settings=SpillSettings(200, spill_dir))
-    service._registry = ToolRegistry((tool,))
+    service._catalog = build_legacy_catalog((tool,))
     db = tmp_path / "sessions.sqlite3"
     repo = SessionRepository(db)
     session = repo.create_session("id:7")
@@ -175,17 +185,20 @@ def test_session_persists_spill_or_original_on_io_failure(
     assert saved is not None and saved.status == "completed"
     results = [record.message for record in reopened.list_messages("id:7", session.id).items
                if isinstance(record.message, ToolResultMessage)]
-    assert len(results) == 1
-    assert results[0].details is not None and results[0].details["rows"] == 7
+    business = [message for message in results
+                if message.details is not None and "rows" in message.details]
+    assert len(business) == 1
+    first = business[0]
+    assert first.details is not None and first.details["rows"] == 7
     if blocked_directory:
-        assert results[0].content[0].text == original
-        assert "spill" not in results[0].details
+        assert first.content[0].text == original
+        assert "spill" not in first.details
         assert "tool result spill failed" in caplog.text
         assert original not in caplog.text
     else:
-        assert results[0].content[0].text != original
-        assert "完整内容路径" in results[0].content[0].text
-        spill = results[0].details["spill"]
+        assert first.content[0].text != original
+        assert "完整内容路径" in first.content[0].text
+        spill = first.details["spill"]
         assert isinstance(spill, dict)
         assert Path(str(spill["path"])).read_text(encoding="utf-8") == original
     assert saved.usage is not None and "estimate" not in str(saved.usage)

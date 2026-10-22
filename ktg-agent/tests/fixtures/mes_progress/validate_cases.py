@@ -6,17 +6,18 @@ import json
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from typing import Any
 
 
-def feedback_rows(source):
-    rows = list(source.get("feedback", []))
+def feedback_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = list(source.get("feedback", []))
     for batch in source.get("feedback_batches", []):
         for offset in range(batch["count"]):
             rows.append({**batch, "id": batch["id_start"] + offset})
     return rows
 
 
-def check_case(case):
+def check_case(case: dict[str, Any]) -> None:
     source, expected = case["input"], case["expected"]
     assert case["split"] in {"dev", "holdout"}
     assert isinstance(case["case_id"], str) and case["case_id"]
@@ -50,7 +51,7 @@ def check_case(case):
             ratio = (produced * 100 / plan).quantize(Decimal("0.000000000000000001"), rounding=ROUND_HALF_UP)
             assert Decimal(expected["ratio_percent"]) == ratio, case["case_id"]
 
-    process_totals = defaultdict(Decimal)
+    process_totals: defaultdict[str, Decimal] = defaultdict(Decimal)
     for task in source["tasks"]:
         process_totals[str(task["process_id"])] += Decimal(0)
     for row in rows:
@@ -61,7 +62,7 @@ def check_case(case):
         assert len(rows) == source["feedback_total"], case["case_id"]
 
 
-def main():
+def main() -> None:
     path = Path(__file__).with_name("cases.json")
     cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
     ids = [case["case_id"] for case in cases]
