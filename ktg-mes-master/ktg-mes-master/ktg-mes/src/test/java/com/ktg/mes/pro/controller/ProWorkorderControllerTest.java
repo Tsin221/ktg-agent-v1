@@ -5,6 +5,9 @@ import com.ktg.common.core.domain.AjaxResult;
 import com.ktg.common.exception.ServiceException;
 import com.ktg.framework.web.exception.GlobalExceptionHandler;
 import com.ktg.mes.pro.controller.dto.ProWorkorderDraftRequest;
+import com.ktg.mes.pro.domain.ProWorkorderOperation;
+import com.ktg.mes.pro.service.impl.ProWorkorderOperationService;
+import com.ktg.framework.web.service.PermissionService;
 import com.ktg.mes.pro.domain.ProWorkorder;
 import com.ktg.mes.pro.service.IProWorkorderService;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,6 +43,12 @@ class ProWorkorderControllerTest {
     @Mock
     private IProWorkorderService proWorkorderService;
 
+    @Mock
+    private ProWorkorderOperationService operationService;
+
+    @Mock
+    private PermissionService permissionService;
+
     @Spy
     @InjectMocks
     private ProWorkorderController controller;
@@ -54,6 +63,42 @@ class ProWorkorderControllerTest {
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .setValidator(validator)
                 .build();
+    }
+
+    @Test
+    void operationRouteRejectsMissingActionPermissionBeforeWriting() throws Exception {
+        mockMvc.perform(post("/mes/pro/workorder/operations")
+                        .contentType("application/json")
+                        .content("{\"operationId\":\"8eec45ac-f6ea-4d07-8758-bec40a772dde\",\"action\":\"CREATE_DRAFT\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("PERMISSION_DENIED"));
+        verify(operationService, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void operationRouteUsesCreatePermissionAndReturnsServiceResult() throws Exception {
+        doReturn(7L).when(controller).getUserId();
+        doReturn("alice").when(controller).getUsername();
+        when(permissionService.hasPermi("mes:pro:workorder:add")).thenReturn(true);
+        when(operationService.execute(any(), any(), any())).thenReturn(AjaxResult.success());
+        mockMvc.perform(post("/mes/pro/workorder/operations")
+                        .contentType("application/json")
+                        .content("{\"operationId\":\"8eec45ac-f6ea-4d07-8758-bec40a772dde\",\"action\":\"CREATE_DRAFT\"}"))
+                .andExpect(status().isOk());
+        verify(operationService).execute(any(), org.mockito.ArgumentMatchers.eq(7L),
+                org.mockito.ArgumentMatchers.eq("alice"));
+    }
+
+    @Test
+    void operationResultHidesReceiptWhenActionPermissionWasRevoked() throws Exception {
+        doReturn(7L).when(controller).getUserId();
+        ProWorkorderOperation receipt = new ProWorkorderOperation();
+        receipt.setAction("EDIT_DRAFT");
+        when(operationService.result("8eec45ac-f6ea-4d07-8758-bec40a772dde", 7L))
+                .thenReturn(AjaxResult.success(receipt));
+        mockMvc.perform(get("/mes/pro/workorder/operations/8eec45ac-f6ea-4d07-8758-bec40a772dde"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.errorCode").value("OPERATION_NOT_FOUND"));
     }
 
     @Test

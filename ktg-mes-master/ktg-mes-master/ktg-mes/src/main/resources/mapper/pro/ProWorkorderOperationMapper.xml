@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ktg.mes.pro.mapper.ProWorkorderOperationMapper">
+    <resultMap id="operation" type="com.ktg.mes.pro.domain.ProWorkorderOperation">
+        <id property="operationId" column="operation_id"/>
+        <result property="action" column="action_type"/>
+        <result property="requestDigest" column="request_digest"/>
+        <result property="ownerId" column="owner_id"/>
+        <result property="workorderId" column="workorder_id"/>
+        <result property="expectedVersion" column="expected_version"/>
+        <result property="outcome" column="outcome"/>
+        <result property="errorCode" column="error_code"/>
+        <result property="workorderCode" column="workorder_code"/>
+        <result property="workorderVersion" column="workorder_version"/>
+        <result property="committedAt" column="committed_at"/>
+    </resultMap>
+    <select id="selectById" resultMap="operation">
+        SELECT operation_id, action_type, request_digest, owner_id, workorder_id,
+               expected_version, outcome, error_code, workorder_code, workorder_version, committed_at
+        FROM pro_workorder_operation WHERE operation_id = #{operationId}
+    </select>
+    <insert id="insert" parameterType="com.ktg.mes.pro.domain.ProWorkorderOperation">
+        INSERT INTO pro_workorder_operation
+        (operation_id, action_type, request_digest, owner_id, workorder_id, expected_version,
+         outcome, error_code, workorder_code, workorder_version, committed_at)
+        VALUES (#{operationId}, #{action}, #{requestDigest}, #{ownerId}, #{workorderId},
+                #{expectedVersion}, #{outcome}, #{errorCode}, #{workorderCode},
+                #{workorderVersion}, CURRENT_TIMESTAMP)
+    </insert>
+    <update id="complete" parameterType="com.ktg.mes.pro.domain.ProWorkorderOperation">
+        UPDATE pro_workorder_operation
+        SET workorder_id = #{workorderId}, workorder_code = #{workorderCode},
+            workorder_version = #{workorderVersion}, outcome = 'succeeded',
+            committed_at = CURRENT_TIMESTAMP
+        WHERE operation_id = #{operationId} AND outcome = 'executing'
+    </update>
+</mapper>

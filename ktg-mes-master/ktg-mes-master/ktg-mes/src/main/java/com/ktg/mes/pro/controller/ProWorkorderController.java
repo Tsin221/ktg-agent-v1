@@ -12,6 +12,10 @@ import com.ktg.mes.md.domain.MdProductBom;
 import com.ktg.mes.md.service.IMdProductBomService;
 import com.ktg.mes.pro.domain.ProWorkorderBom;
 import com.ktg.mes.pro.controller.dto.ProWorkorderDraftRequest;
+import com.ktg.mes.pro.controller.dto.ProWorkorderOperationRequest;
+import com.ktg.mes.pro.service.impl.ProWorkorderOperationService;
+import com.ktg.framework.web.service.PermissionService;
+import org.springframework.http.ResponseEntity;
 import com.ktg.mes.pro.service.IProWorkorderBomService;
 import io.minio.messages.Item;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -51,6 +55,43 @@ public class ProWorkorderController extends BaseController
 
     @Autowired
     private IMdProductBomService mdProductBomService;
+
+    @Autowired
+    private ProWorkorderOperationService operationService;
+
+    @Autowired
+    private PermissionService permissionService;
+
+    /** Agent draft command with a durable operation identity. */
+    @PreAuthorize("@ss.hasPermi('mes:pro:workorder:add') or @ss.hasPermi('mes:pro:workorder:edit')")
+    @PostMapping("/operations")
+    public ResponseEntity<AjaxResult> operate(@RequestBody ProWorkorderOperationRequest request)
+    {
+        String permission = request != null && "CREATE_DRAFT".equals(request.getAction())
+                ? "mes:pro:workorder:add" : "mes:pro:workorder:edit";
+        AjaxResult result = permissionService.hasPermi(permission)
+                ? operationService.execute(request, getUserId(), getUsername())
+                : AjaxResult.error(403, "没有工单操作权限").put("errorCode", "PERMISSION_DENIED");
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
+    /** Receipt lookup requires current read and action permission as well as owner identity. */
+    @PreAuthorize("@ss.hasPermi('mes:pro:workorder:query')")
+    @GetMapping("/operations/{operationId}")
+    public ResponseEntity<AjaxResult> operationResult(@PathVariable("operationId") String operationId)
+    {
+        AjaxResult result = operationService.result(operationId, getUserId());
+        if (Integer.valueOf(200).equals(result.get("code")))
+        {
+            com.ktg.mes.pro.domain.ProWorkorderOperation receipt =
+                    (com.ktg.mes.pro.domain.ProWorkorderOperation) result.get("data");
+            String permission = "CREATE_DRAFT".equals(receipt.getAction())
+                    ? "mes:pro:workorder:add" : "mes:pro:workorder:edit";
+            if (!permissionService.hasPermi(permission))
+                result = AjaxResult.error(404, "操作不存在").put("errorCode", "OPERATION_NOT_FOUND");
+        }
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
 
     /**
      * 查询生产工单列表
