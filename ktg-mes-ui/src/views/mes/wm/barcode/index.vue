@@ -157,7 +157,7 @@
             <el-form-item label="条码类型" prop="barcodeType">
               <el-select v-model="form.barcodeType" placeholder="请选择条码类型">
                 <el-option
-                  v-for="dict in dict.type.mes_barcode_type"
+                  v-for="dict in dict.type.mes_barcode_type.filter(item => item.value !== 'BATCH')"
                   :key="dict.value"
                   :label="dict.label"
                   :value="dict.value"
@@ -281,22 +281,6 @@
             </el-form-item>
           </el-col>
         </el-row>
-        <!-- 批次 -->
-        <el-row v-else-if="form.barcodeType=='BATCH'">
-          <el-col :span="8">
-            <el-form-item label="批次编号" prop="bussinessCode">
-              <el-input v-model="form.bussinessCode" placeholder="请选择批次" >
-                <el-button slot="append" icon="el-icon-search" @click="handleBatchSelect"></el-button>
-              </el-input>
-            </el-form-item>
-            <BatchSelect ref="batchSelect" @onSelected="onBatchSelected" ></BatchSelect>
-          </el-col>
-          <el-col :span="16">
-            <el-form-item label="批次内容" prop="bussinessName">
-              <el-input v-model="form.bussinessName" readonly="readonly" ></el-input>
-            </el-form-item>
-          </el-col>
-        </el-row>
         <!-- 车间 -->
         <el-row v-else-if="form.barcodeType=='WORKSHOP'">
           <el-col :span="8">
@@ -409,7 +393,6 @@ import VendorSelect from "@/components/vendorSelect/single.vue";
 import PackageSelectSingle from "@/components/package/single.vue";
 import WorkstationSelect from "@/components/workstationSelect/simpletableSingle.vue"
 import StockSelect from "@/components/stockSelect/single.vue"
-import BatchSelect from "@/components/batchSelect/single.vue";
 import MachinerySelect from "@/components/machinerySelect/single.vue";
 import UserSingleSelect from "@/components/userSelect/single.vue"
 import ProcardSelect from "@/components/procardSelect/single.vue";
@@ -420,7 +403,7 @@ export default {
   name: "Barcode",
   dicts: ['mes_barcode_type','mes_barcode_formart','sys_yes_no'],
   components: {
-    ItemSelect,VendorSelect,PackageSelectSingle,Barcodeconfig,WorkstationSelect,StockSelect,BatchSelect,MachinerySelect,
+    ItemSelect,VendorSelect,PackageSelectSingle,Barcodeconfig,WorkstationSelect,StockSelect,MachinerySelect,
     UserSingleSelect,ProcardSelect,BarcodeBatchPrint
   },
   data() {
@@ -709,18 +692,6 @@ export default {
           this.form.barcodeContent= "".concat(this.form.barcodeType,'-',this.form.bussinessCode);
         }
       },
-     /**批次选择  */
-     handleBatchSelect(){
-       this.$refs.batchSelect.showFlag = true;
-     },
-     onBatchSelected(obj){
-        if(obj != undefined && obj != null){
-          this.form.bussinessId = obj.batchId;
-          this.form.bussinessCode = obj.batchCode;
-          this.form.bussinessName = "".concat(obj.itemName,'|',obj.batchCode);
-          this.form.barcodeContent= "".concat(this.form.barcodeType,'-',this.form.bussinessCode);
-        }
-    },
     getWorkshops(){
       listAllWorkshop().then( response => {
         this.workshopOptions =response.data;

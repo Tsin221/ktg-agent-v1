@@ -112,14 +112,7 @@
         <el-table-column label="规格型号" align="center" prop="specification" :show-overflow-tooltip="true"/>
         <el-table-column label="在库数量" align="center" prop="quantityOnhand" />
         <el-table-column label="单位" align="center" prop="unitName" />
-        <el-table-column label="批次号" width="150px" align="center" prop="batchCode" :show-overflow-tooltip="true">
-          <template slot-scope="scope">
-            <el-button
-              type="text"
-              @click="handleBatchClick(scope.row)"
-            >{{scope.row.batchCode}}</el-button>
-          </template>
-        </el-table-column>
+        <el-table-column label="批次号" width="150px" align="center" prop="batchCode" :show-overflow-tooltip="true" />
         <el-table-column label="仓库" align="center" prop="warehouseName" />
         <el-table-column label="库区" align="center" prop="locationName" />
         <el-table-column label="库位" align="center" prop="areaName" >
@@ -252,120 +245,6 @@
       </div>
     </el-dialog>
 
-    <el-dialog title="批次详情" :visible.sync="batchOpen" width="960px" append-to-body>
-      <el-form ref="batchform" :model="batchform" label-width="100px">
-        <el-row>
-          <el-col :span="14">
-            <el-row>
-              <el-col :span="24">
-                <el-form-item label="批次编号" prop="batchCode">
-                  <el-input v-model="batchform.batchCode" readonly="readonly"/>
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row>
-              <el-col :span="24">
-                <el-form-item label="产品物料编码" prop="itemCode">
-                  <el-input v-model="batchform.itemCode" readonly="readonly" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row>
-              <el-col :span="24">
-                <el-form-item label="产品物料名称" prop="itemName">
-                  <el-input v-model="batchform.itemName" readonly="readonly" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row>
-              <el-col :span="24">
-                <el-form-item label="规格型号" prop="specification">
-                  <el-input v-model="batchform.specification" type="textarea" readonly="readonly" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-          </el-col>
-          <el-col :span="10">
-            <BarcodeImg ref="batchBarcodeImg" :bussinessId="batchform.batchId" :bussinessCode="batchform.batchCode" barcodeType="BATCH"></BarcodeImg>
-          </el-col>
-        </el-row>      
-        <el-row>
-          <el-col :span="8">
-            <el-form-item label="单位" prop="unitName">
-              <el-input v-model="batchform.unitName" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="生产日期" prop="produceDate">
-              <el-date-picker clearable
-                v-model="batchform.produceDate"
-                type="date"
-                value-format="yyyy-MM-dd">
-              </el-date-picker>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="有效期" prop="expireDate">
-              <el-date-picker clearable
-                v-model="batchform.expireDate"
-                type="date"
-                value-format="yyyy-MM-dd">
-              </el-date-picker>
-            </el-form-item>
-          </el-col>
-        </el-row>  
-        <el-row>
-              <el-col :span="12">
-                <el-form-item label="供应商名称" prop="vendorName">
-                  <el-input v-model="batchform.vendorName" readonly="readonly" />
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="客户名称" prop="clientName">
-                  <el-input v-model="batchform.clientName" readonly="readonly" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-        <el-row>
-          <el-col :span="8">
-            <el-form-item label="销售订单编号" prop="coCode">
-              <el-input v-model="batchform.coCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="采购订单编号" prop="poCode">
-              <el-input v-model="batchform.poCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="生产工单" prop="workorderCode">
-              <el-input v-model="batchform.workorderCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row>
-          <el-col :span="8">
-            <el-form-item label="生产任务" prop="taskCode">
-              <el-input v-model="batchform.taskCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="工作站编码" prop="workstationCode">
-              <el-input v-model="batchform.workstationCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="生产批号" prop="productCode">
-              <el-input v-model="batchform.productCode" readonly="readonly" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-      </el-form>
-      <div slot="footer" class="dialog-footer">
-        <el-button @click="closeBatch">关 闭</el-button>
-      </div>
-    </el-dialog>
-
 
   </div>
 </template>
@@ -373,7 +252,6 @@
 <script>
 import { listWmstock, changeFrozenState } from "@/api/mes/wm/wmstock";
 import { getArea } from "@/api/mes/wm/area";
-import { getBatch } from "@/api/mes/wm/batch";
 import { treeselect } from "@/api/mes/md/itemtype";
 import BarcodeImg from "@/components/barcodeImg/index.vue"
 import Treeselect from "@riophae/vue-treeselect";
@@ -409,7 +287,6 @@ export default {
       title: "",
       // 是否显示弹出层
       open: false,
-      batchOpen: false,
       // 查询参数
       queryParams: {
         pageNum: 1,
@@ -440,7 +317,6 @@ export default {
       },
       // 表单参数
       form: {},
-      batchform: {},
     };
   },
   watch: {
@@ -521,26 +397,6 @@ export default {
       };
       this.resetForm("form");
     },
-    resetBatch(){
-      this.batchform = {
-        batchId: null,
-        batchCode: null,
-        itemCode: null,
-        itemName: null,
-        specification: null,
-        produceDate: null,
-        expireDate: null,
-        vendorName: null,
-        clientName: null,
-        coCode: null,
-        poCode: null,
-        workorderCode: null,
-        taskCode: null,
-        workstationCode: null,
-        productCode: null,
-      };
-      this.resetForm("batchform");
-    },
     //库位点击事件
     handleAreaClick(row){
       this.reset();
@@ -555,21 +411,6 @@ export default {
     },
     closeArea(){
       this.open = false;
-    },
-    //批次点击
-    handleBatchClick(row){
-      this.resetBatch();
-      const batchId = row.batchId
-      getBatch(batchId).then(response => {
-        this.batchform = response.data;
-        this.batchOpen = true;
-        this.$nextTick(()=>{
-          this.$refs.batchBarcodeImg.getBarcode();
-        });
-      });
-    },
-    closeBatch(){
-      this.batchOpen = false;
     },
 
     /** 搜索按钮操作 */

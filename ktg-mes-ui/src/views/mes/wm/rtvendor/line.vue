@@ -100,11 +100,8 @@
             </el-col>
             <el-col :span="8">
               <el-form-item label="批次号" prop="batchCode">
-                <el-input v-model="form.batchCode" readonly="readonly" placeholder="请选择批次号" >
-                  <el-button slot="append" @click="handleSelectBatch" icon="el-icon-search"></el-button>
-                </el-input>
+                <el-input v-model="form.batchCode" placeholder="请输入批次号" />
               </el-form-item>
-              <BatchSelect ref="batchSelect" :itemId="form.itemId" :vendorId="vendorId" @onSelected="onBatchSelected" ></BatchSelect>
             </el-col>
         </el-row>
         <el-row>
@@ -125,11 +122,10 @@
 
 <script>
 import { listRtvendorline, getRtvendorline, delRtvendorline, addRtvendorline, updateRtvendorline } from "@/api/mes/wm/rtvendorline";
-import BatchSelect from "@/components/batchSelect/single.vue";
 import ItemSelect  from "@/components/itemSelect/single.vue";
 export default {
   name: "Rtvendorline",
-  components:{ItemSelect ,BatchSelect},
+  components:{ItemSelect},
   props:{
     optType: null,
     rtId: null,
@@ -326,17 +322,6 @@ export default {
           this.form.unitName = obj.unitName
         }
     },
-    handleSelectBatch(){
-      this.$refs.batchSelect.showFlag = true;
-    },
-    
-    onBatchSelected(obj){
-        if(obj != undefined && obj != null){
-          this.form.bachId = obj.batchId;
-          this.form.batchCode = obj.batchCode;
-        }
-    }
-
   }
 };
 </script>

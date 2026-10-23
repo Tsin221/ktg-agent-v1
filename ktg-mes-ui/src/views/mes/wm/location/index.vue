@@ -159,67 +159,6 @@
               </el-form-item>
             </el-col>
           </el-row>
-          <el-row  v-if="optType == 'edit'">
-            <el-col :span="24">
-              <el-form-item label="产品混放" >
-                <el-tooltip effect="dark" placement="top">
-                    <div slot="content">
-                        点击按钮设置此库区下所有库位允许产品混放。
-                    </div>
-                    <el-button
-                      type="primary"
-                      plain
-                      size="mini"
-                      @click="setProductMixing(true)"
-                      v-hasPermi="['mes:wm:location:edit']"
-                    >允许</el-button>
-                </el-tooltip>
-
-                <el-tooltip effect="dark" placement="right">
-                    <div slot="content">
-                        点击按钮设置此库区下所有库位不允许产品混放。
-                    </div>
-                    <el-button
-                      type="danger"
-                      plain
-                      size="mini"
-                      @click="setProductMixing(false)"
-                      v-hasPermi="['mes:wm:location:edit']"
-                    >不允许</el-button>
-                </el-tooltip>
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-row v-if="optType == 'edit'">
-            <el-col :span="24">
-              <el-form-item label="批次混放">
-                <el-tooltip effect="dark" placement="top">
-                    <div slot="content">
-                        点击按钮设置此库区下所有库位允许批次混放。
-                    </div>
-                    <el-button
-                      type="primary"
-                      plain
-                      size="mini"
-                      @click="setBatchMixing(true)"
-                      v-hasPermi="['mes:wm:location:edit']"
-                    >允许</el-button>
-                </el-tooltip>
-                <el-tooltip effect="dark" placement="right">
-                    <div slot="content">
-                        点击按钮设置此库区下所有库位不允许批次混放。
-                    </div>
-                    <el-button
-                      type="danger"
-                      plain
-                      size="mini"
-                      @click="setBatchMixing(false)"
-                      v-hasPermi="['mes:wm:location:edit']"
-                    >不允许</el-button>
-                </el-tooltip>
-              </el-form-item>
-            </el-col>
-          </el-row>
         </el-col>
         <el-col :span="10">
           <BarcodeImg :bussinessId="form.locationId" :bussinessCode="form.locationCode" barcodeType="LOCATION"></BarcodeImg>
@@ -244,7 +183,7 @@
 </template>
 
 <script>
-import { listLocation, getLocation, delLocation, addLocation, updateLocation, changeFrozenState, setProductMixing, setBatchMixing } from "@/api/mes/wm/location";
+import { listLocation, getLocation, delLocation, addLocation, updateLocation, changeFrozenState } from "@/api/mes/wm/location";
 import {genCode} from "@/api/system/autocode/rule"
 import BarcodeImg from "@/components/barcodeImg/index.vue"
 import { getBarcodeUrl } from '@/api/mes/wm/barcode';
@@ -485,32 +424,6 @@ export default {
         row.frozenFlag = row.frozenFlag === "N" ? "Y" : "N";
       });
 
-    },
-
-    //设置产品混放规则
-    setProductMixing(flag){
-      let locationIds = this.form.locationId;
-      let that = this;
-      this.$modal.confirm('确认要重置库区下所有库位的产品混放规则吗？').then(function() {
-        return setProductMixing(locationIds,flag);
-      }).then(() => {
-        that.$modal.msgSuccess("设置成功");
-      }).catch(function() {
-        that.$modal.msgError("设置失败");
-      });
-    },
-
-    //设置批次混放规则
-    setBatchMixing(flag){
-      let locationIds = this.form.locationId;
-      let that = this;
-      this.$modal.confirm('确认要重置库区下所有库位的批次混放规则吗？').then(function() {
-        return setBatchMixing(locationIds,flag);
-      }).then(()=>{
-        that.$modal.msgSuccess("设置成功");
-      }).catch(function() {
-        that.$modal.msgError("设置失败");
-      });
     },
 
     //自动生成编码

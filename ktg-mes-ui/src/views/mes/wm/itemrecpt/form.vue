@@ -34,14 +34,6 @@
           </el-form-item>
         </el-col>
         <el-col :span="8">
-          <el-form-item label="到货通知单" prop="noticeCode">
-            <el-input v-model="form.noticeCode" readonly="readonly" placeholder="请选择到货通知单" >
-              <el-button slot="append" @click="handleSelectNotice" icon="el-icon-search"></el-button>
-            </el-input>
-            <NoticeSelect ref="noticeSelect" @onSelected="onNoticeSelected"></NoticeSelect>
-          </el-form-item>
-        </el-col>
-        <el-col :span="8">
           <el-form-item label="采购订单号" prop="poCode">
             <el-input v-model="form.poCode" placeholder="请输入采购订单号" />
           </el-form-item>
@@ -73,7 +65,7 @@
     </el-form>
     <el-divider v-if="form.recptId !=null" content-position="center">物料信息</el-divider>
     <el-card shadow="always" v-if="form.recptId !=null" class="box-card">
-      <Itemrecptline ref=line :recptId="form.recptId" :noticeId="form.noticeId" :optType="optType"></Itemrecptline>
+      <Itemrecptline ref=line :recptId="form.recptId" :optType="optType"></Itemrecptline>
     </el-card>
   </div>
 </template>
@@ -81,13 +73,12 @@
 <script>
 import Itemrecptline from "@/views/mes/wm/itemrecpt/line.vue";
 import VendorSelect from "@/components/vendorSelect/single.vue";
-import NoticeSelect from "@/components/noticeSelect/single.vue";
 import {genCode} from "@/api/system/autocode/rule";
 import {getItemrecpt} from "@/api/mes/wm/itemrecpt";
 
 export default {
   name: "itemrecptForm",
-  components: {NoticeSelect, VendorSelect, Itemrecptline},
+  components: {VendorSelect, Itemrecptline},
   dicts:['mes_order_status'],
   data() {
     return {
@@ -156,22 +147,6 @@ export default {
     handleSelectVendor(){
       this.$refs.form.resetFields()
       this.$refs.vendorSelect.handleOpen(this.form.vendorId)
-    },
-    //到货通知单选择弹出框
-    onNoticeSelected(obj){
-      debugger;
-      if(obj != undefined && obj != null){
-        this.form.noticeId = obj.noticeId;
-        this.form.noticeCode = obj.noticeCode;
-        this.form.poCode = obj.poCode;
-        this.form.vendorId = obj.vendorId;
-        this.form.vendorName = obj.vendorName;
-        this.form.vendorNick = obj.vendorNick;
-      }
-    },
-    //到货通知单选择
-    handleSelectNotice(){
-      this.$refs.noticeSelect.handleOpen(this.form.noticeId)
     },
     //自动生成编码
     handleAutoGenChange(autoGenFlag){

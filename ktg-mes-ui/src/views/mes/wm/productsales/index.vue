@@ -97,7 +97,6 @@
         </template>
       </el-table-column>
       <el-table-column label="出库单名称" width="150px" align="center" prop="salesName" />
-      <el-table-column label="发货通知单号" width="150px" align="center" prop="noticeCode" />
       <el-table-column label="销售订单编号" width="150px" align="center" prop="soCode" />
       <el-table-column label="客户编码" align="center" prop="clientCode" />
       <el-table-column label="客户名称" align="center" prop="clientName" />
@@ -199,14 +198,6 @@
         </el-row>
         <el-row>
           <el-col :span="8">
-            <el-form-item label="发货通知单" prop="noticeCode">
-              <el-input v-model="form.noticeCode" readonly="readonly" placeholder="请选择发货通知单" >
-                <el-button slot="append" @click="handleSelectNotice" icon="el-icon-search"></el-button>
-              </el-input>
-              <NoticeSelect ref="noticeSelect" @onSelected="onNoticeSelected"></NoticeSelect>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
             <el-form-item label="销售订单编号" prop="soCode">
               <el-input v-model="form.soCode" placeholder="请输入销售订单编号" />
             </el-form-item>
@@ -272,12 +263,6 @@
           </el-col>
         </el-row>
         <el-row>
-          <el-col :span="8">
-            <el-form-item label="发货通知单" prop="noticeCode">
-              <el-input v-model="form.noticeCode" readonly="readonly" >
-              </el-input>
-            </el-form-item>
-          </el-col>
           <el-col :span="8">
             <el-form-item label="销售订单编号" prop="soCode">
               <el-input v-model="form.soCode" readonly="readonly" />
@@ -353,7 +338,7 @@
       </el-form>
       <el-divider v-if="form.salesId !=null" content-position="center">物料信息</el-divider>
         <el-card shadow="always" v-if="form.salesId !=null && form.status =='PREPARE' " class="box-card">
-          <Productsalesline ref="line" :salesId="form.salesId" :noticeId="form.noticeId" :optType="optType"></Productsalesline>
+          <Productsalesline ref="line" :salesId="form.salesId" :optType="optType"></Productsalesline>
         </el-card>
         <el-card shadow="always" v-if="form.salesId !=null && form.status !='PREPARE' " class="box-card">
           <ProductsalesDetail ref="line" :salesId="form.salesId" :optType="optType"></ProductsalesDetail>
@@ -374,13 +359,12 @@
 import { listProductsales, getProductsales, delProductsales, addProductsales, updateProductsales, checkQuantity, execute } from "@/api/mes/wm/productsales";
 import Productsalesline from "./line.vue"
 import ProductsalesDetail from "./detail.vue"
-import NoticeSelect from "@/components/noticeSelect/salesNoticeSingle.vue"
 import ClientSelect from "@/components/clientSelect/single.vue";
 import {genCode} from "@/api/system/autocode/rule"
 export default {
   name: "Productsales",
   dicts: ['mes_product_sales_status'],
-  components: {NoticeSelect,Productsalesline,ProductsalesDetail,ClientSelect},
+  components: {Productsalesline,ProductsalesDetail,ClientSelect},
   data() {
     return {
       //自动生成编码
@@ -468,8 +452,6 @@ export default {
         salesId: null,
         salesCode: null,
         salesName: null,
-        noticeId: null,
-        noticeCode: null,
         soCode: null,
         clientId: null,
         clientCode: null,
@@ -686,22 +668,6 @@ export default {
         this.getList();
         this.$modal.msgSuccess("出库成功");
       }).catch(() => {});
-    },
-    //到货通知单选择
-    handleSelectNotice(){
-      this.$refs.noticeSelect.handleOpen(this.form.noticeId)
-    },
-    //到货通知单选择弹出框
-    onNoticeSelected(obj){      
-      if(obj != undefined && obj != null){
-          this.form.noticeId = obj.noticeId;
-          this.form.noticeCode = obj.noticeCode;
-          this.form.soCode = obj.soCode;
-          this.form.clientId = obj.clientId;
-          this.form.clientCode = obj.clientCode;
-          this.form.clientName = obj.clientName;
-          this.form.clientNick = obj.clientNick;
-        }
     },
     handleSelectClient(){
       this.$refs["form"].clearValidate()

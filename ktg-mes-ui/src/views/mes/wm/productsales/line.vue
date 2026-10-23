@@ -87,12 +87,10 @@
           <el-col :span="8">
             <el-form-item label="物料编码"  prop="itemCode">
               <el-input v-model="form.itemCode" readonly="readonly" placeholder="请选择物料编码" >
-                <el-button v-if="noticeId !=null" slot="append" @click="handleSelectNoticeLine" icon="el-icon-search"></el-button>
-                <el-button v-else slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
+                <el-button slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
               </el-input>
             </el-form-item>
-            <NoticeLineSelect v-if="noticeId !=null" ref="noticeLineSelect" :noticeId="noticeId" @onSelected="onNoticeLineSelectd"></NoticeLineSelect>
-            <ItemSelect v-else ref="itemSelect" @onSelected="onItemSelected" > </ItemSelect>
+            <ItemSelect ref="itemSelect" @onSelected="onItemSelected" > </ItemSelect>
           </el-col>
           <el-col :span="8">
             <el-form-item label="产品名称" prop="itemName">
@@ -161,16 +159,14 @@
 
 <script>
 import { listProductsalesline, getProductsalesline, delProductsalesline, addProductsalesline, updateProductsalesline } from "@/api/mes/wm/productsalesline";
-import NoticeLineSelect from "@/components/noticeSelect/salesNoticeLineSingle.vue"
 import ItemSelect  from "@/components/itemSelect/single.vue";
 export default {
   name: "Productsalesline",
   dicts: ['sys_yes_no'],
-  components: {ItemSelect,NoticeLineSelect},
+  components: {ItemSelect},
   props: {
     salesId: null,
     optType: null,
-    noticeId: null,
   },
   data() {
     return {
@@ -351,24 +347,6 @@ export default {
           this.form.specification = obj.specification;
           this.form.unitOfMeasure = obj.unitOfMeasure;
           this.form.unitName = obj.unitName
-        }
-    },
-    //选择到货通知单行
-    handleSelectNoticeLine(){
-      this.$refs.noticeLineSelect.showFlag = true;
-    },
-    onNoticeLineSelectd(obj){
-      if(obj != undefined && obj != null){
-          this.form.noticeLineId = obj.lineId;
-          this.form.itemId = obj.itemId;
-          this.form.itemCode = obj.itemCode;
-          this.form.itemName = obj.itemName;
-          this.form.specification = obj.specification;
-          this.form.unitOfMeasure = obj.unitOfMeasure;
-          this.form.unitName = obj.unitName;
-          this.form.batchId = obj.batchId;
-          this.form.batchCode = obj.batchCode;          
-          this.form.quantitySales = obj.quantitySales;
         }
     },
   }
