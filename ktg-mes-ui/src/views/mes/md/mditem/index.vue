@@ -348,13 +348,6 @@
         <el-tab-pane label="BOM组成">
           <ItemBom :optType="optType" :itemId="form.itemId"></ItemBom>
         </el-tab-pane>
-        <el-tab-pane v-if="form.batchFlag =='Y'" label="批次属性">
-          <BatchConfig :itemId="form.itemId"  :itemProductFlag="form.itemOrProduct" :optType="optType"></BatchConfig>
-        </el-tab-pane>
-        <el-tab-pane label="替代品"></el-tab-pane>
-        <el-tab-pane label="SIP">
-          <SIPTab :itemId="form.itemId" :optType="optType"></SIPTab>
-        </el-tab-pane>
         <el-tab-pane label="SOP">
           <SOPTab :itemId="form.itemId" :optType="optType"></SOPTab>
         </el-tab-pane>
@@ -399,12 +392,8 @@
 
 <script>
 import { listMdItem, getMdItem, delMdItem, addMdItem, updateMdItem} from "@/api/mes/md/mdItem";
-import { hiprintMixin } from "../../../../mixins/hiprintMixin";
-import {print} from "../../../../utils/print"
-import {getByTemplateType, getTemplate} from "@/api/print/template";
 import ItemBom from "./components/itembom.vue";
 import SOPTab from  "./components/sop.vue"
-import SIPTab from  "./components/sip.vue"
 import { listAllUnitmeasure} from "@/api/mes/md/unitmeasure";
 import {genCode} from "@/api/system/autocode/rule"
 import { getToken } from "@/utils/auth";
@@ -414,13 +403,11 @@ import { getBarcodeUrl } from '@/api/mes/wm/barcode';
 import "@riophae/vue-treeselect/dist/vue-treeselect.css";
 import BarcodeImg from "@/components/barcodeImg/index.vue"
 import printLabel from "@/components/printerLabel/index.vue"
-import BatchConfig from "./components/batch.vue";
 
 export default {
   name: "MdItem",
   dicts: ['sys_yes_no','mes_item_product'],
-  components: { Treeselect,ItemBom,SOPTab,SIPTab,BarcodeImg,printLabel, BatchConfig },
-  mixins: [hiprintMixin],
+  components: { Treeselect,ItemBom,SOPTab,BarcodeImg,printLabel },
   data() {
     return {
       // 遮罩层
@@ -534,35 +521,48 @@ export default {
     this.getUnits();
   },
   methods: {
-    // 使用HiPrint打印
+    // 使用已有物料条码生成浏览器可打印的标签
     async handleHiPrint(row) {
-      let printData = row
-      let printTemplate
-      // 处理数据 - 获取条形码图片地址
-      let barcodeParams = {
+      const printWindow = window.open('', '_blank', 'width=500,height=400');
+      if (!printWindow) {
+        this.$modal.msgError('请允许打开打印窗口');
+        return;
+      }
+      const barcodeParams = {
         bussinessId: row.itemId,
         bussinessCode: row.itemCode,
         barcodeFormart: "QR_CODE",
         barcodeType: "ITEM"
       };
-      await getBarcodeUrl(barcodeParams).then(res => {
-        if (res.data) {
-          printData.barcodeContent = res.data.barcodeContent
+      try {
+        const response = await getBarcodeUrl(barcodeParams);
+        const doc = printWindow.document;
+        doc.title = '物料标签 - ' + row.itemCode;
+        const style = doc.createElement('style');
+        style.textContent = 'body{font-family:sans-serif;margin:20px}.label{width:80mm;min-height:45mm;border:1px solid #999;padding:5mm;box-sizing:border-box}.name{font-size:18px;font-weight:bold}.code,.spec{margin-top:8px;font-size:13px;word-break:break-all}img{display:block;width:30mm;height:30mm;object-fit:contain;margin-top:8px}@media print{body{margin:0}.label{border:0}}';
+        doc.head.appendChild(style);
+        const label = doc.createElement('div');
+        label.className = 'label';
+        [['name', row.itemName], ['code', '编码：' + row.itemCode], ['spec', '规格：' + (row.specification || '-')]].forEach(([className, value]) => {
+          const line = doc.createElement('div');
+          line.className = className;
+          line.textContent = value;
+          label.appendChild(line);
+        });
+        doc.body.appendChild(label);
+        const barcodeUrl = response.data && response.data.barcodeUrl;
+        if (barcodeUrl) {
+          const image = doc.createElement('img');
+          image.src = barcodeUrl;
+          image.onload = () => printWindow.print();
+          image.onerror = () => printWindow.print();
+          label.appendChild(image);
         } else {
-          printData.barcodeContent = ''
+          printWindow.print();
         }
-      })
-      // 获取打印模板
-      let templateStatus = true
-      await getByTemplateType("ITEM").then(res => {
-        printTemplate = res.data.templateJson
-      }).catch(err => {
-        templateStatus = false
-      })
-      if (templateStatus) {
-        print(printTemplate, printData, this.hiprintTemplate, this.hiprintThis)
+      } catch (error) {
+        printWindow.close();
       }
-
     },
     /** 查询物料编码列表 */
     getList() {

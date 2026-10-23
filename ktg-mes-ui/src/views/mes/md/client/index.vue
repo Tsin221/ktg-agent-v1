@@ -345,14 +345,6 @@
           </el-col>
         </el-row>
       </el-form>
-      <el-tabs type="border-card" v-model="activeName" v-if="optType != 'add'" @tab-click="handleClick">
-        <el-tab-pane label="产品清单" name="item">
-          <Item ref="itemList" @handleSkip="handleSkip" :optType="optType" :clientId="form.clientId"></Item>
-        </el-tab-pane>
-        <el-tab-pane label="销售记录" name="salesRecord">
-          <SalesRecord ref="salesRecordList" @handleSkip="handleSkip" :optType="optType" :clientId="form.clientId"></SalesRecord>
-        </el-tab-pane>
-      </el-tabs>
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" @click="submitForm" v-if="optType !='view'">确 定</el-button>
         <el-button @click="cancel">取 消</el-button>
@@ -397,15 +389,11 @@
 import { listClient, getClient, delClient, addClient, updateClient } from "@/api/mes/md/client";
 import {genCode} from "@/api/system/autocode/rule"
 import { getToken } from "@/utils/auth";
-import SalesRecord from "@/views/mes/md/client/components/salesRecord.vue";
-import Item from "@/views/mes/md/client/components/item.vue";
 export default {
   name: "Client",
-  components: { Item, SalesRecord },
   dicts: ['mes_client_type','sys_yes_no'],
   data() {
     return {
-      activeName: "item",
       //自动生成编码
       autoGenFlag:false,
       optType: undefined,
@@ -547,17 +535,6 @@ export default {
     this.getList();
   },
   methods: {
-    handleSkip() {
-      this.cancel()
-    },
-    handleClick(tab) {
-      if (tab.name === 'item') {
-        this.$refs.itemList.handleOpen(this.form.clientId)
-      }
-      if (tab.name === 'salesRecord') {
-        this.$refs.salesRecordList.handleOpen(this.form.clientId)
-      }
-    },
     /** 查询客户列表 */
     getList() {
       this.loading = true;
@@ -569,7 +546,6 @@ export default {
     },
     // 取消按钮
     cancel() {
-      this.activeName = "item"
       this.open = false;
       this.reset();
     },
@@ -641,8 +617,6 @@ export default {
         this.open = true;
         this.title = "查看客户";
         this.optType = "view";
-        this.activeName = 'item'
-        this.$refs.itemList.handleOpen(this.form.clientId)
       });
     },
     /** 修改按钮操作 */
@@ -654,8 +628,6 @@ export default {
         this.open = true;
         this.title = "修改客户";
         this.optType = "edit";
-        this.activeName = 'item'
-        this.$refs.itemList.handleOpen(this.form.clientId)
       });
     },
     /** 提交按钮 */
