@@ -9,6 +9,8 @@
 /.runtime/
 /upload/
 /.git-backups/
+/.dsh-source-reference/
+/DB.Browser.for.SQLite-*.zip
 
 # Private keys
 *.pem
@@ -19,6 +21,9 @@
 **/target/
 **/.venv/
 **/.pytest_cache/
+**/.pytest-temp*/
+**/.mypy_cache/
+/.uv-cache/
 **/__pycache__/
 **/*.py[cod]
 
