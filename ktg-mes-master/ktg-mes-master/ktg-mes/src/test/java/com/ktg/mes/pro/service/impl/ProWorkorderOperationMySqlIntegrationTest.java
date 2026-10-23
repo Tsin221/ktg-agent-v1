@@ -155,8 +155,18 @@ class ProWorkorderOperationMySqlIntegrationTest {
         // The database-name guard in setup runs before any DDL or cleanup. This schema
         // replacement is restricted to the disposable mes09_* database supplied to this test.
         ClassPathResource schemaResource = new ClassPathResource("pro-workorder-transaction-schema.sql");
-        String mysqlSchema = new String(schemaResource.getInputStream().readAllBytes(),
-                java.nio.charset.StandardCharsets.UTF_8).replace(" timestamp,", " timestamp NULL,");
+        byte[] schemaBytes;
+        try (java.io.InputStream input = schemaResource.getInputStream();
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = input.read(buffer)) != -1) {
+                output.write(buffer, 0, bytesRead);
+            }
+            schemaBytes = output.toByteArray();
+        }
+        String mysqlSchema = new String(schemaBytes, java.nio.charset.StandardCharsets.UTF_8)
+                .replace(" timestamp,", " timestamp NULL,");
         org.springframework.jdbc.datasource.init.ResourceDatabasePopulator schema =
                 new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
                         new org.springframework.core.io.ByteArrayResource(

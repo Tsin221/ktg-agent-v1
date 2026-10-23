@@ -54,6 +54,35 @@ def test_product_count_uses_product_filter_and_server_total() -> None:
     asyncio.run(_product_count_uses_product_filter_and_server_total())
 
 
+def test_products_can_be_listed_without_a_search_term() -> None:
+    asyncio.run(_products_can_be_listed_without_a_search_term())
+
+
+async def _products_can_be_listed_without_a_search_term() -> None:
+    requests: list[Mapping[str, object]] = []
+
+    async def transport(url, _headers, params, _timeout_seconds):
+        assert url.endswith("/mes/md/mditem/list")
+        requests.append(params)
+        return {"code": 200, "total": 2, "rows": [
+            {"itemId": 1, "itemCode": "P-01", "itemName": "产品一", "itemOrProduct": "PRODUCT"},
+            {"itemId": 2, "itemCode": "P-02", "itemName": "产品二", "itemOrProduct": "PRODUCT"},
+        ]}
+
+    client = KTGClient(base_url="http://127.0.0.1:8080",
+                       authorization="Bearer current-user-token", transport=transport)
+    tool = next(tool for tool in build_query_tools() if tool.name == "ktg_search_items")
+    context = ToolContext(run_id="run-1", tool_call_id="call-1",
+                          identity={"userId": 7}, ktg_client=client)
+
+    result = await tool.execute(context, {})
+
+    assert result.details is not None
+    assert result.details["total"] == 2
+    assert [row["itemCode"] for row in result.details["rows"]] == ["P-01", "P-02"]
+    assert requests == [{"pageNum": 1, "pageSize": 10, "itemOrProduct": "PRODUCT"}]
+
+
 async def _product_count_uses_product_filter_and_server_total() -> None:
     requests: list[tuple[str, Mapping[str, object]]] = []
 

@@ -57,7 +57,6 @@
       :tree-props="{children: 'children', hasChildren: 'hasChildren'}"
     >
       <el-table-column prop="deptName" label="部门名称" width="260"></el-table-column>
-      <el-table-column prop="deptCode" label="部门编码" width="260"></el-table-column>
       <el-table-column prop="orderNum" label="排序" width="200"></el-table-column>
       <el-table-column prop="status" label="状态" width="100">
         <template slot-scope="scope">
@@ -100,22 +99,6 @@
     <!-- 添加或修改部门对话框 -->
     <el-dialog :title="title" :visible.sync="open" width="600px" append-to-body>
       <el-form ref="form" :model="form" :rules="rules" label-width="80px">
-        <el-row>
-          <el-col :span="16">
-            <el-form-item label="部门编码" prop="deptCode">
-              <el-input v-model="form.deptCode" placeholder="请输入部门编码" maxlength="64"/>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item  label-width="80">
-              <el-switch v-model="autoGenFlag"
-                         active-color="#13ce66"
-                         active-text="自动生成"
-                         @change="handleAutoGenChange(autoGenFlag)">
-              </el-switch>
-            </el-form-item>
-          </el-col>
-        </el-row>
         <el-row>
           <el-col :span="24" v-if="form.parentId !== 0">
             <el-form-item label="上级部门" prop="parentId">
@@ -178,7 +161,6 @@
 import { listDept, getDept, delDept, addDept, updateDept, listDeptExcludeChild } from "@/api/system/dept";
 import Treeselect from "@riophae/vue-treeselect";
 import "@riophae/vue-treeselect/dist/vue-treeselect.css";
-import {genCode} from "@/api/system/autocode/rule";
 
 export default {
   name: "Dept",
@@ -186,8 +168,6 @@ export default {
   components: { Treeselect },
   data() {
     return {
-      //自动生成部门编码标识
-      autoGenFlag: false,
       // 遮罩层
       loading: true,
       // 显示搜索条件
@@ -219,9 +199,6 @@ export default {
         deptName: [
           { required: true, message: "部门名称不能为空", trigger: "blur" }
         ],
-        deptCode: [
-          { required: true, message: "部门编码不能为空", trigger: "blur" }
-        ],
         orderNum: [
           { required: true, message: "显示排序不能为空", trigger: "blur" }
         ],
@@ -246,16 +223,6 @@ export default {
     this.getList();
   },
   methods: {
-    //自动生成部门编码
-    handleAutoGenChange(autoGenFlag){
-      if(autoGenFlag){
-        genCode('DEPT_CODE').then(response =>{
-          this.form.deptCode = response;
-        });
-      }else{
-        this.form.deptCode = null;
-      }
-    },
     /** 查询部门列表 */
     getList() {
       this.loading = true;
@@ -285,7 +252,6 @@ export default {
     // 表单重置
     reset() {
       this.form = {
-        deptCode: undefined,
         deptId: undefined,
         parentId: undefined,
         deptName: undefined,
@@ -295,7 +261,6 @@ export default {
         email: undefined,
         status: "0"
       };
-      this.autoGenFlag = false;
       this.resetForm("form");
     },
     /** 搜索按钮操作 */

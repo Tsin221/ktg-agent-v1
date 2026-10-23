@@ -24,10 +24,26 @@ foreach ($migrationFile in $migrationFiles) {
     }
 
     Write-Host "Applying database migration to ${DatabaseName}: $migrationFile" -ForegroundColor Cyan
-    Get-Content -LiteralPath $migrationPath -Raw |
-        & docker exec -i ktg-mes-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$1"' sh $DatabaseName
-    if ($LASTEXITCODE -ne 0) {
-        throw "Database migration failed: $migrationFile (exit code $LASTEXITCODE)"
+    $migrationBytes = [System.IO.File]::ReadAllBytes($migrationPath)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'docker'
+    $startInfo.Arguments = "exec -i ktg-mes-mysql sh -c `"mysql -uroot -p\`"`$MYSQL_ROOT_PASSWORD\`" `\`"`$1\`"`" sh $DatabaseName"
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.BaseStream.Write($migrationBytes, 0, $migrationBytes.Length)
+    $process.StandardInput.Close()
+    $process.WaitForExit()
+    $migrationOutput = $stdoutTask.Result
+    $migrationError = $stderrTask.Result
+    if ($migrationOutput) { Write-Host $migrationOutput.TrimEnd() }
+    if ($migrationError) { Write-Host $migrationError.TrimEnd() -ForegroundColor Red }
+    if ($process.ExitCode -ne 0) {
+        throw "Database migration failed: $migrationFile (exit code $($process.ExitCode))"
     }
 }
 

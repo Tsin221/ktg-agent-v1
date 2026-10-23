@@ -11,7 +11,7 @@ export function listItemrecptline(query) {
 
 export function listWithDetail(query) {
   return request({
-    url: '/mes/wm/itemrecptline/listWithDetail',
+    url: '/mes/wm/itemrecptline/list',
     method: 'get',
     params: query
   })

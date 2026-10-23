@@ -36,7 +36,7 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
         _tool(
             name="ktg_search_items",
             label="查询产品",
-            description="按产品或物料编码、名称查询 KTG 产品资料。至少提供一个筛选条件。",
+            description="按编码或名称查询产品/物料资料；不提供筛选条件时，按页列出当前用户可见的产品（不含物料）。",
             properties={
                 "item_code": {"type": "string", "minLength": 1},
                 "item_name": {"type": "string", "minLength": 1},
@@ -129,7 +129,7 @@ async def _search_items(
     _copy_text(arguments, params, "item_code", "itemCode")
     _copy_text(arguments, params, "item_name", "itemName")
     if "itemCode" not in params and "itemName" not in params:
-        return _failure("请提供产品编码或产品名称。", "VALIDATION_ERROR")
+        params["itemOrProduct"] = "PRODUCT"
     return await _query(context, "/mes/md/mditem/list", params, "items", _item_row)
 
 

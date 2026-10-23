@@ -42,7 +42,7 @@
       </div>
     </div>
     <p v-else class="result-card__empty">没有符合条件的数据</p>
-    <p v-if="result.rows" class="result-card__meta">第 {{ result.page }} 页，每页 {{ result.page_size }} 条</p>
+    <p v-if="result.kind !== 'product_count' && result.rows" class="result-card__meta">第 {{ result.page }} 页，每页 {{ result.page_size }} 条</p>
   </section>
 </template>
 

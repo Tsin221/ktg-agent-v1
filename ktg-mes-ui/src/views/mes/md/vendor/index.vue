@@ -356,14 +356,6 @@
           </el-col>
         </el-row>
       </el-form>
-      <el-tabs type="border-card" v-model="activeName" v-if="optType != 'add'" @tab-click="handleClick">
-        <el-tab-pane label="物料清单" name="item">
-          <Item ref="itemList" @handleSkip="handleSkip" :optType="optType" :vendorId="form.vendorId"></Item>
-        </el-tab-pane>
-        <el-tab-pane label="采购记录" name="purchase">
-          <Purchase ref="PurchaseList" @handleSkip="handleSkip" :optType="optType" :vendorId="form.vendorId"></Purchase>
-        </el-tab-pane>
-      </el-tabs>
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" @click="submitForm" v-if="optType !='view'">确 定</el-button>
         <el-button @click="cancel">取 消</el-button>
@@ -408,15 +400,11 @@ import { listVendor, getVendor, delVendor, addVendor, updateVendor } from "@/api
 import { getBarcodeUrl } from "@/api/mes/wm/barcode";
 import { getToken } from "@/utils/auth";
 import {genCode} from "@/api/system/autocode/rule"
-import Item from "@/views/mes/md/vendor/components/item.vue";
-import Purchase from "@/views/mes/md/vendor/components/purchase.vue";
 export default {
   name: "Vendor",
   dicts: ['sys_yes_no','mes_vendor_level'],
-  components: { Item, Purchase },
   data() {
     return {
-      activeName: "item",
       //自动生成编码
       autoGenFlag:false,
       optType: undefined,
@@ -555,17 +543,6 @@ export default {
     this.getList();
   },
   methods: {
-    handleSkip() {
-      this.cancel()
-    },
-    handleClick(tab) {
-      if (tab.name == 'item') {
-        this.$refs.itemList.handleOpen(this.form.vendorId)
-      }
-      if (tab.name == 'purchase') {
-        this.$refs.PurchaseList.handleOpen(this.form.vendorId)
-      }
-    },
     /** 查询供应商列表 */
     getList() {
       this.loading = true;
@@ -577,7 +554,6 @@ export default {
     },
     // 取消按钮
     cancel() {
-      this.activeName = "item"
       this.open = false;
       this.reset();
     },
@@ -652,9 +628,7 @@ export default {
         this.open = true;
         this.title = "查看供应商";
         this.optType = "view";
-        this.activeName = "item"
         this.getBarcodeUrl();
-        this.$refs.itemList.handleOpen(vendorId)
       });
     },
     /** 修改按钮操作 */
@@ -666,9 +640,7 @@ export default {
         this.open = true;
         this.title = "修改供应商";
         this.optType = "edit";
-        this.activeName = "item"
         this.getBarcodeUrl();
-        this.$refs.itemList.handleOpen(vendorId)
       });
     },
     /** 提交按钮 */
