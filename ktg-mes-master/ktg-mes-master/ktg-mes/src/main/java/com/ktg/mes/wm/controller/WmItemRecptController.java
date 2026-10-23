@@ -98,6 +98,15 @@ public class WmItemRecptController extends BaseController
         return ResponseEntity.status((Integer) result.get("code")).body(result);
     }
 
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @Log(title = "物料入库单退回补录", businessType = BusinessType.UPDATE)
+    @PutMapping("/{recptId}/reopen-putaway")
+    public ResponseEntity<AjaxResult> reopenPutaway(@PathVariable Long recptId,
+            @RequestHeader(value = "X-Document-Version", required = true) Long expectedVersion) {
+        AjaxResult result = inventoryOperationService.reopenReceiptForPutaway(recptId, expectedVersion);
+        return ResponseEntity.status((Integer) result.get("code")).body(result);
+    }
+
     @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:query') and (@ss.hasPermi('mes:wm:wmstock:list') or @ss.hasPermi('mes:wm:wmstock:query'))")
     @GetMapping("/{recptId}/operations/{operationId}")
     public ResponseEntity<AjaxResult> executionResult(@PathVariable Long recptId,
@@ -180,9 +189,15 @@ public class WmItemRecptController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
     @Log(title = "物料入库单", businessType = BusinessType.UPDATE)
+    @Transactional
     @PutMapping
     public AjaxResult edit(@RequestBody WmItemRecpt wmItemRecpt)
     {
+        if (UserConstants.ORDER_STATUS_APPROVED.equals(wmItemRecpt.getStatus())) {
+            documentGuard.lockEditable("IR", wmItemRecpt.getRecptId(), wmItemRecpt.getVersion());
+            AjaxResult validation = inventoryOperationService.validateReceiptForApproval(wmItemRecpt.getRecptId());
+            if ((Integer) validation.get("code") != 200) return validation;
+        }
         if(StringUtils.isNotNull(wmItemRecpt.getWarehouseId())){
             WmWarehouse warehouse = wmWarehouseService.selectWmWarehouseByWarehouseId(wmItemRecpt.getWarehouseId());
             wmItemRecpt.setWarehouseCode(warehouse.getWarehouseCode());

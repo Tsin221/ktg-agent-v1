@@ -9,6 +9,7 @@
           size="mini"
           @click="handleAdd"
           v-hasPermi="['mes:wm:itemrecpt:add']"
+          v-if="!locationOnly"
         >新增</el-button>
       </el-col>
       <el-col :span="1.5">
@@ -20,6 +21,7 @@
           :disabled="multiple"
           @click="handleDelete"
           v-hasPermi="['mes:wm:itemrecpt:remove']"
+          v-if="!locationOnly"
         >删除</el-button>
       </el-col>
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
@@ -33,6 +35,9 @@
       <el-table-column label="单位" align="center" prop="unitName" />
       <el-table-column label="入库数量" align="center" prop="quantityRecived" />
       <el-table-column label="批次号" align="center" prop="batchCode" />
+      <el-table-column label="目标仓库" align="center" prop="warehouseName" />
+      <el-table-column label="目标库位" align="center" prop="locationName" />
+      <el-table-column label="目标库区" align="center" prop="areaName" />
       <el-table-column label="操作" align="center" width="100px" v-if="optType != 'view'" class-name="small-padding fixed-width">
         <template slot-scope="scope">
           <el-button
@@ -48,6 +53,7 @@
             icon="el-icon-delete"
             @click="handleDelete(scope.row)"
             v-hasPermi="['mes:wm:itemrecpt:remove']"
+            v-if="!locationOnly"
           >删除</el-button>
         </template>
       </el-table-column>
@@ -68,12 +74,10 @@
           <el-col :span="8">
             <el-form-item label="物料编码"  prop="itemCode">
               <el-input v-model="form.itemCode" readonly="readonly" placeholder="请选择物料编码" >
-                <el-button v-if="noticeId !=null" slot="append" @click="handleSelectNoticeLine" icon="el-icon-search"></el-button>
-                <el-button v-else slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
+                <el-button v-if="!locationOnly" slot="append" @click="handleSelectProduct" icon="el-icon-search"></el-button>
               </el-input>
             </el-form-item>
-            <NoticeLineSelect v-if="noticeId !=null" ref="noticeLineSelect" :noticeId="noticeId" @onSelected="onNoticeLineSelectd"></NoticeLineSelect>
-            <ItemSelect v-else ref="itemSelect" @onSelected="onItemSelected" > </ItemSelect>
+            <ItemSelect v-if="!locationOnly" ref="itemSelect" @onSelected="onItemSelected" > </ItemSelect>
           </el-col>
           <el-col :span="8">
             <el-form-item label="物料名称" prop="itemName">
@@ -81,21 +85,31 @@
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="单位" prop="unitName">
-              <el-input v-model="form.unitName" readonly="readonly" />
+            <el-form-item label="单位" prop="unitOfMeasure">
+              <el-select v-model="form.unitOfMeasure" placeholder="请选择单位" @change="onUnitChanged" :disabled="locationOnly">
+                <el-option
+                  v-for="item in measureOptions"
+                  :key="item.measureCode"
+                  :label="item.measureName"
+                  :value="item.measureCode"
+                  :disabled="item.enableFlag == 'N' || item.measureCode !== allowedUnitOfMeasure"
+                ></el-option>
+              </el-select>
+              <div style="color: #909399; font-size: 12px; line-height: 1.4;">库存按物料主数据单位记账，其他单位暂不支持换算。</div>
             </el-form-item>
           </el-col>
         </el-row>
         <el-row>
           <el-col :span="8">
             <el-form-item label="入库数量" prop="quantityRecived">
-              <el-input-number :min="0.01" :max="99999999" v-model="form.quantityRecived" placeholder="请输入入库数量" />
+              <el-input-number :min="0.01" :max="99999999" v-model="form.quantityRecived" placeholder="请输入入库数量" :disabled="locationOnly" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="生产日期期" prop="produceDate">
               <el-date-picker clearable
                 v-model="form.produceDate"
+                :disabled="locationOnly"
                 type="date"
                 value-format="yyyy-MM-dd"
                 placeholder="请选择生产日期">
@@ -106,6 +120,7 @@
             <el-form-item label="有效期" prop="expireDate">
               <el-date-picker clearable
                 v-model="form.expireDate"
+                :disabled="locationOnly"
                 type="date"
                 value-format="yyyy-MM-dd"
                 placeholder="请选择有效期">
@@ -116,12 +131,24 @@
         <el-row>
           <el-col :span="8">
             <el-form-item label="生产批号" prop="lotNumber">
-              <el-input v-model="form.lotNumber" placeholder="请输入生产批号" />
+              <el-input v-model="form.lotNumber" placeholder="请输入生产批号" :readonly="locationOnly" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="批次号" prop="batchCode">
-              <el-input v-model="form.batchCode" readonly="readonly"/>
+              <el-input v-model="form.batchCode" maxlength="255" placeholder="请输入批次号" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="16">
+            <el-form-item label="入库仓库" prop="warehouseId">
+              <el-cascader
+                v-model="warehouseInfo"
+                :options="warehouseOptions"
+                :props="warehouseProps"
+                clearable
+                placeholder="请选择仓库、库位和库区"
+                @change="handleWarehouseChanged"
+              />
             </el-form-item>
           </el-col>
         </el-row>
@@ -142,19 +169,19 @@
 </template>
 
 <script>
-import { listItemrecptline, getItemrecptline, delItemrecptline, addItemrecptline, updateItemrecptline } from "@/api/mes/wm/itemrecptline";
+import { listItemrecptline, getItemrecptline, delItemrecptline, addItemrecptline, updateItemrecptline, updateItemrecptlinePutaway } from "@/api/mes/wm/itemrecptline";
+import { listAllUnitmeasure } from "@/api/mes/md/unitmeasure";
 import ItemSelect  from "@/components/itemSelect/single.vue";
-import NoticeLineSelect from "@/components/noticeSelect/lineSingle.vue"
 import IqcSelect from "@/components/iqcSelect/single.vue";
 import {getTreeList} from "@/api/mes/wm/warehouse"
 export default {
   name: "Itemrecptline",
   dicts: ['sys_yes_no'],
-  components :{ItemSelect,IqcSelect,NoticeLineSelect},
+  components :{ItemSelect,IqcSelect},
   props:{
     recptId: null,
-    noticeId: null,
     optType: null,
+    locationOnly: { type: Boolean, default: false },
     warehouseId: null,
     locationId: null,
     areaId: null
@@ -162,6 +189,8 @@ export default {
   data() {
     return {
       warehouseInfo:[],
+      measureOptions: [],
+      allowedUnitOfMeasure: null,
       warehouseOptions:[],
       warehouseProps:{
         multiple: false,
@@ -216,6 +245,13 @@ export default {
       form: {},
       // 表单校验
       rules: {
+        unitOfMeasure: [
+          { required: true, message: "请选择单位", trigger: "change" }
+        ],
+        batchCode: [
+          { required: true, message: "请输入批次号", trigger: "blur" },
+          { max: 255, message: "批次号长度不能超过255个字符", trigger: "blur" }
+        ],
         itemId: [
           { required: true, message: "产品物料ID不能为空", trigger: "blur" }
         ],
@@ -223,7 +259,11 @@ export default {
           { required: true, message: "入库数量不能为空", trigger: "blur" }
         ],
         warehouseId:[
-          { required: true, message: "请选择入库的仓库" }
+          { validator: (rule, value, callback) => {
+            if (!this.locationOnly && !value && !this.form.locationId && !this.form.areaId) callback();
+            else if (this.form.warehouseId && this.form.locationId && this.form.areaId) callback();
+            else callback(new Error("请选择完整的仓库、库位和库区"));
+          }, trigger: "change" }
         ],
         itemCode: [
           { required: true, message: "物料编码不能为空", trigger: "blur" }
@@ -237,6 +277,7 @@ export default {
   created() {
     this.getList();
     this.getWarehouseList();
+    this.getUnitOptions();
   },
   methods: {
     /** 查询物料入库单行列表 */
@@ -255,7 +296,6 @@ export default {
               return el.warehouseCode.indexOf('VIR') == -1;
           });;
         }
-        debugger;
         this.warehouseOptions.map(w =>{
           w.children.map(l =>{
                   let lstr =JSON.stringify(l.children).replace(/locationId/g,'lId').replace(/areaId/g, 'pId').replace(/areaName/g,'pName');
@@ -270,14 +310,32 @@ export default {
         this.warehouseOptions = JSON.parse(ostr);
       });
     },
+    getUnitOptions() {
+      listAllUnitmeasure().then(response => {
+        this.measureOptions = response.data || [];
+        this.ensureUnitOption(this.form.unitOfMeasure, this.form.unitName);
+      });
+    },
+    ensureUnitOption(measureCode, measureName) {
+      if (!measureCode || this.measureOptions.some(item => item.measureCode === measureCode)) return;
+      this.measureOptions.push({
+        measureCode,
+        measureName: measureName || measureCode,
+        enableFlag: 'N'
+      });
+    },
     //选择仓库、库区、库位
     handleWarehouseChanged(obj){
-      debugger;
-      if(obj !=null){
+      if(obj && obj.length === 3){
         this.form.warehouseId = obj[0];
         this.form.locationId = obj[1];
         this.form.areaId = obj[2];
+      } else {
+        this.form.warehouseId = null;
+        this.form.locationId = null;
+        this.form.areaId = null;
       }
+      this.$nextTick(() => this.$refs.form.validateField("warehouseId"));
     },
     // 取消按钮
     cancel() {
@@ -324,7 +382,8 @@ export default {
         updateBy: null,
         updateTime: null
       };
-      this.$set(this, "warehouseInfo", [])
+      this.allowedUnitOfMeasure = null;
+      this.warehouseInfo = [];
       this.resetForm("form");
     },
     /** 搜索按钮操作 */
@@ -345,6 +404,7 @@ export default {
     },
     /** 新增按钮操作 */
     handleAdd() {
+      if (this.locationOnly) return;
       this.reset();
       this.warehouseInfo = [];
       if(this.warehouseId != null){
@@ -363,11 +423,11 @@ export default {
       const lineId = row.lineId || this.ids
       getItemrecptline(lineId).then(response => {
         this.form = response.data;
-        let tempList = []
-        tempList.push(response.data.warehouseId)
-        tempList.push(response.data.locationId)
-        tempList.push(response.data.areaId)
-        this.$set(this, "warehouseInfo", tempList)
+        this.ensureUnitOption(this.form.unitOfMeasure, this.form.unitName);
+        this.allowedUnitOfMeasure = this.form.unitOfMeasure;
+        this.warehouseInfo = this.form.warehouseId && this.form.locationId && this.form.areaId
+          ? [this.form.warehouseId, this.form.locationId, this.form.areaId]
+          : [];
         this.open = true;
         this.title = "修改物料入库单行";
       });
@@ -384,23 +444,17 @@ export default {
           this.form.specification = obj.specification;
           this.form.unitOfMeasure = obj.unitOfMeasure;
           this.form.unitName = obj.unitName
+          this.allowedUnitOfMeasure = obj.unitOfMeasure;
+          this.ensureUnitOption(this.form.unitOfMeasure, this.form.unitName);
         }
     },
-    //选择到货通知单行
-    handleSelectNoticeLine(){
-      this.$refs.noticeLineSelect.showFlag = true;
-    },
-    onNoticeLineSelectd(obj){
-      if(obj != undefined && obj != null){
-          this.form.noticeLineId = obj.lineId;
-          this.form.itemId = obj.itemId;
-          this.form.itemCode = obj.itemCode;
-          this.form.itemName = obj.itemName;
-          this.form.specification = obj.specification;
-          this.form.unitOfMeasure = obj.unitOfMeasure;
-          this.form.unitName = obj.unitName;
-          this.form.quantityRecived = obj.quantityQuanlified;
-        }
+    onUnitChanged(measureCode) {
+      if (measureCode !== this.allowedUnitOfMeasure) {
+        this.form.unitOfMeasure = this.allowedUnitOfMeasure;
+        return;
+      }
+      const unit = this.measureOptions.find(item => item.measureCode === measureCode);
+      this.form.unitName = unit ? unit.measureName : null;
     },
     //IQC检验单选择
     handleSelectIqc(){
@@ -418,11 +472,14 @@ export default {
       this.$refs["form"].validate(valid => {
         if (valid) {
           if (this.form.lineId != null) {
-            updateItemrecptline(this.form).then(response => {
+            const update = this.locationOnly
+              ? updateItemrecptlinePutaway(this.form)
+              : updateItemrecptline(this.form);
+            update.then(response => {
               this.$modal.msgSuccess("修改成功");
-              this.form = response.data;
               this.open = false;
               this.getList();
+              this.$emit("updated");
             });
           } else {
             addItemrecptline(this.form).then(response => {

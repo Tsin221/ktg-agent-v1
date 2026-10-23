@@ -50,6 +50,7 @@ public class InventoryOperationService {
     @Autowired private IStorageCoreService storageCoreService;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private InventoryDocumentGuard documentGuard;
 
     public AjaxResult executeReceipt(Long documentId, String operationId) {
         return execute(RECEIPT, documentId, operationId, null, null);
@@ -103,6 +104,56 @@ public class InventoryOperationService {
         }
         proposal.put("additions", additions);
         return AjaxResult.success(proposal);
+    }
+
+    /** Validate the data needed by inventory execution before a receipt is approved. */
+    public AjaxResult validateReceiptForApproval(Long documentId) {
+        if (documentId == null || documentId <= 0) {
+            return error(422, "INVALID_DOCUMENT_ID", "单据 ID 无效", null);
+        }
+        try {
+            validateReceiptLines(documentId, itemRecptService.getTxBeans(documentId));
+            return AjaxResult.success();
+        } catch (InventoryOperationException ex) {
+            return error(422, ex.code, ex.getMessage(), null);
+        }
+    }
+
+    /** Reopen only a not-yet-executed approved receipt whose lines fail execution validation. */
+    public AjaxResult reopenReceiptForPutaway(Long documentId, Long expectedVersion) {
+        if (documentId == null || documentId <= 0 || expectedVersion == null || expectedVersion < 0) {
+            return error(422, "INVALID_DOCUMENT_VERSION", "单据 ID 或版本无效", null);
+        }
+        return transaction().execute(status -> {
+            documentGuard.lockEditable("IR", documentId, expectedVersion);
+            Map<String, Object> document = mapper.lockDocument("IR", documentId);
+            if (document == null) return error(404, "DOCUMENT_NOT_FOUND", "入库单不存在", null);
+            if (!"APPROVED".equals(document.get("status"))) {
+                return error(409, "DOCUMENT_STATE_CONFLICT", "只有未执行的已审批入库单可以退回补录", null);
+            }
+            if (mapper.executionOwner(RECEIPT, "IR", documentId) != null
+                    || !mapper.transactions("IR", documentId).isEmpty()) {
+                return error(409, "DOCUMENT_ALREADY_EXECUTED", "存在库存执行记录，不能退回补录", null);
+            }
+            List<ItemRecptTxBean> lines = itemRecptService.getTxBeans(documentId);
+            if (lines == null || lines.isEmpty()) {
+                return error(409, "INVALID_DOCUMENT_LINES", "入库单没有明细，不能退回补录", null);
+            }
+            try {
+                validateReceiptLines(documentId, lines);
+                return error(409, "DOCUMENT_LINES_VALID", "入库明细完整，无需退回补录", null);
+            } catch (InventoryOperationException invalid) {
+                if (mapper.reopenReceiptForPutaway(documentId, expectedVersion) != 1) {
+                    return error(409, "DOCUMENT_VERSION_CONFLICT", "单据版本已变化，请重新加载", null);
+                }
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("documentId", documentId);
+                data.put("documentStatus", "APPROVING");
+                data.put("documentVersion", expectedVersion + 1);
+                data.put("message", invalid.getMessage());
+                return AjaxResult.success(data);
+            }
+        });
     }
 
     public AjaxResult previewIssue(Long documentId) {
@@ -567,18 +618,22 @@ public class InventoryOperationService {
         }
         Set<Long> ids = new HashSet<>();
         for (ItemRecptTxBean line : lines) {
-            if (line.getSourceDocLineId() == null || !ids.add(line.getSourceDocLineId())
-                    || !Boolean.TRUE.equals(line.getReferenceValid())
-                    || line.getTransactionQuantity() == null
-                    || line.getTransactionQuantity().signum() <= 0
-                    || line.getTransactionQuantity().scale() > 2
-                    || line.getItemId() == null || line.getItemId() <= 0
-                    || blank(line.getItemCode()) || blank(line.getUnitOfMeasure())
-                    || blank(line.getBatchCode()) || line.getWarehouseId() == null
-                    || line.getLocationId() == null || line.getAreaId() == null
-                    || !documentId.equals(line.getSourceDocId())
-                    || !"IR".equals(line.getSourceDocType())) {
-                throw new InventoryOperationException("INVALID_DOCUMENT_LINES", "入库单明细无效");
+            List<String> invalidFields = new java.util.ArrayList<>();
+            if (line.getSourceDocLineId() == null || !ids.add(line.getSourceDocLineId())) invalidFields.add("明细 ID");
+            if (line.getTransactionQuantity() == null || line.getTransactionQuantity().signum() <= 0
+                    || line.getTransactionQuantity().scale() > 2) invalidFields.add("入库数量");
+            if (line.getItemId() == null || line.getItemId() <= 0 || blank(line.getItemCode())) invalidFields.add("物料");
+            if (blank(line.getUnitOfMeasure())) invalidFields.add("单位");
+            if (blank(line.getBatchCode())) invalidFields.add("批次号");
+            if (line.getWarehouseId() == null) invalidFields.add("目标仓库");
+            if (line.getLocationId() == null) invalidFields.add("目标库位");
+            if (line.getAreaId() == null) invalidFields.add("目标库区");
+            if (!Boolean.TRUE.equals(line.getReferenceValid())) invalidFields.add("物料、单位或仓储引用无效");
+            if (!documentId.equals(line.getSourceDocId()) || !"IR".equals(line.getSourceDocType())) invalidFields.add("来源单据");
+            if (!invalidFields.isEmpty()) {
+                String lineLabel = line.getSourceDocLineId() == null ? "未分配明细" : "明细 " + line.getSourceDocLineId();
+                throw new InventoryOperationException("INVALID_DOCUMENT_LINES",
+                        "入库单" + lineLabel + "缺少或无效字段：" + String.join("、", invalidFields));
             }
         }
     }

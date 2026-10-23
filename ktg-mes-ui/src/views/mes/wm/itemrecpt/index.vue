@@ -130,6 +130,14 @@
           <el-button
             size="mini"
             type="text"
+            icon="el-icon-edit"
+            v-if="scope.row.status =='APPROVED'"
+            @click="handleReopenPutaway(scope.row)"
+            v-hasPermi="['mes:wm:itemrecpt:edit']"
+          >补录批次与仓储</el-button>
+          <el-button
+            size="mini"
+            type="text"
             icon="el-icon-shopping-cart-full"
             v-if="scope.row.status =='APPROVING'"
             @click="handleStocking(scope.row)"
@@ -229,11 +237,14 @@
         </el-row>
       </el-form>
       <el-divider v-if="form.recptId !=null" content-position="center">物料信息</el-divider>
-        <el-card shadow="always" v-if="form.recptId !=null && form.status == 'PREPARE'" class="box-card">
-          <Itemrecptline ref=line :recptId="form.recptId" :optType="optType"></Itemrecptline>
-        </el-card>
-        <el-card v-if="form.recptId !=null && form.status !='PREPARE'" class="box-card">
-          <ItemrecptDetail ref="detail" :recptId="form.recptId" :optType="optType"></ItemrecptDetail>
+        <el-card shadow="always" v-if="form.recptId !=null" class="box-card">
+          <Itemrecptline
+            ref="line"
+            :recptId="form.recptId"
+            :optType="form.status === 'APPROVED' || form.status === 'FINISHED' || optType === 'view' ? 'view' : optType"
+            :locationOnly="form.status === 'APPROVING'"
+            @updated="refreshHeaderVersion"
+          ></Itemrecptline>
         </el-card>
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" @click="saveForm" v-if="form.status =='PREPARE' && optType !='view' ">保 存</el-button>
@@ -247,17 +258,16 @@
 </template>
 
 <script>
-import { listItemrecpt, getItemrecpt, delItemrecpt, addItemrecpt, updateItemrecpt, confirmItemrecpt, execute, previewExecution, getExecutionResult } from "@/api/mes/wm/itemrecpt";
+import { listItemrecpt, getItemrecpt, delItemrecpt, addItemrecpt, updateItemrecpt, confirmItemrecpt, execute, previewExecution, getExecutionResult, reopenPutaway } from "@/api/mes/wm/itemrecpt";
 import {getTreeList} from "@/api/mes/wm/warehouse"
 import {genCode} from "@/api/system/autocode/rule"
 import VendorSelect from "@/components/vendorSelect/single.vue";
 import IqcSelect from "@/components/iqcSelect/single.vue";
 import Itemrecptline from "./line.vue";
-import ItemrecptDetail from "./detail.vue";
 export default {
   name: "Itemrecpt",
   dicts:['mes_itemrecpt_status'],
-  components :{VendorSelect,IqcSelect,Itemrecptline,ItemrecptDetail},
+  components :{VendorSelect,IqcSelect,Itemrecptline},
   data() {
     return {
       //自动生成编码
@@ -493,6 +503,24 @@ export default {
       });
     },
 
+    refreshHeaderVersion() {
+      if (!this.form.recptId) return;
+      getItemrecpt(this.form.recptId).then(response => {
+        this.form.version = response.data.version;
+      });
+    },
+
+    handleReopenPutaway(row) {
+      this.$modal.confirm('此操作仅适用于尚未产生库存流水且入库明细缺少执行信息的单据。退回后请按实际收货记录补齐批次号和目标仓储位置。是否继续？')
+        .then(() => reopenPutaway(row.recptId, row.version))
+        .then(() => {
+          this.$modal.msgSuccess('已退回执行上架，请补录批次与目标仓储位置');
+          this.getList();
+          this.handleStocking(row);
+        })
+        .catch(() => {});
+    },
+
     //执行入库
     async handleExecute(row){
       const recptId = row.recptId;
@@ -600,8 +628,11 @@ export default {
     },
 
     submitToExecute(){
-      this.form.status = 'APPROVED';
-        updateItemrecpt(this.form).then(response => {
+      getItemrecpt(this.form.recptId).then(response => {
+        this.form.version = response.data.version;
+        this.form.status = 'APPROVED';
+        return updateItemrecpt(this.form);
+      }).then(response => {
           this.$modal.msgSuccess("提交成功");
           this.open = false;
           this.getList();

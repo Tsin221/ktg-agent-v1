@@ -43,6 +43,20 @@ export function updateItemrecptline(data) {
   })
 }
 
+// APPROVING 阶段只补录批次号和入库目标位置，物料信息保持不变。
+export function updateItemrecptlinePutaway(data) {
+  return request({
+    url: '/mes/wm/itemrecptline/' + data.lineId + '/putaway',
+    method: 'put',
+    data: {
+      batchCode: data.batchCode,
+      warehouseId: data.warehouseId,
+      locationId: data.locationId,
+      areaId: data.areaId
+    }
+  })
+}
+
 // 删除物料入库单行
 export function delItemrecptline(lineId) {
   return request({

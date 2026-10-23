@@ -58,6 +58,8 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
     public int insertWmItemRecptLine(WmItemRecptLine wmItemRecptLine)
     {
         documentGuard.lockLineMutation("IR", wmItemRecptLine.getRecptId(), null);
+        if (!"PREPARE".equals(documentGuard.lockedDocumentStatus("IR", wmItemRecptLine.getRecptId())))
+            throw InventoryDocumentGuard.conflict("只能在草稿阶段新增入库明细");
         wmItemRecptLine.setCreateTime(DateUtils.getNowDate());
         int changed = wmItemRecptLineMapper.insertWmItemRecptLine(wmItemRecptLine);
         documentGuard.bumpVersion("IR", wmItemRecptLine.getRecptId());
@@ -76,11 +78,39 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
     {
         Long parentId = documentGuard.lineParent("IR", wmItemRecptLine.getLineId());
         documentGuard.lockLineMutation("IR", parentId, wmItemRecptLine.getLineId());
+        if (!"PREPARE".equals(documentGuard.lockedDocumentStatus("IR", parentId)))
+            throw InventoryDocumentGuard.conflict("只能在草稿阶段编辑入库明细");
         if (wmItemRecptLine.getRecptId() != null && !parentId.equals(wmItemRecptLine.getRecptId()))
             throw InventoryDocumentGuard.conflict("不能更改单据行所属单据");
         wmItemRecptLine.setUpdateTime(DateUtils.getNowDate());
         int changed = wmItemRecptLineMapper.updateWmItemRecptLine(wmItemRecptLine);
         if (changed != 1) throw InventoryDocumentGuard.conflict("单据行更新失败");
+        documentGuard.bumpVersion("IR", parentId);
+        return changed;
+    }
+
+    @Override
+    @Transactional
+    public int updateReceiptLinePutaway(WmItemRecptLine wmItemRecptLine) {
+        Long parentId = documentGuard.lineParent("IR", wmItemRecptLine.getLineId());
+        documentGuard.lockLineMutation("IR", parentId, wmItemRecptLine.getLineId());
+        if (!"APPROVING".equals(documentGuard.lockedDocumentStatus("IR", parentId)))
+            throw InventoryDocumentGuard.conflict("只能在执行上架阶段修改目标仓储位置");
+        WmItemRecptLine update = new WmItemRecptLine();
+        update.setLineId(wmItemRecptLine.getLineId());
+        update.setBatchCode(wmItemRecptLine.getBatchCode());
+        update.setWarehouseId(wmItemRecptLine.getWarehouseId());
+        update.setWarehouseCode(wmItemRecptLine.getWarehouseCode());
+        update.setWarehouseName(wmItemRecptLine.getWarehouseName());
+        update.setLocationId(wmItemRecptLine.getLocationId());
+        update.setLocationCode(wmItemRecptLine.getLocationCode());
+        update.setLocationName(wmItemRecptLine.getLocationName());
+        update.setAreaId(wmItemRecptLine.getAreaId());
+        update.setAreaCode(wmItemRecptLine.getAreaCode());
+        update.setAreaName(wmItemRecptLine.getAreaName());
+        update.setUpdateTime(DateUtils.getNowDate());
+        int changed = wmItemRecptLineMapper.updateWmItemRecptLine(update);
+        if (changed != 1) throw InventoryDocumentGuard.conflict("目标仓储位置更新失败");
         documentGuard.bumpVersion("IR", parentId);
         return changed;
     }
@@ -96,6 +126,10 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
     public int deleteWmItemRecptLineByLineIds(Long[] lineIds)
     {
         java.util.Set<Long> parents = documentGuard.lockLines("IR", lineIds);
+        for (Long parent : parents) {
+            if (!"PREPARE".equals(documentGuard.lockedDocumentStatus("IR", parent)))
+                throw InventoryDocumentGuard.conflict("只能在草稿阶段删除入库明细");
+        }
         int changed = wmItemRecptLineMapper.deleteWmItemRecptLineByLineIds(lineIds);
         if (changed != lineIds.length) throw InventoryDocumentGuard.conflict("单据行删除冲突");
         for (Long parent : parents) documentGuard.bumpVersion("IR", parent);
@@ -114,6 +148,8 @@ public class WmItemRecptLineServiceImpl implements IWmItemRecptLineService
     {
         Long parentId = documentGuard.lineParent("IR", lineId);
         documentGuard.lockLineMutation("IR", parentId, lineId);
+        if (!"PREPARE".equals(documentGuard.lockedDocumentStatus("IR", parentId)))
+            throw InventoryDocumentGuard.conflict("只能在草稿阶段删除入库明细");
         int changed = wmItemRecptLineMapper.deleteWmItemRecptLineByLineId(lineId);
         if (changed != 1) throw InventoryDocumentGuard.conflict("单据行删除冲突");
         documentGuard.bumpVersion("IR", parentId);

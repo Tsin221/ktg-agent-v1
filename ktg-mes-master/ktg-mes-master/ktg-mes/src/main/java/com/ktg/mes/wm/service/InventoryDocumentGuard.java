@@ -79,6 +79,12 @@ public class InventoryDocumentGuard {
         }
     }
 
+    /** The caller must have called lockLineMutation first, keeping the header locked. */
+    public String lockedDocumentStatus(String type, Long id) {
+        return jdbc.queryForObject("SELECT status FROM " + header(type) + " WHERE " + idColumn(type) + " = ?",
+                String.class, id);
+    }
+
     public TreeSet<Long> lockLines(String type, Long[] lineIds) {
         if (lineIds == null || lineIds.length == 0 || Arrays.asList(lineIds).contains(null)) {
             throw conflict("单据行 ID 无效");

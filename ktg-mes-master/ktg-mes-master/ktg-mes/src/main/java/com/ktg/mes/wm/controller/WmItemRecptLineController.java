@@ -95,6 +95,9 @@ public class WmItemRecptLineController extends BaseController
     @PostMapping
     public AjaxResult add(@RequestBody WmItemRecptLine wmItemRecptLine)
     {
+        if (StringUtils.isEmpty(wmItemRecptLine.getBatchCode())) return AjaxResult.error(422, "请输入批次号");
+        wmItemRecptLine.setBatchCode(wmItemRecptLine.getBatchCode().trim());
+        if (wmItemRecptLine.getBatchCode().length() > 255) return AjaxResult.error(422, "批次号长度不能超过255个字符");
         if(StringUtils.isNotNull(wmItemRecptLine.getWarehouseId())){
             WmWarehouse warehouse = wmWarehouseService.selectWmWarehouseByWarehouseId(wmItemRecptLine.getWarehouseId());
             wmItemRecptLine.setWarehouseCode(warehouse.getWarehouseCode());
@@ -121,6 +124,9 @@ public class WmItemRecptLineController extends BaseController
     @PutMapping
     public AjaxResult edit(@RequestBody WmItemRecptLine wmItemRecptLine)
     {
+        if (StringUtils.isEmpty(wmItemRecptLine.getBatchCode())) return AjaxResult.error(422, "请输入批次号");
+        wmItemRecptLine.setBatchCode(wmItemRecptLine.getBatchCode().trim());
+        if (wmItemRecptLine.getBatchCode().length() > 255) return AjaxResult.error(422, "批次号长度不能超过255个字符");
         if(StringUtils.isNotNull(wmItemRecptLine.getWarehouseId())){
             WmWarehouse warehouse = wmWarehouseService.selectWmWarehouseByWarehouseId(wmItemRecptLine.getWarehouseId());
             wmItemRecptLine.setWarehouseCode(warehouse.getWarehouseCode());
@@ -137,6 +143,44 @@ public class WmItemRecptLineController extends BaseController
             wmItemRecptLine.setAreaName(area.getAreaName());
         }
         return toAjax(wmItemRecptLineService.updateWmItemRecptLine(wmItemRecptLine));
+    }
+
+    /** Update only a receipt line's batch and destination during the APPROVING putaway step. */
+    @PreAuthorize("@ss.hasPermi('mes:wm:itemrecpt:edit')")
+    @Log(title = "物料入库单上架", businessType = BusinessType.UPDATE)
+    @PutMapping("/{lineId}/putaway")
+    public AjaxResult putaway(@PathVariable Long lineId, @RequestBody WmItemRecptLine request) {
+        if (StringUtils.isEmpty(request.getBatchCode())) {
+            return AjaxResult.error(422, "请输入批次号");
+        }
+        request.setBatchCode(request.getBatchCode().trim());
+        if (request.getBatchCode().length() > 255) {
+            return AjaxResult.error(422, "批次号长度不能超过255个字符");
+        }
+        if (request.getWarehouseId() == null || request.getLocationId() == null || request.getAreaId() == null) {
+            return AjaxResult.error(422, "请选择完整的仓库、库位和库区");
+        }
+        WmWarehouse warehouse = wmWarehouseService.selectWmWarehouseByWarehouseId(request.getWarehouseId());
+        WmStorageLocation location = wmStorageLocationService.selectWmStorageLocationByLocationId(request.getLocationId());
+        WmStorageArea area = wmStorageAreaService.selectWmStorageAreaByAreaId(request.getAreaId());
+        if (warehouse == null || location == null || area == null
+                || !request.getWarehouseId().equals(location.getWarehouseId())
+                || !request.getLocationId().equals(area.getLocationId())) {
+            return AjaxResult.error(422, "仓库、库位和库区层级不匹配");
+        }
+        WmItemRecptLine line = new WmItemRecptLine();
+        line.setLineId(lineId);
+        line.setBatchCode(request.getBatchCode().trim());
+        line.setWarehouseId(warehouse.getWarehouseId());
+        line.setWarehouseCode(warehouse.getWarehouseCode());
+        line.setWarehouseName(warehouse.getWarehouseName());
+        line.setLocationId(location.getLocationId());
+        line.setLocationCode(location.getLocationCode());
+        line.setLocationName(location.getLocationName());
+        line.setAreaId(area.getAreaId());
+        line.setAreaCode(area.getAreaCode());
+        line.setAreaName(area.getAreaName());
+        return toAjax(wmItemRecptLineService.updateReceiptLinePutaway(line));
     }
 
     /**

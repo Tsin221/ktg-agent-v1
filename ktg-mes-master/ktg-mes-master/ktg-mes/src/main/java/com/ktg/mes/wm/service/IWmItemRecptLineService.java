@@ -43,6 +43,9 @@ public interface IWmItemRecptLineService
      */
     public int updateWmItemRecptLine(WmItemRecptLine wmItemRecptLine);
 
+    /** Change only batch and target warehouse hierarchy during the APPROVING putaway stage. */
+    public int updateReceiptLinePutaway(WmItemRecptLine wmItemRecptLine);
+
     /**
      * 批量删除物料入库单行
      * 

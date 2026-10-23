@@ -133,6 +133,11 @@ public class InventoryOperationMapper {
         return jdbc.update(sql, documentId);
     }
 
+    public int reopenReceiptForPutaway(Long documentId, Long expectedVersion) {
+        return jdbc.update("UPDATE wm_item_recpt SET status = 'APPROVING', version = version + 1 "
+                + "WHERE recpt_id = ? AND status = 'APPROVED' AND version = ?", documentId, expectedVersion);
+    }
+
     public List<Map<String, Object>> transactions(String documentType, Long documentId) {
         return jdbc.query("SELECT transaction_id, transaction_type, transaction_flag, "
                 + "transaction_quantity, source_doc_type, source_doc_id, source_doc_line_id, "

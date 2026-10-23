@@ -466,6 +466,7 @@ class WmTransactionAtomicityTest {
             Mockito.when(mapper.selectMdItemById(Mockito.anyLong())).thenReturn(item);
             return mapper;
         }
+        @Bean InventoryDocumentGuard documentGuard() { return new InventoryDocumentGuard(); }
         @Bean @Primary IWmTransactionService transactionService() { return new WmTransactionServiceImpl(); }
         @Bean IWmTransactionService secondTransactionService() { return new WmTransactionServiceImpl(); }
         @Bean IWmMaterialStockService stockService() { return new WmMaterialStockServiceImpl(); }

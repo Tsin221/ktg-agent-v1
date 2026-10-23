@@ -314,6 +314,85 @@ class InventoryOperationServiceTest {
     }
 
     @Test
+    void approvalValidationNamesMissingReceiptBatchAndStorageFields() {
+        ItemRecptTxBean incomplete = receiptLine();
+        incomplete.setBatchCode("   ");
+        incomplete.setWarehouseId(null);
+        incomplete.setLocationId(null);
+        incomplete.setAreaId(null);
+        incomplete.setReferenceValid(false);
+        Mockito.when(receipts.getTxBeans(1L)).thenReturn(Collections.singletonList(incomplete));
+
+        AjaxResult result = service.validateReceiptForApproval(1L);
+
+        assertEquals(422, result.get("code"));
+        assertEquals("INVALID_DOCUMENT_LINES", result.get("errorCode"));
+        assertTrue(String.valueOf(result.get("msg")).contains("批次号"));
+        assertTrue(String.valueOf(result.get("msg")).contains("目标仓库"));
+        assertTrue(String.valueOf(result.get("msg")).contains("目标库位"));
+        assertTrue(String.valueOf(result.get("msg")).contains("目标库区"));
+        assertEquals(0, count("wm_transaction"));
+    }
+
+    @Test
+    void invalidUnexecutedApprovedReceiptCanReturnToPutawayWithVersionBump() {
+        ItemRecptTxBean incomplete = receiptLine();
+        incomplete.setBatchCode(null);
+        incomplete.setWarehouseId(null);
+        incomplete.setLocationId(null);
+        incomplete.setAreaId(null);
+        incomplete.setReferenceValid(false);
+        Mockito.when(receipts.getTxBeans(1L)).thenReturn(Collections.singletonList(incomplete));
+
+        AjaxResult result = service.reopenReceiptForPutaway(1L, 0L);
+
+        assertEquals(200, result.get("code"));
+        assertEquals("APPROVING", jdbc.queryForObject(
+                "SELECT status FROM wm_item_recpt WHERE recpt_id = 1", String.class));
+        assertEquals(1L, jdbc.queryForObject(
+                "SELECT version FROM wm_item_recpt WHERE recpt_id = 1", Long.class));
+        assertEquals(0, count("wm_transaction"));
+    }
+
+    @Test
+    void receiptWithInventoryTransactionCannotReturnToPutaway() {
+        jdbc.update("INSERT INTO wm_transaction(transaction_type, transaction_flag, transaction_quantity, "
+                + "source_doc_type, source_doc_id, source_doc_line_id, unit_of_measure) "
+                + "VALUES ('ITEM_RECPT', 1, 2, 'IR', 1, 11, 'pcs')");
+
+        AjaxResult result = service.reopenReceiptForPutaway(1L, 0L);
+
+        assertEquals(409, result.get("code"));
+        assertEquals("DOCUMENT_ALREADY_EXECUTED", result.get("errorCode"));
+        assertEquals("APPROVED", jdbc.queryForObject(
+                "SELECT status FROM wm_item_recpt WHERE recpt_id = 1", String.class));
+        assertEquals(0L, jdbc.queryForObject(
+                "SELECT version FROM wm_item_recpt WHERE recpt_id = 1", Long.class));
+        assertEquals(1, count("wm_transaction"));
+    }
+
+    @Test
+    void receiptWithExecutionClaimCannotReturnToPutaway() {
+        String operationId = "88888888-8888-4888-8888-888888888888";
+        jdbc.update("INSERT INTO wm_inventory_operation(operation_id, action_type, document_type, "
+                + "document_id, request_digest, executed_by_id, executed_by_name, operation_status, created_at) "
+                + "VALUES (?, 'ITEM_RECEIPT_EXECUTE', 'IR', 1, 'digest', 7, 'operator', 'succeeded', CURRENT_TIMESTAMP)",
+                operationId);
+        jdbc.update("INSERT INTO wm_inventory_executed_document(action_type, document_type, document_id, operation_id) "
+                + "VALUES ('ITEM_RECEIPT_EXECUTE', 'IR', 1, ?)", operationId);
+
+        AjaxResult result = service.reopenReceiptForPutaway(1L, 0L);
+
+        assertEquals(409, result.get("code"));
+        assertEquals("DOCUMENT_ALREADY_EXECUTED", result.get("errorCode"));
+        assertEquals("APPROVED", jdbc.queryForObject(
+                "SELECT status FROM wm_item_recpt WHERE recpt_id = 1", String.class));
+        assertEquals(0L, jdbc.queryForObject(
+                "SELECT version FROM wm_item_recpt WHERE recpt_id = 1", Long.class));
+        assertEquals(1, count("wm_inventory_executed_document"));
+    }
+
+    @Test
     void secondReceiptLineFailureRollsBackFirstLine() {
         ItemRecptTxBean first = receiptLine();
         ItemRecptTxBean second = receiptLine();

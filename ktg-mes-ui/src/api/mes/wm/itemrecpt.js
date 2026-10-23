@@ -71,6 +71,14 @@ export function execute(recptId, version, operationId) {
   })
 }
 
+export function reopenPutaway(recptId, version) {
+  return request({
+    url: '/mes/wm/itemrecpt/' + recptId + '/reopen-putaway',
+    method: 'put',
+    headers: { 'X-Document-Version': version, repeatSubmit: false }
+  })
+}
+
 
 // 删除物料入库单
 export function delItemrecpt(recptId) {
