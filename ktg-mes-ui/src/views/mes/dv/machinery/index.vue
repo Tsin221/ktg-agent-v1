@@ -293,12 +293,6 @@
         </el-row>
       </el-form>
       <el-tabs type="border-card" v-model="activeName" v-if="optType != 'add'" @tab-click="handleActive">
-        <el-tab-pane label="点检记录" name="check">
-          <CheckPlan ref="checkList" />
-        </el-tab-pane>
-        <el-tab-pane label="保养记录" name="maintenance">
-          <CheckPlan ref="maintenanceList" />
-        </el-tab-pane>
         <el-tab-pane label="维修记录" name="repair">
           <Repair ref="repairList" />
         </el-tab-pane>
@@ -350,7 +344,6 @@ import { getToken } from "@/utils/auth";
 import Treeselect from "@riophae/vue-treeselect";
 import "@riophae/vue-treeselect/dist/vue-treeselect.css";
 import BarcodeImg from "@/components/barcodeImg/index.vue";
-import CheckPlan from "@/views/mes/dv/machinery/components/Checkplan.vue"
 import Repair from "@/views/mes/dv/machinery/components/Repair.vue"
 import {getBarcodeUrl} from "@/api/mes/wm/barcode";
 import { option } from "runjs";
@@ -361,11 +354,11 @@ import {getByTemplateType} from "@/api/print/template";
 export default {
   name: "Machinery",
   dicts: ['sys_yes_no','mes_machinery_status'],
-  components: { Treeselect,BarcodeImg, CheckPlan, Repair },
+  components: { Treeselect,BarcodeImg, Repair },
   mixins: [hiprintMixin],
   data() {
     return {
-      activeName: "check",
+      activeName: "repair",
       //自动生成编码
       autoGenFlag:false,
       optType: undefined,
@@ -503,14 +496,6 @@ export default {
     handleActive (tab) {
       const query = {}
       query.machineryCode = this.form.machineryCode
-      if (tab.name == "check") {
-        query.planType = "CHECK"
-        this.$refs.checkList.getOpen(query)
-      }
-      if (tab.name == "maintenance") {
-        query.planType = "MAINTEN"
-        this.$refs.maintenanceList.getOpen(query)
-      }
       if (tab.name == "repair") {
         this.$refs.repairList.getOpen(query)
       }
@@ -624,14 +609,13 @@ export default {
         this.open = true;
         this.title = "查看设备信息";
         this.optType = "view";
-        this.activeName = "check"
+        this.activeName = "repair"
         const query = {
-          machineryCode: this.form.machineryCode,
-          planType: "CHECK"
+          machineryCode: this.form.machineryCode
         }
         this.$nextTick(()=>{
           this.$refs.barcodeImg.getBarcode();
-          this.$refs.checkList.getOpen(query)
+          this.$refs.repairList.getOpen(query)
         })
       });
     },
@@ -659,14 +643,13 @@ export default {
         this.open = true;
         this.title = "修改设备";
         this.optType = "edit";
-        this.activeName = "check"
+        this.activeName = "repair"
         const query = {
-          machineryCode: this.form.machineryCode,
-          planType: "CHECK"
+          machineryCode: this.form.machineryCode
         }
         this.$nextTick(()=>{
           this.$refs.barcodeImg.getBarcode();
-          this.$refs.checkList.getOpen(query)
+          this.$refs.repairList.getOpen(query)
         })
       });
     },

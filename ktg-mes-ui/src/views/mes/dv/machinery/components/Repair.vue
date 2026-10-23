@@ -43,7 +43,7 @@
 </template>
 
 <script>
-import {getRepairList} from "@/api/mes/dv/repair";
+import {listRepair} from "@/api/mes/dv/repair";
 
 export default {
   name: "Repair",
@@ -70,8 +70,10 @@ export default {
     },
     getList() {
       this.loading = true;
-      getRepairList(this.queryParams).then(response => {
-        this.repairList = response.data;
+      listRepair(this.queryParams).then(response => {
+        this.repairList = response.rows;
+        this.total = response.total;
+      }).finally(() => {
         this.loading = false;
       });
     }
