@@ -1,7 +1,7 @@
 # 设备台账 Agent 工具设计方案
 
 日期：2026-10-24
-状态：方案评审稿（本轮只读调研，未修改代码、配置、测试或业务数据）
+状态：已实现，待人工审阅
 
 ## 目标与边界
 
@@ -29,7 +29,7 @@
 |---|---|---|
 | `ktg_dv_machinery_list` | 可选 `machinery_code`、`machinery_name`、`machinery_brand`、`machinery_spec`、`machinery_type_id`、`machinery_type_code`、`machinery_type_name`、`workshop_id`、`workshop_code`、`workshop_name`、`status`；`page`、`page_size` 有硬上限 | 有界的设备行、总数、筛选条件和截断/分页信息。拒绝未知字段、无效状态和超限页长；模糊筛选只展示候选，不推断唯一对象。权限 `mes:dv:machinery:list`。 |
 | `ktg_dv_machinery_detail` | 必须且只能提供 `machinery_id` 或 `machinery_code` 之一；编码必须精确匹配 | 设备详情与规范化 ID/编码。编码查找先做精确筛选；无结果为 NOT_FOUND，多条为 AMBIGUOUS 并返回有限候选让用户改用 ID。权限 `mes:dv:machinery:query`。 |
-| `ktg_md_workshop_options` | 可选车间名称/编码筛选，限制返回数量 | 只调用现有启用车间列表，返回 ID、编码、名称、启用状态。多条同名时要求按编码或 ID 确认，不由模型猜选。权限 `mes:md:workshop:list`。 |
+| `ktg_md_machinery_workshop_options` | 可选车间名称/编码筛选，限制返回数量 | 只调用现有启用车间列表，返回 ID、编码、名称、启用状态。多条同名时要求按编码或 ID 确认，不由模型猜选。权限 `mes:md:workshop:list`。 |
 | `ktg_preview_dv_machinery_create` | 设备编码、名称、分类 ID、车间 ID 必填；品牌、规格、状态、备注可选 | 不写入设备；校验字段长度与状态；读取并确认分类为启用叶子、车间为启用且二者 ID/名称匹配；检查编码当前是否已存在。返回完整变更卡片与确认 ID。当前建议要求调用者提供编码，避免预览时调用会消耗流水号的自动编码接口。权限 `mes:dv:machinery:add`、`mes:dv:machinery:list`，以及解析候选所需权限。 |
 | `ktg_preview_dv_machinery_update` | `machinery_id` 必填；可修改名称、品牌、规格、分类 ID、车间 ID、状态、备注中的一个或多个字段 | 读取当前设备，返回前后对照；字段未提供表示不变，显式空字符串用于清空可空字段；不允许变更设备编码、ID、审计时间；拒绝无变化请求，验证分类/车间仍可用。权限 `mes:dv:machinery:edit`、`mes:dv:machinery:query`，关联候选权限按需检查。 |
 | `ktg_preview_dv_machinery_delete` | 必须提供单个 `machinery_id`；不提供批量接口 | 只展示目标设备和将执行的单条删除；要求用户确认。权限 `mes:dv:machinery:remove`、`mes:dv:machinery:query`。预览需明确说明当前实现未证实有关联保护/级联规则；未经设计并验证安全的关联查询，不宣称“无关联”或“可安全删除”。 |
@@ -60,4 +60,12 @@
 
 读取：筛选字段映射、分页上下限、空结果和截断、未知参数、权限缺失、ID/编码精确匹配及歧义处理、启用分类/车间与分类叶子校验。写入：预览不触发 POST/PUT/DELETE、不调用自动编码生成接口；必填与长度/状态校验；关联 ID 名称核验；确认后才写；身份不符、权限撤销、预览过期/重复消费、目标记录被修改、后端超时未知结果和 API 错误均需安全返回且不自动重试。删除测试需覆盖单条确认与风险提示，不用真实数据。
 
-建议分两步实施：第一步只读列表、详情、车间候选与前端只读卡片；第二步再实现三类预览/确认写操作。设备维修查询可另立后续设计，并复用设备详情页现有维修列表权限与契约。
+## 实施与验证记录
+
+已按本方案接入三项只读工具、三项模型可见写预览和三项隐藏确认执行工具，并挂接 AgentAssistant 卡片与 `/agent-api/v1/dv-machinery/confirm`。工具目录默认加入只读项；设备台账写入须显式设置 `AGENT_ENABLE_DV_MACHINERY_WRITE=true` 并重启服务，预览数据库可用 `AGENT_DV_MACHINERY_DB` 指定独立绝对路径。确认端使用请求中的登录态重新取得用户身份和权限，核对预览归属，再通过 trusted-confirmation 通道调用隐藏执行定义；模型候选不包含隐藏执行工具。
+
+实现要求创建者提供设备编码；预览和确认前会读取列表检查是否已存在，但源码未发现后端唯一性校验或数据库唯一索引，因此这不能消除并发请求的编码冲突风险。写执行不会自动重试，成功以 MES 回读核验为准；不确定结果提示人工核对。删除仅针对单台设备，并显示关联记录处理方式未验证的风险提示，不声称已检查维修/点检关联。没有访问真实 MES 或修改真实设备。
+
+验证记录：设备列表/详情/候选与新增/修改/删除预览和确认的 mock 测试，服务端确认身份/权限链路、隐藏工具目录可见性、HTTP 确认路由和旧设备类型工具注册回归共 65 项通过。AgentAssistant session 定向脚本通过。Vue staging 构建成功；有既存的 bundle size 警告。新增前端卡片及相关文件定向 ESLint、Agent Python 模块 strict mypy 与 `git diff --check` 的最终结果见交付说明。构建期间仅输出已有的大包体积建议。
+
+本实现未覆盖维修记录、导入、导出和标签打印；导入和最近点检/保养时间已由此前页面改动移除。设备编码并发唯一性、删除关联记录的 MES 后端行为、生产环境实际角色权限仍未作运行环境验证。

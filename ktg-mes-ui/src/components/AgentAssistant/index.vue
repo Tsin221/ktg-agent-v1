@@ -75,6 +75,13 @@
               :completed="completedDvPreviewIds.includes(result.preview_id)"
               @confirm="confirmDvPreview"
             />
+            <agent-dv-machinery-card
+              v-else-if="isDvMachineryResult(result)"
+              :result="result"
+              :confirming="confirmingMachineryPreviewId === result.preview_id"
+              :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
+              @confirm="confirmDvMachineryPreview"
+            />
             <agent-result-card v-else :result="result" />
           </div>
         </div>
@@ -158,11 +165,12 @@
 <script>
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
-  confirmDvMachineryType } from '@/api/agent'
+  confirmDvMachineryType, confirmDvMachinery } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
+import AgentDvMachineryCard from './DvMachineryCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText,
@@ -184,7 +192,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard },
   data() {
     return {
       open: false,
@@ -216,6 +224,8 @@ export default {
       completedInventoryIds: [],
       completedPreviewIds: [],
       completedDvPreviewIds: [],
+      completedDvMachineryPreviewIds: [],
+      confirmingMachineryPreviewId: '',
       messages: [],
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
@@ -275,6 +285,7 @@ export default {
         completedPreviewIds: this.completedPreviewIds,
         completedInventoryIds: this.completedInventoryIds,
         completedDvPreviewIds: this.completedDvPreviewIds,
+        completedDvMachineryPreviewIds: this.completedDvMachineryPreviewIds,
         pastInputs: this.pastInputs,
         pendingSubmission: this.pendingSubmission,
         inputAttempt: this.inputAttempt,
@@ -290,6 +301,7 @@ export default {
       this.completedPreviewIds = state.completedPreviewIds || []
       this.completedInventoryIds = state.completedInventoryIds || []
       this.completedDvPreviewIds = state.completedDvPreviewIds || []
+      this.completedDvMachineryPreviewIds = state.completedDvMachineryPreviewIds || []
       this.pastInputs = state.pastInputs || []
       this.pendingSubmission = state.pendingSubmission || null
       this.inputAttempt = state.inputAttempt || null
@@ -324,9 +336,11 @@ export default {
       this.completedInventoryIds = []
       this.completedPreviewIds = []
       this.completedDvPreviewIds = []
+      this.completedDvMachineryPreviewIds = []
       this.confirmingInventoryId = ''
       this.confirmingPreviewId = ''
       this.confirmingDvPreviewId = ''
+      this.confirmingMachineryPreviewId = ''
     },
     async bootstrap() {
       if (!agentSession.checkIdentity()) return
@@ -747,6 +761,11 @@ export default {
         'dv_machinerytype_preview', 'dv_machinerytype_create_result',
         'dv_machinerytype_update_result', 'dv_machinerytype_result'].includes(result.kind)
     },
+    isDvMachineryResult(result) {
+      return result && ['dv_machinery_list', 'dv_machinery_detail', 'md_machinery_workshop_options',
+        'dv_machinery_preview', 'dv_machinery_create_result', 'dv_machinery_update_result',
+        'dv_machinery_delete_result', 'dv_machinery_result'].includes(result.kind)
+    },
     showInventoryResult(result) {
       const id = `confirm-inventory-${result.operation_id}`
       const entry = { id, role: 'assistant', text: '', results: [result] }
@@ -833,6 +852,50 @@ export default {
       } finally {
         if (epoch === this.epoch) {
           this.confirmingDvPreviewId = ''
+          this.scrollToBottom()
+        }
+      }
+    },
+    async confirmDvMachineryPreview(previewId) {
+      if (!previewId || this.confirmingMachineryPreviewId || this.completedDvMachineryPreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingMachineryPreviewId = previewId
+      this.completedDvMachineryPreviewIds.push(previewId)
+      const entryId = `confirm-machinery-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '设备台账确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmDvMachinery(previewId)
+        if (epoch !== this.epoch) return
+        const result = response.result
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) {
+          this.businessMessages.splice(index, 1, {
+            id: entryId,
+            role: 'assistant',
+            text: result.outcome === 'succeeded' ? '设备台账已写入并完成回读核验。' : (result.label || '设备台账操作未完成。'),
+            results: [result]
+          })
+        }
+        this.saveLocalState()
+        if (result.outcome === 'succeeded') {
+          window.dispatchEvent(new CustomEvent('ktg:dv-machinery-changed', { detail: result }))
+        }
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) {
+          this.businessMessages.splice(index, 1, {
+            id: entryId, role: 'assistant',
+            text: message || '确认请求失败。系统不会自动重新提交，请先核对设备台账。'
+          })
+        }
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) {
+          this.confirmingMachineryPreviewId = ''
           this.scrollToBottom()
         }
       }

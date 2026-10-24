@@ -41,6 +41,12 @@ from ktg_agent.ktg.dv_machinerytype import (build_dv_machinerytype_tools,
 from ktg_agent.ktg.dv_machinerytype_writes import (APPLY_CREATE, APPLY_UPDATE,
     DvMachineryTypePreviewStore, build_dv_machinerytype_write_tools,
     dv_machinerytype_write_factories, dv_machinerytype_write_manifests)
+from ktg_agent.ktg.dv_machinery import (build_dv_machinery_tools,
+    dv_machinery_factories, dv_machinery_manifests)
+from ktg_agent.ktg.dv_machinery_writes import (APPLY_CREATE as MACHINERY_APPLY_CREATE,
+    APPLY_DELETE as MACHINERY_APPLY_DELETE, APPLY_UPDATE as MACHINERY_APPLY_UPDATE,
+    DvMachineryPreviewStore, build_dv_machinery_write_tools,
+    dv_machinery_write_factories, dv_machinery_write_manifests)
 from ktg_agent.ktg.workorder_progress import (build_workorder_progress_tool,
     workorder_progress_factories, workorder_progress_manifests)
 from ktg_agent.ktg.client import KTGError
@@ -90,6 +96,7 @@ class QueryService:
         inventory_actions: frozenset[str] = frozenset(),
         workorder_store: PreviewStore | None = None,
         dv_machinerytype_store: DvMachineryTypePreviewStore | None = None,
+        dv_machinery_store: DvMachineryPreviewStore | None = None,
         limits: RunLimits | None = None,
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
@@ -104,6 +111,7 @@ class QueryService:
         self._ktg_client_factory = ktg_client_factory
         self._preview_store = workorder_store or PreviewStore(ttl_seconds=600)
         self._dv_machinerytype_store = dv_machinerytype_store
+        self._dv_machinery_store = dv_machinery_store
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
         self._spill = spill_settings
@@ -117,7 +125,8 @@ class QueryService:
                        *(build_inventory_tools(inventory_store, inventory_actions)
                          if inventory_store else ()),
                        *build_production_query_tools(),
-                       *build_dv_machinerytype_tools())
+                       *build_dv_machinerytype_tools(),
+                       *build_dv_machinery_tools())
         if inventory_store and inventory_actions:
             definitions = (*definitions, build_inventory_result_tool(inventory_store))
         progress = build_workorder_progress_tool()
@@ -125,12 +134,19 @@ class QueryService:
         write_definitions = (build_dv_machinerytype_write_tools(dv_machinerytype_store)
                              if dv_machinerytype_store else ())
         definitions = (*definitions, *write_definitions)
+        machinery_write_definitions = (build_dv_machinery_write_tools(dv_machinery_store)
+                                       if dv_machinery_store else ())
+        definitions = (*definitions, *machinery_write_definitions)
         self._registry = ToolRegistry(definitions)
         extra_factories = {**production_query_factories(), **workorder_progress_factories(),
                            **dv_machinerytype_factories(),
+                           **dv_machinery_factories(),
+                           **dv_machinery_write_factories(machinery_write_definitions),
                            **dv_machinerytype_write_factories(write_definitions)}
         extra_manifests = (*production_query_manifests(), *workorder_progress_manifests(),
                            *dv_machinerytype_manifests(),
+                           *dv_machinery_manifests(),
+                           *dv_machinery_write_manifests(machinery_write_definitions),
                            *dv_machinerytype_write_manifests(write_definitions))
         if inventory_store and inventory_actions:
             result_tool = next(item for item in definitions if item.name == "ktg_wm_operation_result")
@@ -534,6 +550,50 @@ class QueryService:
         )
         details = result.details or {
             "kind": "dv_machinerytype_result",
+            "outcome": ("unknown" if result.status is ToolStatus.UNKNOWN else
+                        "failed" if result.is_error else "succeeded"),
+            "label": result.content, "preview_id": clean_preview_id,
+        }
+        if result.error_code is not None:
+            details["error_code"] = result.error_code
+        return {"result": details}
+
+    async def confirm_dv_machinery(self, *, preview_id: str, authorization: str) -> JsonObject:
+        store = self._dv_machinery_store
+        if store is None:
+            raise ValueError("设备台账写入未启用。")
+        clean_preview_id = preview_id.strip()
+        if not clean_preview_id or len(clean_preview_id) > 100:
+            raise ValueError("preview_id 无效。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        user_key = self._identity_key(identity)
+        try:
+            action = store.action_for(preview_id=clean_preview_id, user_key=user_key)
+        except PreviewError as exc:
+            return {"result": {
+                "kind": "dv_machinery_result", "outcome": "failed",
+                "label": str(exc), "error_code": exc.code, "preview_id": clean_preview_id,
+            }}
+        apply_name = {
+            "create": MACHINERY_APPLY_CREATE,
+            "update": MACHINERY_APPLY_UPDATE,
+            "delete": MACHINERY_APPLY_DELETE,
+        }.get(action)
+        if apply_name is None:
+            raise ValueError("设备预览操作类型无效。")
+        call_id = str(uuid4())
+        result = await self._tool_runner().run(
+            ToolCall(call_id, apply_name, {"operation_id": clean_preview_id}),
+            ToolContext(
+                run_id=str(uuid4()), tool_call_id=call_id,
+                operation_id=clean_preview_id,
+                channel=ToolChannel.TRUSTED_CONFIRMATION,
+                confirmation_id=call_id, identity=identity, ktg_client=client,
+            ),
+        )
+        details = result.details or {
+            "kind": "dv_machinery_result",
             "outcome": ("unknown" if result.status is ToolStatus.UNKNOWN else
                         "failed" if result.is_error else "succeeded"),
             "label": result.content, "preview_id": clean_preview_id,

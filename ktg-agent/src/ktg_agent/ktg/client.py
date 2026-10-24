@@ -98,6 +98,10 @@ class KTGClient:
     async def put(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
         return await self._write("PUT", path, body)
 
+    async def delete(self, path: str) -> dict[str, object]:
+        """Delete one resource at a fixed path on the configured KTG origin."""
+        return await self._write("DELETE", path, {})
+
     @staticmethod
     def workorder_operation_digest(action: str, draft: Mapping[str, object]) -> str:
         """Return the MES-09 contract-v1 digest for a workorder operation."""

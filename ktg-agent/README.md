@@ -150,6 +150,8 @@ uv run --locked python -m ktg_agent.server
 
 MES-06 的五个工单、任务和报工查询按各自 `query`/`list` 权限发现。启用对应库存动作和 `AGENT_INVENTORY_DB` 后，目录还提供入库/领料预览及 `ktg_wm_operation_result` 回执读取；内部确认执行定义保持隐藏，实际写入仅由网页确认卡触发。工单预览同样只生成预览，确认调用既有 `/agent-api/v1/workorder-drafts/confirm` 持久操作流程。
 
+设备台账提供列表、详情和启用车间候选只读工具；设备类型候选复用设备分类树。新增、修改、单条删除以预览卡展示，只有用户点击确认才执行，内部执行工具不向模型开放。写工具默认关闭；显式设置 `AGENT_ENABLE_DV_MACHINERY_WRITE=true` 后重启 Agent 才注册，预览记录默认存放在会话库同目录的 `agent-dv-machinery.sqlite3`，也可用绝对路径 `AGENT_DV_MACHINERY_DB` 覆盖。此文件必须独立于会话、库存、工单、设备类型预览数据库。创建预览要求调用者提供设备编码，不会在预览阶段调用会消耗流水的自动编码接口。确认成功以 MES 回读核验为准；删除关联维修/点检记录的后端行为未由本工具确认。
+
 `ktg_pro_workorder_progress` 默认关闭。仅评测或受控演示时显式设置 `AGENT_ENABLE_WORKORDER_PROGRESS=true` 并重启 Agent；该工具还要求工单详情、任务列表和报工列表三项权限。候选是否出现仍取决于当前用户授权。该事实视图由多次独立读取组成，不能当成同一时点快照或已确认的工序进度规则。
 
 ## 项目结构

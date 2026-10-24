@@ -52,6 +52,10 @@ class FakeLegacyService:
                                 authorization: str) -> dict[str, object]:
         return {"kind": "inventory", "operation_id": operation_id}
 
+    async def confirm_dv_machinery(self, *, preview_id: str,
+                                   authorization: str) -> dict[str, object]:
+        return {"kind": "dv_machinery", "preview_id": preview_id}
+
 
 @contextmanager
 def running_server(repo: SessionRepository) -> Iterator[AgentHTTPServer]:
@@ -165,6 +169,7 @@ def test_existing_post_routes_still_dispatch(tmp_path: Path) -> None:
             ("/agent-api/v1/query", {"message": "hello"}, "query"),
             ("/agent-api/v1/workorder-drafts/confirm", {"preview_id": "p1"}, "workorder"),
             ("/agent-api/v1/inventory-operations/confirm", {"operation_id": "i1"}, "inventory"),
+            ("/agent-api/v1/dv-machinery/confirm", {"preview_id": "p2"}, "dv_machinery"),
         ):
             status, response = request(server, "POST", path, body=body)
             assert status == 200 and response["kind"] == kind

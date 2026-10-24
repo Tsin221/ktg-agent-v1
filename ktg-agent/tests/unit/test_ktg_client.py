@@ -68,3 +68,27 @@ def test_workorder_operation_unknown_queries_same_id_and_does_not_blind_retry() 
     assert len(writes) == 1 and writes[0][0] == "POST"
     assert writes[0][1].endswith("/mes/pro/workorder/operations")
     assert reads == [f"http://127.0.0.1:8080/mes/pro/workorder/operations/{command['operationId']}"] * 2
+
+
+def test_delete_uses_configured_origin_and_propagates_permission_errors() -> None:
+    calls: list[tuple[str, str, Mapping[str, str], Mapping[str, object]]] = []
+
+    async def write(method: str, url: str, headers: Mapping[str, str],
+                    body: Mapping[str, object], _timeout: float) -> dict[str, object]:
+        calls.append((method, url, headers, body))
+        return {"code": 403, "msg": "denied"}
+
+    client = KTGClient(base_url="http://127.0.0.1:8080", authorization="Bearer token",
+                       write_transport=write)
+    with pytest.raises(KTGError) as error:
+        asyncio.run(client.delete("/mes/dv/machinery/17"))
+    assert error.value.code == "PERMISSION_DENIED"
+    assert calls == [("DELETE", "http://127.0.0.1:8080/mes/dv/machinery/17",
+                      {"Authorization": "Bearer token"}, {})]
+
+
+@pytest.mark.parametrize("path", ["https://example.invalid/", "//example.invalid/path", "relative"])
+def test_delete_rejects_non_local_paths(path: str) -> None:
+    client = KTGClient(base_url="http://127.0.0.1:8080", authorization="Bearer token")
+    with pytest.raises(ValueError):
+        asyncio.run(client.delete(path))
