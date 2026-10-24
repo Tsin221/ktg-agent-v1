@@ -26,7 +26,7 @@
       </el-col>
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
     </el-row>
-    <DvsubjectSelect ref="subjectSelect" subjectType="CHECK" @onSelected="onSubjectSelected"></DvsubjectSelect>
+    <DvsubjectSelect ref="subjectSelect" :subjectType="planType" @onSelected="onSubjectSelected"></DvsubjectSelect>
 
     <el-table v-loading="loading" :data="checksubjectList" @selection-change="handleSelectionChange">
       <el-table-column type="selection" width="55" align="center" />      
@@ -63,6 +63,7 @@ export default {
   name: "Checksubject",
   props:{
       planId: null,
+      planType: null,
       optType: null
   },
   components:{DvsubjectSelect},
@@ -70,6 +71,7 @@ export default {
     return {
       // 遮罩层
       loading: true,
+      requestSequence: 0,
       // 选中数组
       ids: [],
         selectedRows: [],
@@ -106,14 +108,31 @@ export default {
   created() {
     this.getList();
   },
+  watch: {
+    planId(newPlanId) {
+      this.queryParams.planId = newPlanId;
+      this.queryParams.pageNum = 1;
+      this.clearSelection();
+      this.checksubjectList = [];
+      this.total = 0;
+      this.getList();
+    }
+  },
   methods: {
     /** 查询点检项目列表 */
     getList() {
+      const requestSequence = ++this.requestSequence;
+      if (this.planId == null) {
+        this.loading = false;
+        return Promise.resolve();
+      }
       this.loading = true;
-      listChecksubject(this.queryParams).then(response => {
+      return listChecksubject({ ...this.queryParams, planId: this.planId }).then(response => {
+        if (requestSequence !== this.requestSequence) return;
         this.checksubjectList = response.rows;
         this.total = response.total;
-        this.loading = false;
+      }).finally(() => {
+        if (requestSequence === this.requestSequence) this.loading = false;
       });
     },
     // 多选框选中数据
@@ -121,6 +140,12 @@ export default {
       this.ids = selection.map(item => item.recordId)
       this.single = selection.length!==1
       this.multiple = !selection.length
+    },
+    clearSelection() {
+      this.ids = [];
+      this.selectedRows = [];
+      this.single = true;
+      this.multiple = true;
     },
     /** 新增按钮操作 */
     handleAdd() {

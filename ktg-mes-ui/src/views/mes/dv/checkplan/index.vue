@@ -262,7 +262,7 @@
           <Checkmachinery ref="machinerylist" :optType="optType" :planId="form.planId" ></Checkmachinery>
         </el-tab-pane>
         <el-tab-pane :label="form.planType=='CHECK'?'点检项目':'保养项目'">
-          <Checksubject ref="subjectlist" :optType="optType" :planId="form.planId" ></Checksubject>
+          <Checksubject ref="subjectlist" :optType="optType" :planId="form.planId" :planType="form.planType" ></Checksubject>
         </el-tab-pane>
       </el-tabs>
       <div slot="footer" class="dialog-footer">

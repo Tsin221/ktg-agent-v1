@@ -72,6 +72,7 @@ export default {
   data() {
     return {
       showFlag:false,
+      requestSequence: 0,
       // 遮罩层
       loading: true,
       // 选中数组s
@@ -105,31 +106,70 @@ export default {
       form: {}
     };
   },
+  watch: {
+    subjectType(newSubjectType) {
+      this.resetQueryState();
+      this.queryParams.subjectType = newSubjectType;
+      if (this.showFlag) this.getList();
+    },
+    showFlag(isOpen) {
+      if (isOpen) {
+        this.resetQuery();
+      } else {
+        this.clearSelection();
+      }
+    }
+  },
   created() {
     this.getList();
   },
   methods: {
+    resetQueryState() {
+      this.requestSequence++;
+      this.queryParams = {
+        pageNum: 1,
+        pageSize: 10,
+        subjectCode: null,
+        subjectName: null,
+        subjectType: this.subjectType,
+        subjectContent: null,
+        subjectStandard: null,
+        enableFlag: null,
+      };
+      this.clearSelection();
+      this.dvsubjectList = [];
+      this.total = 0;
+      this.loading = false;
+    },
+    clearSelection() {
+      this.ids = [];
+      this.selectedRows = [];
+      this.single = true;
+      this.multiple = true;
+    },
     /** 查询设备点检保养项目列表 */
     getList() {
+      const requestSequence = ++this.requestSequence;
+      const params = { ...this.queryParams, subjectType: this.subjectType };
       this.loading = true;
-      listDvsubject(this.queryParams).then(response => {
+      return listDvsubject(params).then(response => {
+        if (requestSequence !== this.requestSequence) return;
         this.dvsubjectList = response.rows;
         this.total = response.total;
-        this.loading = false;
+      }).finally(() => {
+        if (requestSequence === this.requestSequence) this.loading = false;
       });
     },
     /** 重置按钮操作 */
     resetQuery() {
-      this.queryParams = {}
-      this.queryParams.pageNum = 1;
-      this.queryParams.pageSize = 10;
-      this.queryParams.subjectType = this.subjectType
+      this.resetQueryState();
       this.getList();
     },
     /** 搜索按钮操作 */
     handleQuery() {
       this.queryParams.pageNum = 1;
       this.queryParams.pageSize = 10;
+      this.queryParams.subjectType = this.subjectType;
       this.getList();
     },
     // 多选框选中数据
