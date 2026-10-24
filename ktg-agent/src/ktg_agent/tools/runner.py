@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
+import json
 from typing import Any, Protocol
 
 from jsonschema import Draft202012Validator
@@ -149,18 +151,29 @@ class ToolRunner:
                 if authorization.active_names is None or call.name not in authorization.active_names:
                     return self._error("Tool is not active.", "TOOL_NOT_ACTIVE", context)
 
-        validation_error = next(
-            iter(Draft202012Validator(tool.input_schema).iter_errors(call.arguments)),
-            None,
-        )
-        if validation_error is not None:
+        validation_errors = list(islice(
+            Draft202012Validator(tool.input_schema).iter_errors(call.arguments), 5,
+        ))
+        if validation_errors:
+            errors = [{"path": error.json_path, "reason": error.message[:400]}
+                      for error in validation_errors]
+            properties = tool.input_schema.get("properties")
+            # Diagnostic details are deliberately stripped from model messages.
+            # Put the repair contract in content so the next request can use it.
+            feedback = {
+                "error_code": "VALIDATION_ERROR",
+                "errors": errors,
+                "required": tool.input_schema.get("required", []),
+                "allowed_arguments": list(properties) if isinstance(properties, dict) else [],
+                "next_step": "按当前工具 schema 修正参数后再调用；不要重复原参数。缺少用户信息时询问用户。",
+            }
             return self._error(
-                "Tool arguments are invalid.",
+                "Tool arguments are invalid. " + json.dumps(feedback, ensure_ascii=False),
                 "VALIDATION_ERROR",
                 context,
                 details={
-                    "path": validation_error.json_path,
-                    "reason": validation_error.message,
+                    "path": validation_errors[0].json_path,
+                    "reason": validation_errors[0].message,
                 },
             )
 

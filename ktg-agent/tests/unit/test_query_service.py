@@ -87,9 +87,9 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
                 "data": {
                     "workorderId": 51,
                     "workorderCode": "WO-001",
-                    "workorderName": "产品 A 工单",
+                    "workorderName": "产品 A 客户订单",
                     "workorderType": "SELF",
-                    "orderSource": "MANUAL",
+                    "orderSource": "ORDER",
                     "productId": 11,
                     "productName": "产品 A",
                     "unitOfMeasure": "件",
@@ -136,6 +136,9 @@ async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
                             id="preview",
                             name="ktg_preview_create_workorder_draft",
                             arguments={
+                                "code_mode": "auto",
+                                "workorder_name": "产品 A 客户订单",
+                                "order_source": "ORDER",
                                 "product_code": "A-01",
                                 "quantity": 100,
                                 "request_date": "2026-10-31",

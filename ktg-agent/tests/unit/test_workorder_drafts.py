@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Mapping
+from jsonschema import Draft202012Validator
 
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.workorders import (
@@ -8,6 +9,7 @@ from ktg_agent.ktg.workorders import (
     _matches_request,
     _resolve_product,
     _verified_result,
+    _quantity,
     build_workorder_tools,
 )
 from ktg_agent.tools import ToolContext, ToolStatus
@@ -44,7 +46,8 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
         if url.endswith("/system/autocode/get/WORKORDER_CODE"):
             return "WO-20261011-001"
         if url.endswith("/mes/pro/workorder/51"):
-            return {"code": 200, "data": _saved_workorder()}
+            return {"code": 200, "data": {**_saved_workorder(),
+                "workorderName": "产品 A 订单工单", "orderSource": "ORDER"}}
         if url.endswith("/mes/md/bom/list"):
             return {"code": 200, "total": 1,
                     "rows": [{"bomItemId": 101, "quantity": 2}]}
@@ -79,6 +82,8 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
     preview = await tools["ktg_preview_create_workorder_draft"].execute(
         _context("preview-call", client, user_id=7),
         {
+            "code_mode": "auto", "workorder_name": "产品 A 订单工单",
+            "order_source": "ORDER", "workorder_type": "SELF",
             "product_name": "产品 A",
             "quantity": 100,
             "request_date": "2026-10-31",
@@ -92,6 +97,7 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
         "itemId": 11,
         "itemCode": "A-01",
         "itemName": "产品 A",
+        "specification": None,
         "unitOfMeasure": "件",
     }
     assert preview.details["quantity"] == "100"
@@ -128,10 +134,65 @@ async def _create_preview_resolves_product_and_confirmation_writes_once() -> Non
         "CREATE_DRAFT", draft
     )
     assert draft == {
-        "workorderCode": "WO-20261011-001", "workorderName": "产品 A 工单",
-        "workorderType": "SELF", "orderSource": "MANUAL", "productId": 11,
+        "workorderCode": "WO-20261011-001", "workorderName": "产品 A 订单工单",
+        "workorderType": "SELF", "orderSource": "ORDER", "productId": 11,
         "quantity": "100", "requestDate": "2026-10-31", "parentId": 0,
     }
+
+
+def test_create_schema_requires_business_fields_and_manual_code() -> None:
+    tool = next(tool for tool in build_workorder_tools(PreviewStore())
+                if tool.name == "ktg_preview_create_workorder_draft")
+    assert tool.input_schema is not None
+    valid = {"code_mode": "manual", "workorder_code": "WO-MANUAL",
+             "workorder_name": "用户指定名称", "order_source": "STORE",
+             "quantity": 1, "request_date": "2026-10-31", "product_code": "A-01"}
+    assert not list(Draft202012Validator(tool.input_schema).iter_errors(valid))
+    for missing in ("workorder_name", "order_source", "quantity", "request_date", "product_code"):
+        invalid = dict(valid)
+        invalid.pop(missing)
+        assert list(Draft202012Validator(tool.input_schema).iter_errors(invalid)), missing
+    invalid = dict(valid)
+    invalid.pop("workorder_code")
+    assert list(Draft202012Validator(tool.input_schema).iter_errors(invalid))
+    for quantity in (0.29, 0.57, "0.1", "0.10", "1.2300"):
+        candidate = {**valid, "quantity": quantity}
+        assert not list(Draft202012Validator(tool.input_schema).iter_errors(candidate)), quantity
+
+
+def test_quantity_obeys_screen_range_and_database_precision_without_rounding() -> None:
+    assert _quantity("0.01") == "0.01"
+    assert _quantity("99999999") == "99999999"
+    assert _quantity(0.29) == "0.29"
+    assert _quantity(0.57) == "0.57"
+    assert _quantity("0.1") == "0.1"
+    assert _quantity("0.10") == "0.1"
+    assert _quantity("1.2300") == "1.23"
+    for invalid in ("0.009", "100000000", "0.011"):
+        try:
+            _quantity(invalid)
+        except PreviewError as error:
+            assert error.code == "INVALID_QUANTITY"
+        else:
+            raise AssertionError(f"accepted invalid quantity {invalid}")
+
+
+def test_omitted_workorder_type_uses_web_default_self_in_saved_preview() -> None:
+    async def run() -> None:
+        tool = next(tool for tool in build_workorder_tools(PreviewStore())
+                    if tool.name == "ktg_preview_create_workorder_draft")
+        result = await tool.execute(_context("preview-default-self", _preview_only_client(), user_id=7), {
+            "code_mode": "auto", "workorder_name": "默认类型测试", "order_source": "STORE",
+            "product_code": "A-01", "quantity": 1, "request_date": "2026-10-31",
+        })
+        assert result.status is ToolStatus.SUCCEEDED
+        assert result.details is not None
+        assert result.details["workorderType"] == "SELF"
+        changes = result.details["changes"]
+        assert isinstance(changes, list)
+        assert any(change.get("field") == "workorderType" and change.get("after") == "SELF"
+                   for change in changes if isinstance(change, Mapping))
+    asyncio.run(run())
 
 
 def test_preview_rejects_ambiguous_product_without_creating_approval() -> None:
@@ -302,6 +363,8 @@ async def _preview_rejects_ambiguous_product_without_creating_approval() -> None
     result = await tools["ktg_preview_create_workorder_draft"].execute(
         _context("preview-call", client, user_id=7),
         {
+            "code_mode": "auto", "workorder_name": "歧义产品测试",
+            "order_source": "STORE", "workorder_type": "SELF",
             "product_name": "产品 A",
             "quantity": 100,
             "request_date": "2026-10-31",
@@ -310,6 +373,8 @@ async def _preview_rejects_ambiguous_product_without_creating_approval() -> None
 
     assert result.status is ToolStatus.FAILED
     assert result.error_code == "AMBIGUOUS_PRODUCT"
+    assert "A-01" in result.content and "A-02" in result.content
+    assert "无法确定唯一产品" in result.content
     assert result.details is not None
     assert result.details["kind"] == "workorder_product_candidates"
     candidates = result.details["candidates"]
@@ -328,6 +393,8 @@ async def _confirmation_is_bound_to_preview_user() -> None:
     preview = await tools["ktg_preview_create_workorder_draft"].execute(
         _context("preview-call", client, user_id=7),
         {
+            "code_mode": "auto", "workorder_name": "用户绑定测试",
+            "order_source": "STORE", "workorder_type": "SELF",
             "product_code": "A-01",
             "quantity": "3.5",
             "request_date": "2026-10-31",
@@ -398,6 +465,8 @@ async def _create_timeout_reconciles_by_stable_workorder_code_without_retry() ->
     preview = await tools["ktg_preview_create_workorder_draft"].execute(
         _context("preview-call", client, user_id=7),
         {
+            "code_mode": "auto", "workorder_name": "超时重试测试",
+            "order_source": "STORE", "workorder_type": "SELF",
             "product_code": "A-01",
             "quantity": 100,
             "request_date": "2026-10-31",
@@ -464,6 +533,8 @@ async def _create_timeout_with_failed_reconciliation_stays_unknown_without_retry
     preview = await tools["ktg_preview_create_workorder_draft"].execute(
         _context("preview-call", client, user_id=7),
         {
+            "code_mode": "auto", "workorder_name": "未知结果测试",
+            "order_source": "STORE", "workorder_type": "SELF",
             "product_code": "A-01",
             "quantity": 100,
             "request_date": "2026-10-31",

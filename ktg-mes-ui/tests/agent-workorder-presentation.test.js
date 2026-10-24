@@ -15,7 +15,8 @@ function loadEsModule(relativePath) {
 const {
   isWorkorderAssistantResult,
   workorderFieldLabel,
-  formatWorkorderValue
+  formatWorkorderValue,
+  formatProductCandidatesHint
 } = loadEsModule('src/components/AgentAssistant/workorderPresentation.js')
 
 assert.strictEqual(isWorkorderAssistantResult({ kind: 'workorder_draft_preview' }), true)
@@ -27,5 +28,9 @@ assert.strictEqual(workorderFieldLabel('status'), '状态')
 assert.strictEqual(formatWorkorderValue(null), '未设置')
 assert.strictEqual(formatWorkorderValue(''), '空')
 assert.strictEqual(formatWorkorderValue(120), '120')
+assert.strictEqual(
+  formatProductCandidatesHint({ total: 27, truncated: true, candidates: [{}, {}] }),
+  '共 27 项，当前显示 2 项。 候选过多，请提供更精确的产品编码。'
+)
 
 console.log('agent workorder presentation tests passed')

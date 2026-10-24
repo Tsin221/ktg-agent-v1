@@ -603,8 +603,12 @@ class AgentLoop:
                     result = self._cancelled_tool_result()
                 elif (self._discovery is not None and call.name in self._discovery.candidate.candidates
                       and call.name not in (active_names or frozenset())):
-                    result = ToolResult("Tool is not active.", status=ToolStatus.FAILED,
-                                        error_code="TOOL_NOT_ACTIVE")
+                    result = ToolResult(
+                        "Tool is not active. 先使用 load_tools 加载搜索结果中的准确名称和版本；"
+                        "下一次请求读取已加载工具的 schema 后再调用，不要猜测参数。",
+                        status=ToolStatus.FAILED,
+                        error_code="TOOL_NOT_ACTIVE",
+                    )
                 elif self._discovery is not None and call.name in ("search_tools", "load_tools"):
                     result = await self._discovery.execute(call)
                 else:
@@ -805,13 +809,23 @@ class AgentLoop:
             # No extra provider call after a hard budget. Preserve the limited
             # outcome while giving the UI a truthful, bounded partial response.
             summaries: list[str] = []
+            discoveries: list[str] = []
+            failures: dict[str, str] = {}
             calls = {block.id: block.name for entry in history[baseline:]
                      if isinstance(entry, AssistantMessage)
                      for block in entry.content if isinstance(block, ToolCall)}
             for entry in history[baseline:]:
-                if not isinstance(entry, ToolResultMessage) or entry.is_error:
+                if not isinstance(entry, ToolResultMessage):
                     continue
                 name = calls.get(entry.tool_call_id)
+                if entry.is_error:
+                    failure_text = " ".join(block.text for block in entry.content if isinstance(block, TextBlock))
+                    reason_text = (entry.details or {}).get("reason")
+                    if "VALIDATION_ERROR" in failure_text and isinstance(reason_text, str):
+                        failure_text = "VALIDATION_ERROR：" + reason_text
+                    failures[name or "工具"] = failure_text[:400]
+                    continue
+                failures.pop(name or "工具", None)
                 if name == "load_tools":
                     continue
                 if name == "search_tools":
@@ -820,15 +834,23 @@ class AgentLoop:
                         labels = [str(item["label"])[:80] for item in items
                                   if isinstance(item, dict) and isinstance(item.get("label"), str)]
                         if labels:
-                            summaries.append("已发现的可用能力（不代表已执行业务）：" + "、".join(labels[:8]))
+                            discoveries.append("已发现的可用能力（不代表已执行业务）：" + "、".join(labels[:8]))
                 else:
                     text = " ".join(block.text for block in entry.content if isinstance(block, TextBlock))
                     if text:
                         summaries.append(text[:600])
             text = "本轮已达到执行上限，尚未完成你的请求。"
+            if failures:
+                text += "\n最后的工具调用未完成：\n" + "\n".join(
+                    f"{name}：{failure}" for name, failure in list(failures.items())[-2:]
+                )
+                if any("VALIDATION_ERROR" in failure for failure in failures.values()):
+                    text += "\n系统生成的工具参数未通过参数校验；需要修正后重新生成预览。"
+            if not summaries and not failures:
+                summaries = discoveries
             if summaries:
                 text += "\n以下为已取得的部分结果：\n" + "\n".join(dict.fromkeys(summaries[-3:]))
-            text += "\n请缩小查询范围或指定一个具体目标后继续。未执行的操作不会自动继续。"
+            text += "\n未执行的操作不会自动继续。"
             message = AssistantMessage((TextBlock(text),))
             history.append(message)
             message_id = f"{publisher.run_id}:limit-summary"

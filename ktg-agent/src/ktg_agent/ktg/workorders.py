@@ -201,22 +201,50 @@ class PreviewStore:
 
 def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
     create_properties = _draft_candidate_properties()
+    create_properties["code_mode"] = {
+        "type": "string", "enum": ["auto", "manual"],
+        "description": "编号模式。auto=按MES规则自动生成；manual=使用用户明确给出的编号，此时必须同时提供workorder_code。新增必填；编辑工具不使用此参数。",
+    }
+    create_properties["order_source"] = {
+        "type": "string", "enum": ["ORDER", "STORE"],
+        "description": "来源类型，新增必填：ORDER=客户订单，STORE=库存备货。只接受这两个值；编辑时可省略以保留原来源，明确提供时按给定值修改。",
+    }
+    create_properties["workorder_type"] = {
+        **cast(dict[str, JsonValue], create_properties["workorder_type"]),
+        "enum": ["SELF", "OUTSOURCE", "PURCHASE"],
+        "description": "工单类型：SELF=自制，OUTSOURCE=委外，PURCHASE=外购。新增省略时采用网页默认SELF并在预览显示；编辑省略时保留原值。",
+    }
+    create_schema: JsonObject = {
+        "type": "object", "properties": create_properties,
+        "required": ["code_mode", "workorder_name", "order_source", "quantity", "request_date"],
+        "anyOf": [{"required": ["product_id"]}, {"required": ["product_code"]}, {"required": ["product_name"]}],
+        "allOf": [{"if": {"properties": {"code_mode": {"const": "manual"}}},
+                   "then": {"required": ["workorder_code"]}}],
+        "additionalProperties": False,
+    }
     edit_properties = _draft_candidate_properties()
     edit_properties["target_workorder_code"] = {
         "type": "string",
         "minLength": 1,
         "maxLength": 64,
+        "description": "要编辑的现有工单编号，最大64字符，必须准确指定；工具先读取并校验目标为可编辑草稿。",
     }
     return (
         _preview_tool(
             name="ktg_preview_create_workorder_draft",
-            label="预览创建工单草稿",
+            label="添加生产工单预览",
             description=(
-                "为生产工单草稿生成可信预览。产品名称可能重名；工具会查询 KTG，"
-                "无法唯一匹配时必须让用户选择。写入不会在本工具中发生。"
+                "添加生产工单：仅收集用户明确提供的网页字段并生成草稿预览，不在此工具写入；"
+                "实际保存须由用户在可信网页确认。新增必填工单名称、来源、数量、需求日期、编号模式及至少一种产品标识。"
+                "product_id仅可来自已知查询结果，product_code/product_name可直接用用户给出的值；"
+                "工具内部查询及分页并唯一解析，多个候选返回有限候选要求用户选择，无需先调用产品查询。"
+                "ORDER=客户订单，STORE=库存备货；订单号及客户字段在ORDER可选。数量0.01至99999999、有效最多两位小数；日期用用户明确给出的yyyy-MM-dd，不得猜测。"
+                "编号模式auto自动生成、manual手工提供编号；类型可选SELF自制、OUTSOURCE委外、PURCHASE外购，新增省略采用网页默认SELF并显示在预览。"
+                "响应返回完整预览或有限候选；编辑工具仅改明确提供字段，省略字段保留原值。"
             ),
             properties=create_properties,
-            required=("quantity", "request_date"),
+            required=("code_mode", "workorder_name", "order_source", "quantity", "request_date"),
+            input_schema=create_schema,
             execute=lambda context, arguments: _preview_create(
                 store, context, arguments
             ),
@@ -225,7 +253,8 @@ def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
             name="ktg_preview_edit_workorder_draft",
             label="预览编辑工单草稿",
             description=(
-                "读取目标工单并预览允许的草稿字段变更。非草稿或版本冲突不能写入。"
+                "预览编辑生产工单草稿：用于修改已存在的草稿字段；必须用target_workorder_code指定目标。仅修改明确提供的字段，省略字段保留原值；不接受新增编号模式。"
+                "读取目标并返回变更前后预览。非草稿、无权限或版本冲突时拒绝；此工具不写入，只有用户在可信网页确认后才执行保存。"
             ),
             properties=edit_properties,
             required=("target_workorder_code",),
@@ -248,33 +277,49 @@ def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
 
 def _draft_candidate_properties() -> JsonObject:
     return {
-        "product_id": {"type": "integer", "minimum": 1},
-        "product_code": {"type": "string", "minLength": 1, "maxLength": 64},
-        "product_name": {"type": "string", "minLength": 1, "maxLength": 255},
-        "workorder_code": {"type": "string", "minLength": 1, "maxLength": 64},
-        "workorder_name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "product_id": {"type": "integer", "minimum": 1,
+                        "description": "产品ID，只能使用可信查询已返回的ID，不得猜测；可与编码/名称同时提供以交叉核对且必须指向同一产品。新增至少提供一种产品标识；编辑省略表示不换产品。"},
+        "product_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                         "description": "产品编号/物料编码，1至64字符。可直接使用用户给出的准确值，工具内部查询解析；可与ID/名称同时给出且须一致。新增至少一种标识；编辑省略表示不换产品。"},
+        "product_name": {"type": "string", "minLength": 1, "maxLength": 255,
+                         "description": "产品名称，1至255字符。可直接使用用户提供名称，工具内部查询；重名返回有限候选要求按编码选择。可与ID/编码同时提供且须一致。新增至少一种标识；编辑省略不换产品。产品名称/规格/单位由查询结果生成。"},
+        "workorder_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                           "description": "工单编号，1至64字符。新增仅manual模式必填；auto模式由MES生成。编辑时明确提供才修改，省略保留原编号。"},
+        "workorder_name": {"type": "string", "minLength": 1, "maxLength": 255,
+                            "description": "工单名称，1至255字符；新增必填且来自用户明确输入，不得从产品名推造。编辑可选，省略保留原名称。"},
         "workorder_type": {
             "type": "string",
             "enum": ["SELF", "OUTSOURCE", "PURCHASE"],
+            "description": "工单类型：SELF=自制，OUTSOURCE=委外，PURCHASE=外购。新增省略采用网页默认SELF；编辑省略保留原类型。",
         },
-        "order_source": {"type": "string", "minLength": 1, "maxLength": 64},
-        "source_code": {"type": "string", "maxLength": 64},
-        "batch_code": {"type": "string", "maxLength": 64},
+        "order_source": {"type": "string", "minLength": 1, "maxLength": 64,
+                          "description": "来源类型。新增必填：ORDER=客户订单、STORE=库存备货；编辑可选，省略保留原来源，提供才修改。"},
+        "source_code": {"type": "string", "maxLength": 64,
+                         "description": "来源单号，最多64字符；新增ORDER时可选，STORE新增时忽略并清空；编辑省略保留现值、明确提供才修改。ORDER可留空。"},
+        "batch_code": {"type": "string", "maxLength": 64,
+                        "description": "批次号，最多64字符，可选；新增提供时写入，编辑省略保留原值，提供才修改。"},
         "quantity": {
             "anyOf": [
-                {"type": "number", "exclusiveMinimum": 0},
+                {"type": "number", "minimum": 0.01, "maximum": 99999999},
                 {"type": "string", "pattern": r"^\d+(?:\.\d+)?$"},
-            ]
+            ],
+            "description": "生产数量，新增必填、编辑可选。范围0.01至99999999，有效最多两位小数；拒绝超精度，不四舍五入。编辑省略保留原数量。",
         },
         "request_date": {
             "type": "string",
+            "description": "需求日期，格式yyyy-MM-dd且必须是用户明确给出的有效日期，不猜今天或填具体示例日期。新增必填，编辑可选且省略保留原值。",
             "pattern": r"^\d{4}-\d{2}-\d{2}$",
         },
-        "client_id": {"type": "integer", "minimum": 0},
-        "client_code": {"type": "string", "maxLength": 64},
-        "client_name": {"type": "string", "maxLength": 255},
-        "parent_id": {"type": "integer", "minimum": 0},
-        "remark": {"type": "string", "maxLength": 500},
+        "client_id": {"type": "integer", "minimum": 0,
+                       "description": "客户ID，非负整数，可选，只使用用户或可信查询确认的值。新增STORE时忽略并清空、ORDER下可选；编辑省略保留原值，提供才修改。"},
+        "client_code": {"type": "string", "maxLength": 64,
+                         "description": "客户编码，最多64字符，可选。新增STORE时忽略并清空、ORDER下可选；编辑省略保留原值，提供才修改。"},
+        "client_name": {"type": "string", "maxLength": 255,
+                         "description": "客户名称，最多255字符，可选。新增STORE时忽略并清空、ORDER下可选；编辑省略保留原值，提供才修改。"},
+        "parent_id": {"type": "integer", "minimum": 0,
+                       "description": "父工单ID，非负整数，0和非0均允许，可选；新增省略默认0，编辑省略保留原值，提供才修改。"},
+        "remark": {"type": "string", "maxLength": 500,
+                    "description": "备注，最多500字符，可选；新增省略为空，编辑省略保留原备注，提供才修改。"},
     }
 
 
@@ -286,13 +331,14 @@ def _preview_tool(
     properties: JsonObject,
     required: tuple[str, ...],
     execute: object,
+    input_schema: JsonObject | None = None,
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
         version="1.0",
         description=description,
         label=label,
-        input_schema={
+        input_schema=input_schema or {
             "type": "object",
             "properties": properties,
             "required": list(required),
@@ -322,11 +368,12 @@ def _write_tool(
     return ToolDefinition(
         name=name,
         version="1.0",
-        description="仅执行服务器已绑定且由当前用户确认的一次性工单草稿预览。",
+        description="执行当前用户在可信网页明确确认的工单草稿预览。preview_id是服务器生成并绑定当前用户的一次性不透明标识，只能原样引用工具返回值，不得猜造或复用他人标识；没有网页确认不得执行。",
         label=label,
         input_schema={
             "type": "object",
-            "properties": {"preview_id": {"type": "string", "minLength": 1}},
+            "properties": {"preview_id": {"type": "string", "minLength": 1,
+                                          "description": "服务器生成并绑定当前登录用户的一次性预览ID；只能从本轮可信预览结果原样引用，不能由模型编造。调用代表网页用户已确认，模型不得自行调用。"}},
             "required": ["preview_id"],
             "additionalProperties": False,
         },
@@ -354,18 +401,36 @@ async def _preview_create(
     if isinstance(client, ToolResult):
         return client
     try:
-        product = await _resolve_product(client, arguments)
+        code_mode = arguments.get("code_mode")
+        if code_mode not in {"auto", "manual"}:
+            raise PreviewError("INVALID_CODE_MODE", "请选择工单编号自动生成或手工填写。")
+        workorder_code = _optional_text(arguments, "workorder_code")
+        if code_mode == "manual" and workorder_code is None:
+            raise PreviewError("WORKORDER_CODE_REQUIRED", "手工编号模式必须提供工单编号。")
+        if code_mode == "manual" and (workorder_code is None or len(workorder_code) > 64):
+            raise PreviewError("INVALID_WORKORDER_CODE", "工单编号不能为空且不能超过 64 个字符。")
+        workorder_name = _optional_text(arguments, "workorder_name")
+        if workorder_name is None:
+            raise PreviewError("WORKORDER_NAME_REQUIRED", "请提供工单名称（最多 255 个字符）。")
+        if len(workorder_name) > 255:
+            raise PreviewError("INVALID_WORKORDER_NAME", "工单名称不能超过 255 个字符。")
+        order_source = _optional_text(arguments, "order_source")
+        if order_source not in {"ORDER", "STORE"}:
+            raise PreviewError("INVALID_ORDER_SOURCE", "来源类型请选择客户订单（ORDER）或库存备货（STORE）。")
+        workorder_type = _optional_text(arguments, "workorder_type") or "SELF"
+        if workorder_type not in {"SELF", "OUTSOURCE", "PURCHASE"}:
+            raise PreviewError("INVALID_WORKORDER_TYPE", "工单类型请选择 SELF、OUTSOURCE 或 PURCHASE。")
         quantity = _quantity(arguments.get("quantity"))
         request_date = _request_date(arguments.get("request_date"))
         _validate_note(arguments.get("remark"))
-        workorder_code = _optional_text(arguments, "workorder_code")
-        if workorder_code is None:
-            workorder_code = await client.get_text(
-                "/system/autocode/get/WORKORDER_CODE"
-            )
-        workorder_name = _optional_text(arguments, "workorder_name")
-        if workorder_name is None:
-            workorder_name = f"{product['itemName']} 工单"
+        product = await _resolve_product(client, arguments)
+        if code_mode == "auto":
+            workorder_code = await client.get_text("/system/autocode/get/WORKORDER_CODE")
+        assert workorder_code is not None
+        if order_source == "STORE":
+            arguments = {**arguments, "source_code": "", "client_id": None,
+                         "client_code": None, "client_name": None}
+        arguments = {**arguments, "workorder_type": workorder_type}
         request = _create_request(
             arguments,
             product=product,
@@ -384,12 +449,19 @@ async def _preview_create(
     preview: JsonObject = {
         "kind": "workorder_draft_preview",
         "action": "create",
+        "code_mode": cast(str, code_mode),
         "product": _product_view(product),
         "quantity": quantity,
         "unitOfMeasure": product.get("unitOfMeasure"),
         "requestDate": request_date,
         "workorderCode": workorder_code,
         "workorderName": workorder_name,
+        "orderSource": order_source,
+        "sourceCode": request.get("sourceCode"),
+        "workorderType": workorder_type,
+        "remark": request.get("remark"),
+        "clientCode": request.get("clientCode"),
+        "clientName": request.get("clientName"),
         "changes": [
             {"field": key, "before": None, "after": value}
             for key, value in request.items()
@@ -404,7 +476,16 @@ async def _preview_create(
     preview["preview_id"] = preview_id
     preview["expires_in_seconds"] = 600
     return ToolResult(
-        content="已生成工单草稿创建预览，必须由当前用户确认后才能写入。",
+        content=(
+            "工单草稿预览已准备（尚未写入；需在网页确认）。"
+            f"编号：{workorder_code}（{'自动生成' if code_mode == 'auto' else '手工填写'}）；"
+            f"名称：{workorder_name}；来源：{order_source}"
+            f"{('，来源单号：' + str(request.get('sourceCode'))) if request.get('sourceCode') else ''}；"
+            f"类型：{workorder_type}；产品：{product.get('itemCode')} / {product.get('itemName')}；"
+            f"规格：{product.get('specification')}；单位：{product.get('unitOfMeasure')}；"
+            f"数量：{quantity}；需求日期：{request_date}；"
+            f"备注：{request.get('remark') or '无'}。网页确认后只保存草稿。"
+        ),
         details=preview,
         operation_id=preview_id,
     )
@@ -702,14 +783,23 @@ async def _resolve_product(
     if not candidates:
         raise PreviewError("PRODUCT_NOT_FOUND", "未找到符合条件的产品。")
     if len(candidates) != 1:
+        candidate_views = [
+            _product_view(_json_mapping(candidate)) for candidate in candidates
+        ]
+        candidate_limit = 20
+        visible_candidates = candidate_views[:candidate_limit]
         details: JsonObject = {
             "kind": "workorder_product_candidates",
-            "candidates": cast(
-                list[JsonValue],
-                [_product_view(_json_mapping(candidate)) for candidate in candidates],
-            ),
+            "candidates": cast(list[JsonValue], visible_candidates),
+            "total": len(candidate_views),
+            "truncated": len(candidate_views) > candidate_limit,
         }
-        raise _AmbiguousProduct(details)
+        candidate_summary = "；".join(
+            f"{row.get('itemCode', '无编码')} / {row.get('itemName', '无名称')}"
+            for row in visible_candidates
+        )
+        suffix = "；候选已截断，请提供更精确的产品编码" if len(candidate_views) > candidate_limit else ""
+        raise _AmbiguousProduct(details, candidate_summary, len(candidate_views), suffix)
     product = candidates[0]
     if (
         (product_code is not None and product.get("itemCode") != product_code)
@@ -759,8 +849,11 @@ async def _list_all_rows(
 
 
 class _AmbiguousProduct(PreviewError):
-    def __init__(self, details: JsonObject) -> None:
-        super().__init__("AMBIGUOUS_PRODUCT", "找到多个同名产品，请按编码选择。")
+    def __init__(self, details: JsonObject, summary: str, total: int, suffix: str) -> None:
+        super().__init__(
+            "AMBIGUOUS_PRODUCT",
+            f"找到 {total} 个匹配产品，无法确定唯一产品。候选：{summary}{suffix}。请按产品编码选择。",
+        )
         self.details = details
 
 
@@ -792,8 +885,8 @@ def _create_request(
     request: JsonObject = {
         "workorderCode": workorder_code,
         "workorderName": workorder_name,
-        "workorderType": _optional_text(arguments, "workorder_type") or "SELF",
-        "orderSource": _optional_text(arguments, "order_source") or "MANUAL",
+        "workorderType": _optional_text(arguments, "workorder_type"),
+        "orderSource": _optional_text(arguments, "order_source"),
         "productId": cast(int, product["itemId"]),
         "quantity": quantity,
         "requestDate": request_date,
@@ -929,6 +1022,7 @@ def _product_view(product: Mapping[str, JsonValue]) -> JsonObject:
         "itemId": product.get("itemId"),
         "itemCode": product.get("itemCode"),
         "itemName": product.get("itemName"),
+        "specification": product.get("specification"),
         "unitOfMeasure": product.get("unitOfMeasure"),
     }
 
@@ -944,8 +1038,10 @@ def _quantity(value: object) -> str:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError):
         raise PreviewError("INVALID_QUANTITY", "生产数量必须是有效数字。") from None
-    if not number.is_finite() or number <= 0:
-        raise PreviewError("INVALID_QUANTITY", "生产数量必须大于 0。")
+    exponent = number.normalize().as_tuple().exponent
+    if (not number.is_finite() or number < Decimal("0.01")
+            or number > Decimal("99999999") or (isinstance(exponent, int) and exponent < -2)):
+        raise PreviewError("INVALID_QUANTITY", "生产数量必须在 0.01 到 99999999 之间，最多两位小数。")
     text = format(number, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 

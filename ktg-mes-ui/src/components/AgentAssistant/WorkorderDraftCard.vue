@@ -6,7 +6,7 @@
     </header>
 
     <template v-if="result.kind === 'workorder_product_candidates'">
-      <p class="draft-card__hint">找到多个同名产品，请按编码选择后重新生成预览。</p>
+      <p class="draft-card__hint">{{ candidateHint }}</p>
       <button
         v-for="candidate in result.candidates || []"
         :key="candidate.itemId"
@@ -22,9 +22,16 @@
     <template v-else>
       <dl class="draft-card__facts">
         <div v-if="productName"><dt>产品</dt><dd>{{ productName }}</dd></div>
+        <div v-if="result.product && result.product.specification"><dt>规格型号</dt><dd>{{ result.product.specification }}</dd></div>
+        <div v-if="result.workorderName"><dt>工单名称</dt><dd>{{ result.workorderName }}</dd></div>
         <div v-if="result.workorderCode"><dt>工单编号</dt><dd>{{ result.workorderCode }}</dd></div>
+        <div v-if="result.code_mode"><dt>编号方式</dt><dd>{{ result.code_mode === 'auto' ? '自动生成' : '手工填写' }}</dd></div>
+        <div v-if="result.orderSource"><dt>来源类型</dt><dd>{{ orderSourceLabel(result.orderSource) }}</dd></div>
+        <div v-if="result.sourceCode"><dt>来源单号</dt><dd>{{ result.sourceCode }}</dd></div>
+        <div v-if="result.workorderType"><dt>工单类型</dt><dd>{{ formatType(result.workorderType) }}</dd></div>
         <div v-if="result.quantity !== undefined"><dt>数量</dt><dd>{{ result.quantity }} {{ unit }}</dd></div>
         <div v-if="result.requestDate"><dt>需求日期</dt><dd>{{ shortDate(result.requestDate) }}</dd></div>
+        <div v-if="result.remark"><dt>备注</dt><dd>{{ result.remark }}</dd></div>
         <div v-if="result.workorderId"><dt>工单 ID</dt><dd>{{ result.workorderId }}</dd></div>
         <div v-if="result.version !== undefined"><dt>版本</dt><dd>{{ result.version }}</dd></div>
         <div v-if="result.kind === 'workorder_draft_result' && result.bom_verified !== undefined">
@@ -66,7 +73,7 @@
 </template>
 
 <script>
-import { formatWorkorderValue, workorderFieldLabel } from './workorderPresentation'
+import { formatProductCandidatesHint, formatWorkorderType, formatWorkorderValue, workorderFieldLabel } from './workorderPresentation'
 
 export default {
   name: 'AgentWorkorderDraftCard',
@@ -77,9 +84,10 @@ export default {
   },
   computed: {
     isPreview() { return this.result.kind === 'workorder_draft_preview' },
+    candidateHint() { return formatProductCandidatesHint(this.result) },
     title() {
       if (this.result.kind === 'workorder_product_candidates') return '请选择产品'
-      if (this.isPreview) return this.result.action === 'edit' ? '工单草稿修改预览' : '工单草稿创建预览'
+      if (this.isPreview) return this.result.action === 'edit' ? '工单草稿修改预览' : '添加生产工单预览'
       return this.result.label || '工单操作结果'
     },
     tone() {
@@ -99,6 +107,12 @@ export default {
   methods: {
     fieldLabel: workorderFieldLabel,
     valueText: formatWorkorderValue,
+    formatType: formatWorkorderType,
+    orderSourceLabel(value) {
+      if (value === 'ORDER') return '客户订单'
+      if (value === 'STORE') return '库存备货'
+      return value
+    },
     shortDate(value) { return String(value).slice(0, 10) }
   }
 }
