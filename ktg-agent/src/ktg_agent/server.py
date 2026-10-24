@@ -23,6 +23,7 @@ from ktg_agent.context.window import ContextPolicy
 from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.ktg.workorders import PreviewStore
+from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -59,6 +60,8 @@ class Settings:
     max_active_tools: int = 8
     max_schema_tokens: int = 6000
     workorder_db_path: str = ""
+    dv_machinerytype_db_path: str = ""
+    enable_dv_machinerytype_write: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -150,6 +153,9 @@ class Settings:
             inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
             session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
             workorder_db_path=os.environ.get("AGENT_WORKORDER_DB", "").strip(),
+            dv_machinerytype_db_path=os.environ.get("AGENT_DV_MACHINERYTYPE_DB", "").strip(),
+            enable_dv_machinerytype_write=os.environ.get(
+                "AGENT_ENABLE_DV_MACHINERYTYPE_WRITE", "false").lower() == "true",
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
             enable_workorder_progress=os.environ.get("AGENT_ENABLE_WORKORDER_PROGRESS", "false").lower() == "true",
@@ -230,6 +236,28 @@ def create_service(settings: Settings) -> QueryService:
                                  ("AGENT_INVENTORY_DB", settings.inventory_db_path)):
             if db_path and proposal_path.resolve() == Path(db_path).resolve():
                 raise RuntimeError(f"AGENT_WORKORDER_DB must differ from {db_name}")
+    dv_machinerytype_db_path = settings.dv_machinerytype_db_path
+    if settings.enable_dv_machinerytype_write:
+        if not dv_machinerytype_db_path:
+            if settings.session_db_path:
+                session_path = Path(settings.session_db_path)
+                if not session_path.is_absolute():
+                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
+                dv_machinerytype_db_path = str(
+                    session_path.with_name("agent-dv-machinerytype.sqlite3"))
+            else:
+                dv_machinerytype_db_path = str(
+                    Path.home() / ".ktg-agent" / "agent-dv-machinerytype.sqlite3")
+        dv_path = Path(dv_machinerytype_db_path)
+        if not dv_path.is_absolute():
+            raise RuntimeError("AGENT_DV_MACHINERYTYPE_DB must be an absolute path")
+        for db_name, db_path in (
+                ("AGENT_SESSION_DB", settings.session_db_path),
+                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
+                ("AGENT_WORKORDER_DB", workorder_db_path)):
+            if db_path and dv_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError(
+                    f"AGENT_DV_MACHINERYTYPE_DB must differ from {db_name}")
     return QueryService(
         provider=provider,
         model_config=model_config,
@@ -237,6 +265,9 @@ def create_service(settings: Settings) -> QueryService:
         inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
         inventory_actions=actions,
         workorder_store=PreviewStore(path=workorder_db_path or ":memory:"),
+        dv_machinerytype_store=(
+            DvMachineryTypePreviewStore(path=dv_machinerytype_db_path)
+            if settings.enable_dv_machinerytype_write else None),
         spill_settings=(
             SpillSettings(settings.spill_max_inline_tokens, Path(settings.spill_dir))
             if settings.spill_max_inline_tokens is not None and settings.spill_dir else None
@@ -374,6 +405,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
+            "/agent-api/v1/dv-machinerytype/confirm",
             "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -443,6 +475,15 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     self.server.query_service.confirm(
                         preview_id=preview_id,
                         authorization=authorization,
+                    )
+                )
+            elif self.path == "/agent-api/v1/dv-machinerytype/confirm":
+                preview_id = payload.get("preview_id")
+                if not isinstance(preview_id, str):
+                    raise ValueError("preview_id 必须是文本。")
+                response = asyncio.run(
+                    self.server.query_service.confirm_dv_machinerytype(
+                        preview_id=preview_id, authorization=authorization,
                     )
                 )
             else:

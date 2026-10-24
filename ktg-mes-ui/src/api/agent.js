@@ -94,6 +94,17 @@ export function confirmInventoryOperation(operationId) {
   })
 }
 
+export function confirmDvMachineryType(previewId) {
+  return request({
+    baseURL: '',
+    url: '/agent-api/v1/dv-machinerytype/confirm',
+    method: 'post',
+    data: { preview_id: previewId },
+    timeout: 120000,
+    headers: { repeatSubmit: false }
+  })
+}
+
 export function getInventoryOperation(operationId) {
   return request({
     baseURL: '', url: '/agent-api/v1/inventory-operations/' + encodeURIComponent(operationId),

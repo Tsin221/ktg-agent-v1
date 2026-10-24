@@ -92,6 +92,13 @@ global.window = { crypto: { randomUUID: () => `request-${++generatedIds}` },
   } }
 new Function('exports', 'module', 'require', code)(componentModule.exports, componentModule, mockRequire)
 const options = componentModule.exports.default
+const templateContent = compiler.parseComponent(fs.readFileSync(componentPath, 'utf8')).template.content
+for (const match of templateContent.matchAll(/<(agent-[a-z0-9-]+)/g)) {
+  const tag = match[1]
+  const camel = tag.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase())
+  const pascal = camel.charAt(0).toUpperCase() + camel.slice(1)
+  assert.ok(options.components[pascal], `unregistered component tag: ${tag} -> ${pascal}`)
+}
 const view = {
   ...options.data(),
   $route: { name: 'Stock', query: { itemCode: 'A-01' } },

@@ -36,6 +36,11 @@ from ktg_agent.ktg.inventory import (
 )
 from ktg_agent.ktg.production_queries import (build_production_query_tools,
     production_query_factories, production_query_manifests)
+from ktg_agent.ktg.dv_machinerytype import (build_dv_machinerytype_tools,
+    dv_machinerytype_factories, dv_machinerytype_manifests)
+from ktg_agent.ktg.dv_machinerytype_writes import (APPLY_CREATE, APPLY_UPDATE,
+    DvMachineryTypePreviewStore, build_dv_machinerytype_write_tools,
+    dv_machinerytype_write_factories, dv_machinerytype_write_manifests)
 from ktg_agent.ktg.workorder_progress import (build_workorder_progress_tool,
     workorder_progress_factories, workorder_progress_manifests)
 from ktg_agent.ktg.client import KTGError
@@ -60,6 +65,7 @@ SYSTEM_PROMPT = """你是 KTG MES 的业务助手。
 必须通过已注册工具查询事实，不得猜测产品、库存或工单数据。
 所有查询都使用当前网页登录用户的身份和权限；权限不足时如实说明，不能改用其他身份。
 允许查询产品资料、分仓库存和生产工单，也可以为用户明确要求的工单草稿创建或编辑生成预览。
+设备分类支持查询树和详情；新增、改名、启停只生成预览，仍需网页确认；删除设备分类和修改父类型不支持，应让用户在页面或联系管理员处理。设备分类可能重名，按名称命中多个时必须让用户按 ID 或路径确认。
 创建或编辑前必须调用对应预览工具；产品不唯一时必须让用户按编码选择，不能自行猜测。
 预览工具不会创建或编辑工单，但自动编号可能推进编号流水。实际业务单据写入只能由网页上的确认操作触发，不能要求用户在对话中提供确认令牌，不能声称自己已经写入。
 对于已准备的物料入库单和生产领料单，可以按准确单据编号或 ID 生成只读执行预览；执行只能由网页确认触发，结果必须以持久回执为准。
@@ -79,6 +85,7 @@ class QueryService:
         inventory_store: InventoryStore | None = None,
         inventory_actions: frozenset[str] = frozenset(),
         workorder_store: PreviewStore | None = None,
+        dv_machinerytype_store: DvMachineryTypePreviewStore | None = None,
         limits: RunLimits | None = None,
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
@@ -92,6 +99,7 @@ class QueryService:
         self._model_config = model_config
         self._ktg_client_factory = ktg_client_factory
         self._preview_store = workorder_store or PreviewStore(ttl_seconds=600)
+        self._dv_machinerytype_store = dv_machinerytype_store
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
         self._spill = spill_settings
@@ -104,14 +112,22 @@ class QueryService:
         definitions = (*build_query_tools(), *build_workorder_tools(self._preview_store),
                        *(build_inventory_tools(inventory_store, inventory_actions)
                          if inventory_store else ()),
-                       *build_production_query_tools())
+                       *build_production_query_tools(),
+                       *build_dv_machinerytype_tools())
         if inventory_store and inventory_actions:
             definitions = (*definitions, build_inventory_result_tool(inventory_store))
         progress = build_workorder_progress_tool()
         definitions = (*definitions, progress)
+        write_definitions = (build_dv_machinerytype_write_tools(dv_machinerytype_store)
+                             if dv_machinerytype_store else ())
+        definitions = (*definitions, *write_definitions)
         self._registry = ToolRegistry(definitions)
-        extra_factories = {**production_query_factories(), **workorder_progress_factories()}
-        extra_manifests = (*production_query_manifests(), *workorder_progress_manifests())
+        extra_factories = {**production_query_factories(), **workorder_progress_factories(),
+                           **dv_machinerytype_factories(),
+                           **dv_machinerytype_write_factories(write_definitions)}
+        extra_manifests = (*production_query_manifests(), *workorder_progress_manifests(),
+                           *dv_machinerytype_manifests(),
+                           *dv_machinerytype_write_manifests(write_definitions))
         if inventory_store and inventory_actions:
             result_tool = next(item for item in definitions if item.name == "ktg_wm_operation_result")
             stock = PermissionAny((PermissionLeaf("mes:wm:wmstock:list"), PermissionLeaf("mes:wm:wmstock:query")))
@@ -130,7 +146,7 @@ class QueryService:
             extra_manifests = (*extra_manifests, result_manifest)
         self._catalog = build_legacy_catalog(definitions, extra_manifests=extra_manifests,
                                              extra_factories=extra_factories)
-        enabled_modules = {"md": True, "wm": True, "pro": True}
+        enabled_modules = {"md": True, "wm": True, "pro": True, "dv": True}
         enabled_tools = {definition.name: (enable_workorder_progress or definition.name != "ktg_pro_workorder_progress")
                          for definition in definitions}
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
@@ -483,6 +499,44 @@ class QueryService:
             operation_id,
         )
         return {"result": result}
+
+    async def confirm_dv_machinerytype(self, *, preview_id: str, authorization: str) -> JsonObject:
+        store = self._dv_machinerytype_store
+        if store is None:
+            raise ValueError("设备分类写入未启用。")
+        clean_preview_id = preview_id.strip()
+        if not clean_preview_id or len(clean_preview_id) > 100:
+            raise ValueError("preview_id 无效。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        user_key = self._identity_key(identity)
+        try:
+            action = store.action_for(preview_id=clean_preview_id, user_key=user_key)
+        except PreviewError as exc:
+            return {"result": {
+                "kind": "dv_machinerytype_result", "outcome": "failed",
+                "label": str(exc), "error_code": exc.code, "preview_id": clean_preview_id,
+            }}
+        tool_name = (APPLY_CREATE if action == "create" else APPLY_UPDATE)
+        call_id = str(uuid4())
+        result = await self._tool_runner().run(
+            ToolCall(call_id, tool_name, {"operation_id": clean_preview_id}),
+            ToolContext(
+                run_id=str(uuid4()), tool_call_id=call_id,
+                operation_id=clean_preview_id,
+                channel=ToolChannel.TRUSTED_CONFIRMATION,
+                confirmation_id=call_id, identity=identity, ktg_client=client,
+            ),
+        )
+        details = result.details or {
+            "kind": "dv_machinerytype_result",
+            "outcome": ("unknown" if result.status is ToolStatus.UNKNOWN else
+                        "failed" if result.is_error else "succeeded"),
+            "label": result.content, "preview_id": clean_preview_id,
+        }
+        if result.error_code is not None:
+            details["error_code"] = result.error_code
+        return {"result": details}
 
     @staticmethod
     def _identity_key(identity: JsonObject) -> str:

@@ -33,7 +33,7 @@
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <div class="agent-message agent-message--assistant">
-          我可以查询产品、分仓库存和生产工单。启用库存操作后，还可预览已准备的物料入库单和生产领料单。
+          我可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。
         </div>
         <button
           v-for="example in examples"
@@ -67,6 +67,13 @@
               @confirm="confirmInventory"
               @refresh="refreshInventory"
               @view="viewInventory"
+            />
+            <agent-dv-machinery-type-card
+              v-else-if="isDvMachineryTypeResult(result)"
+              :result="result"
+              :confirming="confirmingDvPreviewId === result.preview_id"
+              :completed="completedDvPreviewIds.includes(result.preview_id)"
+              @confirm="confirmDvPreview"
             />
             <agent-result-card v-else :result="result" />
           </div>
@@ -150,10 +157,12 @@
 
 <script>
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
-  getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation } from '@/api/agent'
+  getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
+  confirmDvMachineryType } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
+import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText,
@@ -175,7 +184,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard },
   data() {
     return {
       open: false,
@@ -203,8 +212,10 @@ export default {
       unsubscribeStore: null,
       confirmingPreviewId: '',
       confirmingInventoryId: '',
+      confirmingDvPreviewId: '',
       completedInventoryIds: [],
       completedPreviewIds: [],
+      completedDvPreviewIds: [],
       messages: [],
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
@@ -233,7 +244,8 @@ export default {
     },
     busy() {
       return this.loading || this.sessionLoading || (this.activeRun && !isTerminalRun(this.activeRun.status)) ||
-        Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId)
+        Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId) ||
+        Boolean(this.confirmingDvPreviewId)
     }
   },
   mounted() {
@@ -262,6 +274,7 @@ export default {
         businessMessages: this.businessMessages,
         completedPreviewIds: this.completedPreviewIds,
         completedInventoryIds: this.completedInventoryIds,
+        completedDvPreviewIds: this.completedDvPreviewIds,
         pastInputs: this.pastInputs,
         pendingSubmission: this.pendingSubmission,
         inputAttempt: this.inputAttempt,
@@ -276,6 +289,7 @@ export default {
       this.businessMessages = state.businessMessages || []
       this.completedPreviewIds = state.completedPreviewIds || []
       this.completedInventoryIds = state.completedInventoryIds || []
+      this.completedDvPreviewIds = state.completedDvPreviewIds || []
       this.pastInputs = state.pastInputs || []
       this.pendingSubmission = state.pendingSubmission || null
       this.inputAttempt = state.inputAttempt || null
@@ -309,8 +323,10 @@ export default {
       this.sessionLoading = false
       this.completedInventoryIds = []
       this.completedPreviewIds = []
+      this.completedDvPreviewIds = []
       this.confirmingInventoryId = ''
       this.confirmingPreviewId = ''
+      this.confirmingDvPreviewId = ''
     },
     async bootstrap() {
       if (!agentSession.checkIdentity()) return
@@ -726,6 +742,11 @@ export default {
     isInventoryResult(result) {
       return result && ['inventory_preview', 'inventory_result'].includes(result.kind)
     },
+    isDvMachineryTypeResult(result) {
+      return result && ['dv_machinerytype_tree', 'dv_machinerytype_detail',
+        'dv_machinerytype_preview', 'dv_machinerytype_create_result',
+        'dv_machinerytype_update_result', 'dv_machinerytype_result'].includes(result.kind)
+    },
     showInventoryResult(result) {
       const id = `confirm-inventory-${result.operation_id}`
       const entry = { id, role: 'assistant', text: '', results: [result] }
@@ -776,6 +797,45 @@ export default {
       const isReceipt = result.action_type === 'ITEM_RECEIPT_EXECUTE'
       this.$router.push({ path: isReceipt ? '/mes/wm/itemrecpt' : '/mes/wm/issue',
         query: isReceipt ? { recptId: result.document_id } : { issueId: result.document_id }}).catch(() => {})
+    },
+    async confirmDvPreview(previewId) {
+      if (!previewId || this.confirmingDvPreviewId || this.completedDvPreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingDvPreviewId = previewId
+      this.completedDvPreviewIds.push(previewId)
+      const entryId = `confirm-dv-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '设备分类确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmDvMachineryType(previewId)
+        if (epoch !== this.epoch) return
+        const result = response.result
+        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
+          id: entryId,
+          role: 'assistant',
+          text: result.outcome === 'succeeded' ? '设备分类已写入并完成回读核验。' : (result.label || '设备分类操作未完成。'),
+          results: [result]
+        })
+        this.saveLocalState()
+        if (result.outcome === 'succeeded') {
+          window.dispatchEvent(new CustomEvent('ktg:dv-machinerytype-changed', { detail: result }))
+        }
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
+          id: entryId,
+          role: 'assistant',
+          text: message || '确认请求失败。系统不会自动重新提交，请先核对设备类型列表。'
+        })
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) {
+          this.confirmingDvPreviewId = ''
+          this.scrollToBottom()
+        }
+      }
     },
     async confirmPreview(previewId) {
       if (!previewId || this.confirmingPreviewId || this.completedPreviewIds.includes(previewId)) return

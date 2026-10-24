@@ -35,9 +35,13 @@
           <strong>{{ row.taskCode || row.processName || `报工 ${row.recordId}` }}</strong>
           <span>{{ row.feedbackTime || '-' }} · 合格 {{ row.quantityQualified == null ? '—' : row.quantityQualified }} {{ row.unitOfMeasure || '' }}</span>
         </template>
-        <template v-else>
+        <template v-else-if="result.kind === 'workorders'">
           <strong>{{ row.workorderCode || '未编号工单' }}</strong>
           <span>{{ row.workorderName || row.productName || '-' }} · {{ row.status || '未知状态' }}</span>
+        </template>
+        <template v-else>
+          <strong>{{ row.path || row.machineryTypeName || row.itemName || '记录' }}</strong>
+          <span>{{ row.machineryTypeCode || row.itemCode || row.status || '-' }}</span>
         </template>
       </div>
     </div>
