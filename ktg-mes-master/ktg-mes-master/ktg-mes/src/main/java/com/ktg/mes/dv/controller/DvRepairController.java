@@ -74,7 +74,7 @@ public class DvRepairController extends BaseController
     /**
      * 新增设备维修单
      */
-    @PreAuthorize("@ss.hasPermi('dv:repair:add')")
+    @PreAuthorize("@ss.hasPermi('mes:dv:repair:add')")
     @Log(title = "设备维修单", businessType = BusinessType.INSERT)
     @PostMapping
     public AjaxResult add(@RequestBody DvRepair dvRepair)
