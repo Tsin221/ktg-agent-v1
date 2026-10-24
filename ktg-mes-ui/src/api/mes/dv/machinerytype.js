@@ -34,11 +34,3 @@ export function updateMachinerytype(data) {
     data: data
   })
 }
-
-// 删除设备类型
-export function delMachinerytype(machineryTypeId) {
-  return request({
-    url: '/mes/dv/machinerytype/' + machineryTypeId,
-    method: 'delete'
-  })
-}

@@ -3,10 +3,7 @@ package com.ktg.mes.dv.controller;
 import java.util.List;
 import javax.servlet.http.HttpServletResponse;
 
-import cn.hutool.core.collection.CollUtil;
 import com.ktg.common.constant.UserConstants;
-import com.ktg.mes.dv.domain.DvMachinery;
-import com.ktg.mes.dv.service.IDvMachineryService;
 import com.ktg.system.strategy.AutoCodeUtil;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,9 +35,6 @@ public class DvMachineryTypeController extends BaseController
 {
     @Autowired
     private IDvMachineryTypeService dvMachineryTypeService;
-
-    @Autowired
-    private IDvMachineryService dvMachineryService;
 
     @Autowired
     private AutoCodeUtil autoCodeUtil;
@@ -109,16 +103,7 @@ public class DvMachineryTypeController extends BaseController
 	@DeleteMapping("/{machineryTypeIds}")
     public AjaxResult remove(@PathVariable Long[] machineryTypeIds)
     {
-        for (Long typeId:machineryTypeIds
-             ) {
-            DvMachinery param = new DvMachinery();
-            param.setMachineryId(typeId);
-            List<DvMachinery> machinerys = dvMachineryService.selectDvMachineryList(param);
-            if(CollUtil.isNotEmpty(machinerys)){
-                return AjaxResult.error("设备类型下已配置了设备，不能删除！");
-            }
-        }
-
-        return toAjax(dvMachineryTypeService.deleteDvMachineryTypeByMachineryTypeIds(machineryTypeIds));
+        // 删除功能已停用：原删除校验存在缺陷，可能删除父类型并留下孤儿节点/悬空设备引用
+        return AjaxResult.error("设备类型删除功能已停用；如需清理请联系系统管理员。");
     }
 }

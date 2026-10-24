@@ -56,14 +56,6 @@
             @click="handleAdd(scope.row)"
             v-hasPermi="['mes:dv:machinerytype:add']"
           >新增</el-button>
-          <el-button
-            v-if="scope.row.parentTypeId != 0"
-            size="mini"
-            type="text"
-            icon="el-icon-delete"
-            @click="handleDelete(scope.row)"
-            v-hasPermi="['mes:dv:machinerytype:remove']"
-          >删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -72,7 +64,7 @@
     <el-dialog :title="title" :visible.sync="open" width="700px" append-to-body>
       <el-form ref="form" :model="form" :rules="rules" label-width="120px">
         <el-row>
-          <el-col :span="24" v-if="form.parentTypeId !== 0">
+          <el-col :span="24" v-if="form.machineryTypeId == null">
             <el-form-item label="父类型" prop="parentTypeId">
               <treeselect v-model="form.parentTypeId" :options="machinerytypeOptions" :normalizer="normalizer" placeholder="请选择父类型" />
             </el-form-item>
@@ -120,7 +112,7 @@
 </template>
 
 <script>
-import { listMachinerytype, getMachinerytype, delMachinerytype, addMachinerytype, updateMachinerytype } from "@/api/mes/dv/machinerytype";
+import { listMachinerytype, getMachinerytype, addMachinerytype, updateMachinerytype } from "@/api/mes/dv/machinerytype";
 import Treeselect from "@riophae/vue-treeselect";
 import "@riophae/vue-treeselect/dist/vue-treeselect.css";
 
@@ -279,15 +271,6 @@ export default {
           }
         }
       });
-    },
-    /** 删除按钮操作 */
-    handleDelete(row) {
-      this.$modal.confirm('是否确认删除设备类型编号为"' + row.machineryTypeId + '"的数据项？').then(function() {
-        return delMachinerytype(row.machineryTypeId);
-      }).then(() => {
-        this.getList();
-        this.$modal.msgSuccess("删除成功");
-      }).catch(() => {});
     }
   }
 };
