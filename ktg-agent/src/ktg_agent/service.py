@@ -46,6 +46,10 @@ from ktg_agent.ktg.dv_subject_writes import (APPLY_CREATE as SUBJECT_APPLY_CREAT
     APPLY_UPDATE as SUBJECT_APPLY_UPDATE, APPLY_DELETE as SUBJECT_APPLY_DELETE,
     DvSubjectPreviewStore, build_dv_subject_write_tools,
     dv_subject_write_factories, dv_subject_write_manifests)
+from ktg_agent.ktg.dv_checkplan import build_dv_checkplan_tools, dv_checkplan_factories, dv_checkplan_manifests
+from ktg_agent.ktg.dv_checkplan_writes import (APPLY_NAMES as CHECKPLAN_APPLY_NAMES,
+    DvCheckPlanPreviewStore, build_dv_checkplan_write_tools, dv_checkplan_write_factories,
+    dv_checkplan_write_manifests)
 from ktg_agent.ktg.dv_machinery import (build_dv_machinery_tools,
     dv_machinery_factories, dv_machinery_manifests)
 from ktg_agent.ktg.dv_machinery_writes import (APPLY_CREATE as MACHINERY_APPLY_CREATE,
@@ -87,6 +91,7 @@ SYSTEM_PROMPT = """你是 KTG MES 的业务助手。
 库存结果要说明仓库、数量和单位；分页结果必须说明当前返回条数与总数，不能把当前页合计称为全部库存。
 询问产品总数时使用 ktg_count_products 返回的总数，不要求用户提供筛选词；产品与物料分别统计，不得混为一谈。
 用户追问“都是哪几条”或要求列出产品时，使用 ktg_search_items 不带编码和名称按页查询产品；总数结果不包含产品明细，不能凭总数编造名称。
+点检保养计划支持按计划、字典、已关联明细和候选分页查询。计划编号重码时必须按ID消歧；周期次数是新增必填项，缺失先询问。创建只接受用户手工编号，不取自动编号。只能预览草稿编辑、有限启用/停用和单条草稿删除/关联；状态FINISHED在此页面表示启用。关联设备之前检查同类型其他计划（包括草稿）的冲突；项目候选只允许启用且类型匹配。关联快照为历史数据，不同步、不去重。预览不是写入；只有网页可信确认执行。UNKNOWN结果先按计划/关联重新查询，禁止再次确认同一个未知写操作。
 回答使用简洁中文。"""
 
 
@@ -103,6 +108,7 @@ class QueryService:
         dv_machinerytype_store: DvMachineryTypePreviewStore | None = None,
         dv_machinery_store: DvMachineryPreviewStore | None = None,
         dv_subject_store: DvSubjectPreviewStore | None = None,
+        dv_checkplan_store: DvCheckPlanPreviewStore | None = None,
         limits: RunLimits | None = None,
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
@@ -119,6 +125,7 @@ class QueryService:
         self._dv_machinerytype_store = dv_machinerytype_store
         self._dv_machinery_store = dv_machinery_store
         self._dv_subject_store = dv_subject_store
+        self._dv_checkplan_store = dv_checkplan_store
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
         self._spill = spill_settings
@@ -133,7 +140,7 @@ class QueryService:
                          if inventory_store else ()),
                        *build_production_query_tools(),
                        *build_dv_machinerytype_tools(),
-                       *build_dv_machinery_tools(), *build_dv_subject_tools())
+                       *build_dv_machinery_tools(), *build_dv_subject_tools(), *build_dv_checkplan_tools())
         if inventory_store and inventory_actions:
             definitions = (*definitions, build_inventory_result_tool(inventory_store))
         progress = build_workorder_progress_tool()
@@ -146,17 +153,23 @@ class QueryService:
         definitions = (*definitions, *machinery_write_definitions)
         subject_write_definitions = (build_dv_subject_write_tools(dv_subject_store) if dv_subject_store else ())
         definitions = (*definitions, *subject_write_definitions)
+        checkplan_write_definitions = (build_dv_checkplan_write_tools(dv_checkplan_store) if dv_checkplan_store else ())
+        definitions = (*definitions, *checkplan_write_definitions)
         self._registry = ToolRegistry(definitions)
         extra_factories = {**production_query_factories(), **workorder_progress_factories(),
                            **dv_machinerytype_factories(),
                            **dv_machinery_factories(), **dv_subject_factories(),
+                           **dv_checkplan_factories(),
                            **dv_subject_write_factories(subject_write_definitions),
+                           **dv_checkplan_write_factories(checkplan_write_definitions),
                            **dv_machinery_write_factories(machinery_write_definitions),
                            **dv_machinerytype_write_factories(write_definitions)}
         extra_manifests = (*production_query_manifests(), *workorder_progress_manifests(),
                            *dv_machinerytype_manifests(),
                            *dv_machinery_manifests(), *dv_subject_manifests(),
+                           *dv_checkplan_manifests(),
                            *dv_subject_write_manifests(subject_write_definitions),
+                           *dv_checkplan_write_manifests(checkplan_write_definitions),
                            *dv_machinery_write_manifests(machinery_write_definitions),
                            *dv_machinerytype_write_manifests(write_definitions))
         if inventory_store and inventory_actions:
@@ -653,6 +666,39 @@ class QueryService:
                         "failed" if result.is_error else "succeeded"),
             "label": result.content, "preview_id": clean_preview_id,
         }
+        if result.error_code is not None:
+            details["error_code"] = result.error_code
+        return {"result": details}
+
+    async def confirm_dv_checkplan(self, *, preview_id: str, authorization: str) -> JsonObject:
+        store = self._dv_checkplan_store
+        if store is None:
+            raise ValueError("点检保养计划写入未启用。")
+        clean_preview_id = preview_id.strip()
+        if not 36 <= len(clean_preview_id) <= 100:
+            raise ValueError("preview_id 无效。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        user_key = self._identity_key(identity)
+        try:
+            action = store.action_for(clean_preview_id, user_key)
+        except PreviewError as exc:
+            return {"result": {"kind": "dv_checkplan_result", "action": "unknown",
+                "outcome": "failed", "verified": False, "label": str(exc),
+                "error_code": exc.code, "preview_id": clean_preview_id}}
+        apply_name = CHECKPLAN_APPLY_NAMES.get(action)
+        if apply_name is None:
+            raise ValueError("计划预览操作类型无效。")
+        call_id = str(uuid4())
+        result = await self._tool_runner().run(
+            ToolCall(call_id, apply_name, {"operation_id": clean_preview_id}),
+            ToolContext(run_id=str(uuid4()), tool_call_id=call_id, operation_id=clean_preview_id,
+                channel=ToolChannel.TRUSTED_CONFIRMATION, confirmation_id=call_id,
+                identity=identity, ktg_client=client),
+        )
+        details = result.details or {"kind": "dv_checkplan_result", "action": action,
+            "outcome": "unknown" if result.status is ToolStatus.UNKNOWN else "failed" if result.is_error else "succeeded",
+            "verified": False, "label": result.content, "preview_id": clean_preview_id}
         if result.error_code is not None:
             details["error_code"] = result.error_code
         return {"result": details}

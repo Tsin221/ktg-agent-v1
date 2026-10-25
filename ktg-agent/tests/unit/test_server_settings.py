@@ -145,3 +145,33 @@ def test_workorder_proposal_default_rejects_collision_with_inventory_database(
 
     with pytest.raises(RuntimeError, match="must differ from AGENT_INVENTORY_DB"):
         create_service(Settings.from_env())
+
+
+def test_checkplan_write_flag_defaults_off_and_requires_isolated_absolute_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _set_valid_environment(monkeypatch)
+    monkeypatch.setenv("AGENT_SESSION_DB", str(tmp_path / "session.sqlite3"))
+    monkeypatch.setenv("AGENT_WORKORDER_DB", str(tmp_path / "workorder.sqlite3"))
+    monkeypatch.setenv("AGENT_INVENTORY_DB", str(tmp_path / "inventory.sqlite3"))
+    monkeypatch.delenv("AGENT_ENABLE_DV_CHECKPLAN_WRITE", raising=False)
+    monkeypatch.delenv("AGENT_DV_CHECKPLAN_DB", raising=False)
+    disabled = create_service(Settings.from_env())
+    assert disabled._dv_checkplan_store is None
+    assert Settings.from_env().enable_dv_checkplan_write is False
+
+    monkeypatch.setenv("AGENT_ENABLE_DV_CHECKPLAN_WRITE", "true")
+    with pytest.raises(RuntimeError, match="AGENT_DV_CHECKPLAN_DB"):
+        create_service(Settings.from_env())
+    monkeypatch.setenv("AGENT_DV_CHECKPLAN_DB", "relative.sqlite3")
+    with pytest.raises(RuntimeError, match="absolute"):
+        create_service(Settings.from_env())
+
+    path = tmp_path / "checkplan.sqlite3"
+    monkeypatch.setenv("AGENT_DV_CHECKPLAN_DB", str(path))
+    enabled_service = create_service(Settings.from_env())
+    assert enabled_service._dv_checkplan_store is not None
+    assert enabled_service._dv_checkplan_store.path == str(path)
+    monkeypatch.setenv("AGENT_SESSION_DB", str(path))
+    with pytest.raises(RuntimeError, match="must differ from AGENT_SESSION_DB"):
+        create_service(Settings.from_env())

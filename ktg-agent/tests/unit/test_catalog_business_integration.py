@@ -98,8 +98,8 @@ def test_service_assembles_complete_candidate_set_and_keeps_experiment_off(tmp_p
     catalog = service._catalog
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
     candidates = catalog.candidate_snapshot(admin, service._switches_provider())
-    assert len(catalog._manifests) == 26  # includes two read-only inspection/maintenance subject tools
-    assert len(candidates.candidates) == 21
+    assert len(catalog._manifests) == 32  # includes read-only inspection/maintenance subject and plan tools
+    assert len(candidates.candidates) == 27
     assert len(service.model_tool_schemas) == 2  # search_tools and load_tools
     for name, manifest in catalog._manifests.items():
         assert catalog.resolve_definition(name, manifest.version).name == name
@@ -107,6 +107,9 @@ def test_service_assembles_complete_candidate_set_and_keeps_experiment_off(tmp_p
     assert {"ktg_dv_machinerytype_tree", "ktg_dv_machinerytype_detail"} <= set(candidates.candidates)
     assert {"ktg_dv_machinery_list", "ktg_dv_machinery_detail",
             "ktg_md_machinery_workshop_options"} <= set(candidates.candidates)
+    assert {"ktg_dv_checkplan_list", "ktg_dv_checkplan_detail", "ktg_dv_checkplan_options",
+            "ktg_dv_checkplan_links", "ktg_dv_checkplan_machinery_candidates",
+            "ktg_dv_checkplan_subject_candidates"} <= set(candidates.candidates)
     assert "ktg_pro_workorder_progress" not in candidates.candidates
     assert all(name not in candidates.candidates for name in (
         "ktg_create_workorder_draft", "ktg_edit_workorder_draft",

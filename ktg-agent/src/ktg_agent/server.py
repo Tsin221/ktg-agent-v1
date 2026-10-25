@@ -26,6 +26,7 @@ from ktg_agent.ktg.workorders import PreviewStore
 from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
 from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
 from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
+from ktg_agent.ktg.dv_checkplan_writes import DvCheckPlanPreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -68,6 +69,8 @@ class Settings:
     enable_dv_machinery_write: bool = False
     dv_subject_db_path: str = ""
     enable_dv_subject_write: bool = False
+    dv_checkplan_db_path: str = ""
+    enable_dv_checkplan_write: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -164,6 +167,8 @@ class Settings:
                 "AGENT_ENABLE_DV_MACHINERYTYPE_WRITE", "false").lower() == "true",
             dv_subject_db_path=os.environ.get("AGENT_DV_SUBJECT_DB", "").strip(),
             enable_dv_subject_write=os.environ.get("AGENT_ENABLE_DV_SUBJECT_WRITE", "false").lower() == "true",
+            dv_checkplan_db_path=os.environ.get("AGENT_DV_CHECKPLAN_DB", "").strip(),
+            enable_dv_checkplan_write=os.environ.get("AGENT_ENABLE_DV_CHECKPLAN_WRITE", "false").lower() == "true",
             dv_machinery_db_path=os.environ.get("AGENT_DV_MACHINERY_DB", "").strip(),
             enable_dv_machinery_write=os.environ.get(
                 "AGENT_ENABLE_DV_MACHINERY_WRITE", "false").lower() == "true",
@@ -310,6 +315,22 @@ def create_service(settings: Settings) -> QueryService:
                 ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path)):
             if db_path and subject_path.resolve() == Path(db_path).resolve():
                 raise RuntimeError(f"AGENT_DV_SUBJECT_DB must differ from {db_name}")
+    dv_checkplan_db_path = settings.dv_checkplan_db_path
+    if settings.enable_dv_checkplan_write:
+        if not dv_checkplan_db_path:
+            raise RuntimeError("AGENT_DV_CHECKPLAN_DB must be configured when plan writes are enabled")
+        checkplan_path = Path(dv_checkplan_db_path)
+        if not checkplan_path.is_absolute():
+            raise RuntimeError("AGENT_DV_CHECKPLAN_DB must be an absolute path")
+        for db_name, db_path in (
+                ("AGENT_SESSION_DB", settings.session_db_path),
+                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
+                ("AGENT_WORKORDER_DB", workorder_db_path),
+                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
+                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
+                ("AGENT_DV_SUBJECT_DB", dv_subject_db_path)):
+            if db_path and checkplan_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError(f"AGENT_DV_CHECKPLAN_DB must differ from {db_name}")
     return QueryService(
         provider=provider,
         model_config=model_config,
@@ -322,6 +343,8 @@ def create_service(settings: Settings) -> QueryService:
             if settings.enable_dv_machinerytype_write else None),
         dv_subject_store=(DvSubjectPreviewStore(path=dv_subject_db_path)
                           if settings.enable_dv_subject_write else None),
+        dv_checkplan_store=(DvCheckPlanPreviewStore(path=dv_checkplan_db_path)
+                            if settings.enable_dv_checkplan_write else None),
         dv_machinery_store=(
             DvMachineryPreviewStore(path=dv_machinery_db_path)
             if settings.enable_dv_machinery_write else None),
@@ -465,6 +488,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             "/agent-api/v1/dv-machinerytype/confirm",
             "/agent-api/v1/dv-machinery/confirm",
             "/agent-api/v1/dv-subject/confirm",
+            "/agent-api/v1/dv-checkplan/confirm",
             "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -560,6 +584,17 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("preview_id 必须是文本。")
                 response = asyncio.run(
                     self.server.query_service.confirm_dv_subject(
+                        preview_id=preview_id, authorization=authorization,
+                    )
+                )
+            elif self.path == "/agent-api/v1/dv-checkplan/confirm":
+                if set(payload) != {"preview_id"}:
+                    raise ValueError("确认请求仅允许 preview_id。")
+                preview_id = payload.get("preview_id")
+                if not isinstance(preview_id, str):
+                    raise ValueError("preview_id 必须是文本。")
+                response = asyncio.run(
+                    self.server.query_service.confirm_dv_checkplan(
                         preview_id=preview_id, authorization=authorization,
                     )
                 )
