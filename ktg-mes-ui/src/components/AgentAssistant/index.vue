@@ -89,6 +89,13 @@
               :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
               @confirm="confirmDvSubjectPreview"
             />
+            <agent-dv-check-plan-card
+              v-else-if="isDvCheckPlanResult(result)"
+              :result="result"
+              :confirming="confirmingCheckPlanPreviewId === result.preview_id"
+              :completed="completedDvCheckPlanPreviewIds.includes(result.preview_id)"
+              @confirm="confirmDvCheckPlanPreview"
+            />
             <agent-result-card v-else :result="result" />
           </div>
         </div>
@@ -172,13 +179,14 @@
 <script>
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
-  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject } from '@/api/agent'
+  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
 import AgentDvMachineryCard from './DvMachineryCard.vue'
 import AgentDvSubjectCard from './DvSubjectCard.vue'
+import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText,
@@ -200,7 +208,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentDvCheckPlanCard },
   data() {
     return {
       open: false,
@@ -236,6 +244,8 @@ export default {
       confirmingMachineryPreviewId: '',
       confirmingSubjectPreviewId: '',
       completedDvSubjectPreviewIds: [],
+      confirmingCheckPlanPreviewId: '',
+      completedDvCheckPlanPreviewIds: [],
       messages: [],
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
@@ -297,6 +307,7 @@ export default {
         completedDvPreviewIds: this.completedDvPreviewIds,
         completedDvMachineryPreviewIds: this.completedDvMachineryPreviewIds,
         completedDvSubjectPreviewIds: this.completedDvSubjectPreviewIds,
+        completedDvCheckPlanPreviewIds: this.completedDvCheckPlanPreviewIds,
         pastInputs: this.pastInputs,
         pendingSubmission: this.pendingSubmission,
         inputAttempt: this.inputAttempt,
@@ -314,6 +325,7 @@ export default {
       this.completedDvPreviewIds = state.completedDvPreviewIds || []
       this.completedDvMachineryPreviewIds = state.completedDvMachineryPreviewIds || []
       this.completedDvSubjectPreviewIds = state.completedDvSubjectPreviewIds || []
+      this.completedDvCheckPlanPreviewIds = state.completedDvCheckPlanPreviewIds || []
       this.pastInputs = state.pastInputs || []
       this.pendingSubmission = state.pendingSubmission || null
       this.inputAttempt = state.inputAttempt || null
@@ -350,11 +362,13 @@ export default {
       this.completedDvPreviewIds = []
       this.completedDvMachineryPreviewIds = []
       this.completedDvSubjectPreviewIds = []
+      this.completedDvCheckPlanPreviewIds = []
       this.confirmingInventoryId = ''
       this.confirmingPreviewId = ''
       this.confirmingDvPreviewId = ''
       this.confirmingMachineryPreviewId = ''
       this.confirmingSubjectPreviewId = ''
+      this.confirmingCheckPlanPreviewId = ''
     },
     async bootstrap() {
       if (!agentSession.checkIdentity()) return
@@ -780,6 +794,11 @@ export default {
         'dv_machinery_preview', 'dv_machinery_create_result', 'dv_machinery_update_result',
         'dv_machinery_delete_result', 'dv_machinery_result'].includes(result.kind)
     },
+    isDvCheckPlanResult(result) {
+      return result && ['dv_checkplan_list', 'dv_checkplan_detail', 'dv_checkplan_options',
+        'dv_checkplan_links', 'dv_checkplan_machinery_candidates', 'dv_checkplan_subject_candidates',
+        'dv_checkplan_preview', 'dv_checkplan_result'].includes(result.kind)
+    },
     isDvSubjectResult(result) {
       return result && ['dv_subject_list', 'dv_subject_detail',
         'dv_subject_preview', 'dv_subject_create_result', 'dv_subject_update_result',
@@ -917,6 +936,41 @@ export default {
           this.confirmingMachineryPreviewId = ''
           this.scrollToBottom()
         }
+      }
+    },
+    async confirmDvCheckPlanPreview(previewId) {
+      if (!previewId || this.confirmingCheckPlanPreviewId || this.completedDvCheckPlanPreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingCheckPlanPreviewId = previewId
+      this.completedDvCheckPlanPreviewIds.push(previewId)
+      const entryId = `confirm-checkplan-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '计划确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmDvCheckPlan(previewId)
+        if (epoch !== this.epoch) return
+        const result = response && response.result
+        const verified = result && result.outcome === 'succeeded' && result.verified === true
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, {
+          id: entryId, role: 'assistant',
+          text: verified ? '点检保养计划操作已完成回读核验。' : (result && result.outcome === 'unknown' ? '结果尚未确认，请先核对。系统不会自动重新提交。' : (result && result.outcome === 'succeeded' && result.verified !== true ? '结果未核实，请先核对MES中的计划。' : result && result.label || '计划操作未能确认成功，请重新预览后再试。')),
+          results: result ? [result] : []
+        })
+        this.saveLocalState()
+        if (verified) window.dispatchEvent(new CustomEvent('ktg:dv-checkplan-changed', {
+          detail: { result, plan_id: result.plan_id || result.plan && result.plan.planId || null, action: result.action }
+        }))
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
+          text: message || '确认结果尚未确认，请先核对计划。系统不会自动重新提交。' })
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) { this.confirmingCheckPlanPreviewId = ''; this.scrollToBottom() }
       }
     },
     async confirmDvSubjectPreview(previewId) {

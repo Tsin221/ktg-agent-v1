@@ -348,7 +348,27 @@ export default {
   created() {
     this.getList();
   },
+  mounted() {
+    window.addEventListener("ktg:dv-checkplan-changed", this.handleAgentCheckPlanChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener("ktg:dv-checkplan-changed", this.handleAgentCheckPlanChanged);
+  },
   methods: {
+    handleAgentCheckPlanChanged(event) {
+      const detail = event && event.detail || {};
+      const planId = detail.plan_id || detail.result && (detail.result.plan_id || detail.result.plan && detail.result.plan.planId);
+      this.getList();
+      if (!this.open || !this.form.planId) return;
+      if (planId && String(planId) === String(this.form.planId) && detail.action === 'delete') {
+        this.open = false;
+        this.$modal.msgWarning('当前打开的计划已删除。');
+        return;
+      }
+      // 只刷新关联列表，保留头表单中的未保存编辑。
+      if (this.$refs.machinerylist) this.$refs.machinerylist.getList();
+      if (this.$refs.subjectlist) this.$refs.subjectlist.getList();
+    },
     /** 查询设备点检方案头列表 */
     getList() {
       this.loading = true;

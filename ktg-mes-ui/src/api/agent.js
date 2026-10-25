@@ -134,3 +134,10 @@ export function getInventoryOperation(operationId) {
   })
 }
 
+
+export function confirmDvCheckPlan(previewId) {
+  return request({
+    baseURL: '', url: '/agent-api/v1/dv-checkplan/confirm', method: 'post',
+    data: { preview_id: previewId }, timeout: 120000, headers: { repeatSubmit: false }
+  })
+}
