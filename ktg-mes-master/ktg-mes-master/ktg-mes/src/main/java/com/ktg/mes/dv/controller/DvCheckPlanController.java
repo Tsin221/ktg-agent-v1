@@ -91,6 +91,11 @@ public class DvCheckPlanController extends BaseController
     @PostMapping
     public AjaxResult add(@RequestBody DvCheckPlan dvCheckPlan)
     {
+        DvCheckPlan codeCheck = new DvCheckPlan();
+        codeCheck.setPlanCode(dvCheckPlan.getPlanCode());
+        if (UserConstants.NOT_UNIQUE.equals(dvCheckPlanService.checkPlanCodeUnique(codeCheck))) {
+            return AjaxResult.error("方案编号已存在！");
+        }
         return toAjax(dvCheckPlanService.insertDvCheckPlan(dvCheckPlan));
     }
 
@@ -102,6 +107,9 @@ public class DvCheckPlanController extends BaseController
     @PutMapping
     public AjaxResult edit(@RequestBody DvCheckPlan dvCheckPlan)
     {
+        if (UserConstants.NOT_UNIQUE.equals(dvCheckPlanService.checkPlanCodeUnique(dvCheckPlan))) {
+            return AjaxResult.error("方案编号已存在！");
+        }
         if(UserConstants.ORDER_STATUS_FINISHED.equals(dvCheckPlan.getStatus())){
             DvCheckMachinery para1 = new DvCheckMachinery();
             para1.setPlanId(dvCheckPlan.getPlanId());

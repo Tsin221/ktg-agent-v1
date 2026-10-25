@@ -27,7 +27,7 @@ public interface DvCheckPlanMapper
      */
     public List<DvCheckPlan> selectDvCheckPlanList(DvCheckPlan dvCheckPlan);
 
-    public DvCheckPlan checkPlanCodeUnique(DvCheckPlan dvCheckPlan);
+    public int countPlanCodeConflicts(DvCheckPlan dvCheckPlan);
 
     /**
      * 新增设备点检计划头

@@ -4,7 +4,6 @@ import java.util.List;
 
 import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.DateUtils;
-import com.ktg.common.utils.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ktg.mes.dv.mapper.DvCheckPlanMapper;
@@ -49,12 +48,8 @@ public class DvCheckPlanServiceImpl implements IDvCheckPlanService
 
     @Override
     public String checkPlanCodeUnique(DvCheckPlan dvCheckPlan) {
-        DvCheckPlan plan = dvCheckPlanMapper.checkPlanCodeUnique(dvCheckPlan);
-        Long planId = dvCheckPlan.getPlanId()==null?-1L:dvCheckPlan.getPlanId();
-        if(StringUtils.isNotNull(plan) && plan.getPlanId().longValue()==planId.longValue()){
-            return UserConstants.NOT_UNIQUE;
-        }
-        return UserConstants.UNIQUE;
+        int conflicts = dvCheckPlanMapper.countPlanCodeConflicts(dvCheckPlan);
+        return conflicts > 0 ? UserConstants.NOT_UNIQUE : UserConstants.UNIQUE;
     }
 
     /**

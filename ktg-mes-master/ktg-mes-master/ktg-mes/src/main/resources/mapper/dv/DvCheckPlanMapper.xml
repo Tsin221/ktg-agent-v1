@@ -48,9 +48,13 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where plan_id = #{planId}
     </select>
 
-    <select id="checkPlanCodeUnique" parameterType="DvCheckPlan" resultMap="DvCheckPlanResult">
-        <include refid="selectDvCheckPlanVo"/>
+    <select id="countPlanCodeConflicts" parameterType="DvCheckPlan" resultType="int">
+        select count(1)
+        from dv_check_plan
         where plan_code = #{planCode}
+        <if test="planId != null">
+            and plan_id != #{planId}
+        </if>
     </select>
         
     <insert id="insertDvCheckPlan" parameterType="DvCheckPlan" useGeneratedKeys="true" keyProperty="planId">
