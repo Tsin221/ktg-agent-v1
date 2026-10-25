@@ -251,6 +251,10 @@ export default {
   },
   created() {
     this.getList();
+    window.addEventListener('ktg:dv-subject-changed', this.getList);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:dv-subject-changed', this.getList);
   },
   methods: {
     /** 查询设备点检保养项目列表 */

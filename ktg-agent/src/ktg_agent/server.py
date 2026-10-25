@@ -25,6 +25,7 @@ from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
 from ktg_agent.ktg.workorders import PreviewStore
 from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
 from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
+from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -65,6 +66,8 @@ class Settings:
     enable_dv_machinerytype_write: bool = False
     dv_machinery_db_path: str = ""
     enable_dv_machinery_write: bool = False
+    dv_subject_db_path: str = ""
+    enable_dv_subject_write: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -159,6 +162,8 @@ class Settings:
             dv_machinerytype_db_path=os.environ.get("AGENT_DV_MACHINERYTYPE_DB", "").strip(),
             enable_dv_machinerytype_write=os.environ.get(
                 "AGENT_ENABLE_DV_MACHINERYTYPE_WRITE", "false").lower() == "true",
+            dv_subject_db_path=os.environ.get("AGENT_DV_SUBJECT_DB", "").strip(),
+            enable_dv_subject_write=os.environ.get("AGENT_ENABLE_DV_SUBJECT_WRITE", "false").lower() == "true",
             dv_machinery_db_path=os.environ.get("AGENT_DV_MACHINERY_DB", "").strip(),
             enable_dv_machinery_write=os.environ.get(
                 "AGENT_ENABLE_DV_MACHINERY_WRITE", "false").lower() == "true",
@@ -284,6 +289,27 @@ def create_service(settings: Settings) -> QueryService:
                 ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path)):
             if db_path and machinery_path.resolve() == Path(db_path).resolve():
                 raise RuntimeError(f"AGENT_DV_MACHINERY_DB must differ from {db_name}")
+    dv_subject_db_path = settings.dv_subject_db_path
+    if settings.enable_dv_subject_write:
+        if not dv_subject_db_path:
+            if settings.session_db_path:
+                session_path = Path(settings.session_db_path)
+                if not session_path.is_absolute():
+                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
+                dv_subject_db_path = str(session_path.with_name("agent-dv-subject.sqlite3"))
+            else:
+                dv_subject_db_path = str(Path.home() / ".ktg-agent" / "agent-dv-subject.sqlite3")
+        subject_path = Path(dv_subject_db_path)
+        if not subject_path.is_absolute():
+            raise RuntimeError("AGENT_DV_SUBJECT_DB must be an absolute path")
+        for db_name, db_path in (
+                ("AGENT_SESSION_DB", settings.session_db_path),
+                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
+                ("AGENT_WORKORDER_DB", workorder_db_path),
+                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
+                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path)):
+            if db_path and subject_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError(f"AGENT_DV_SUBJECT_DB must differ from {db_name}")
     return QueryService(
         provider=provider,
         model_config=model_config,
@@ -294,6 +320,8 @@ def create_service(settings: Settings) -> QueryService:
         dv_machinerytype_store=(
             DvMachineryTypePreviewStore(path=dv_machinerytype_db_path)
             if settings.enable_dv_machinerytype_write else None),
+        dv_subject_store=(DvSubjectPreviewStore(path=dv_subject_db_path)
+                          if settings.enable_dv_subject_write else None),
         dv_machinery_store=(
             DvMachineryPreviewStore(path=dv_machinery_db_path)
             if settings.enable_dv_machinery_write else None),
@@ -436,6 +464,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             "/agent-api/v1/inventory-operations/confirm",
             "/agent-api/v1/dv-machinerytype/confirm",
             "/agent-api/v1/dv-machinery/confirm",
+            "/agent-api/v1/dv-subject/confirm",
             "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -522,6 +551,15 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("preview_id 必须是文本。")
                 response = asyncio.run(
                     self.server.query_service.confirm_dv_machinery(
+                        preview_id=preview_id, authorization=authorization,
+                    )
+                )
+            elif self.path == "/agent-api/v1/dv-subject/confirm":
+                preview_id = payload.get("preview_id")
+                if not isinstance(preview_id, str):
+                    raise ValueError("preview_id 必须是文本。")
+                response = asyncio.run(
+                    self.server.query_service.confirm_dv_subject(
                         preview_id=preview_id, authorization=authorization,
                     )
                 )

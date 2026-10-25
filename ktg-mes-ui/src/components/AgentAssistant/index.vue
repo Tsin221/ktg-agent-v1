@@ -82,6 +82,13 @@
               :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
               @confirm="confirmDvMachineryPreview"
             />
+            <agent-dv-subject-card
+              v-else-if="isDvSubjectResult(result)"
+              :result="result"
+              :confirming="confirmingSubjectPreviewId === result.preview_id"
+              :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
+              @confirm="confirmDvSubjectPreview"
+            />
             <agent-result-card v-else :result="result" />
           </div>
         </div>
@@ -165,12 +172,13 @@
 <script>
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
-  confirmDvMachineryType, confirmDvMachinery } from '@/api/agent'
+  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
 import AgentDvMachineryCard from './DvMachineryCard.vue'
+import AgentDvSubjectCard from './DvSubjectCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText,
@@ -192,7 +200,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard },
   data() {
     return {
       open: false,
@@ -226,6 +234,8 @@ export default {
       completedDvPreviewIds: [],
       completedDvMachineryPreviewIds: [],
       confirmingMachineryPreviewId: '',
+      confirmingSubjectPreviewId: '',
+      completedDvSubjectPreviewIds: [],
       messages: [],
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
@@ -286,6 +296,7 @@ export default {
         completedInventoryIds: this.completedInventoryIds,
         completedDvPreviewIds: this.completedDvPreviewIds,
         completedDvMachineryPreviewIds: this.completedDvMachineryPreviewIds,
+        completedDvSubjectPreviewIds: this.completedDvSubjectPreviewIds,
         pastInputs: this.pastInputs,
         pendingSubmission: this.pendingSubmission,
         inputAttempt: this.inputAttempt,
@@ -302,6 +313,7 @@ export default {
       this.completedInventoryIds = state.completedInventoryIds || []
       this.completedDvPreviewIds = state.completedDvPreviewIds || []
       this.completedDvMachineryPreviewIds = state.completedDvMachineryPreviewIds || []
+      this.completedDvSubjectPreviewIds = state.completedDvSubjectPreviewIds || []
       this.pastInputs = state.pastInputs || []
       this.pendingSubmission = state.pendingSubmission || null
       this.inputAttempt = state.inputAttempt || null
@@ -337,10 +349,12 @@ export default {
       this.completedPreviewIds = []
       this.completedDvPreviewIds = []
       this.completedDvMachineryPreviewIds = []
+      this.completedDvSubjectPreviewIds = []
       this.confirmingInventoryId = ''
       this.confirmingPreviewId = ''
       this.confirmingDvPreviewId = ''
       this.confirmingMachineryPreviewId = ''
+      this.confirmingSubjectPreviewId = ''
     },
     async bootstrap() {
       if (!agentSession.checkIdentity()) return
@@ -766,6 +780,11 @@ export default {
         'dv_machinery_preview', 'dv_machinery_create_result', 'dv_machinery_update_result',
         'dv_machinery_delete_result', 'dv_machinery_result'].includes(result.kind)
     },
+    isDvSubjectResult(result) {
+      return result && ['dv_subject_list', 'dv_subject_detail',
+        'dv_subject_preview', 'dv_subject_create_result', 'dv_subject_update_result',
+        'dv_subject_delete_result', 'dv_subject_result'].includes(result.kind)
+    },
     showInventoryResult(result) {
       const id = `confirm-inventory-${result.operation_id}`
       const entry = { id, role: 'assistant', text: '', results: [result] }
@@ -896,6 +915,50 @@ export default {
       } finally {
         if (epoch === this.epoch) {
           this.confirmingMachineryPreviewId = ''
+          this.scrollToBottom()
+        }
+      }
+    },
+    async confirmDvSubjectPreview(previewId) {
+      if (!previewId || this.confirmingSubjectPreviewId || this.completedDvSubjectPreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingSubjectPreviewId = previewId
+      this.completedDvSubjectPreviewIds.push(previewId)
+      const entryId = `confirm-subject-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '点检保养项目确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmDvSubject(previewId)
+        if (epoch !== this.epoch) return
+        const result = response.result
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) {
+          this.businessMessages.splice(index, 1, {
+            id: entryId,
+            role: 'assistant',
+            text: result.outcome === 'succeeded' ? '点检保养项目已写入并完成回读核验。' : (result.label || '点检保养项目操作未完成。'),
+            results: [result]
+          })
+        }
+        this.saveLocalState()
+        if (result.outcome === 'succeeded') {
+          window.dispatchEvent(new CustomEvent('ktg:dv-subject-changed', { detail: result }))
+        }
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) {
+          this.businessMessages.splice(index, 1, {
+            id: entryId, role: 'assistant',
+            text: message || '确认请求失败。系统不会自动重新提交，请先核对点检保养项目。'
+          })
+        }
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) {
+          this.confirmingSubjectPreviewId = ''
           this.scrollToBottom()
         }
       }

@@ -116,6 +116,17 @@ export function confirmDvMachinery(previewId) {
   })
 }
 
+export function confirmDvSubject(previewId) {
+  return request({
+    baseURL: '',
+    url: '/agent-api/v1/dv-subject/confirm',
+    method: 'post',
+    data: { preview_id: previewId },
+    timeout: 120000,
+    headers: { repeatSubmit: false }
+  })
+}
+
 export function getInventoryOperation(operationId) {
   return request({
     baseURL: '', url: '/agent-api/v1/inventory-operations/' + encodeURIComponent(operationId),
