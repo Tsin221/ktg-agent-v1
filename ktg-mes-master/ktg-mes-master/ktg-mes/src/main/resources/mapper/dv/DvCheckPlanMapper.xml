@@ -48,6 +48,30 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where plan_id = #{planId}
     </select>
 
+    <select id="selectDvCheckPlanForUpdate" parameterType="Long" resultMap="DvCheckPlanResult">
+        <include refid="selectDvCheckPlanVo"/>
+        where plan_id = #{planId}
+        for update
+    </select>
+
+    <select id="selectDvCheckPlansForUpdate" resultMap="DvCheckPlanResult">
+        <include refid="selectDvCheckPlanVo"/>
+        where plan_id in
+        <foreach item="planId" collection="list" open="(" separator="," close=")">
+            #{planId}
+        </foreach>
+        order by plan_id
+        for update
+    </select>
+
+    <select id="countPlanMachinery" parameterType="Long" resultType="int">
+        select count(1) from dv_check_machinery where plan_id = #{planId}
+    </select>
+
+    <select id="countPlanSubjects" parameterType="Long" resultType="int">
+        select count(1) from dv_check_subject where plan_id = #{planId}
+    </select>
+
     <select id="countPlanCodeConflicts" parameterType="DvCheckPlan" resultType="int">
         select count(1)
         from dv_check_plan

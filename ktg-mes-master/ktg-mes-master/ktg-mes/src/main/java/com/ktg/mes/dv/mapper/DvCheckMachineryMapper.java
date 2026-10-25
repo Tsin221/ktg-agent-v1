@@ -19,6 +19,8 @@ public interface DvCheckMachineryMapper
      */
     public DvCheckMachinery selectDvCheckMachineryByRecordId(Long recordId);
 
+    public List<DvCheckMachinery> selectDvCheckMachineryByRecordIds(Long[] recordIds);
+
     /**
      * 查询点检设备列表
      * 

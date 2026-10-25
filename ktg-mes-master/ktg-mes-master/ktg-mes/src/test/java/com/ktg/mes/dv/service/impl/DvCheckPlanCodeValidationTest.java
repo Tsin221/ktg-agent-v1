@@ -36,7 +36,7 @@ class DvCheckPlanCodeValidationTest {
                 "cycle_type varchar(20), cycle_count bigint, status varchar(20), remark varchar(255), " +
                 "attr1 varchar(255), attr2 varchar(255), attr3 bigint, attr4 bigint, create_by varchar(64), " +
                 "create_time timestamp, update_by varchar(64), update_time timestamp)");
-        jdbc.update("insert into dv_check_plan(plan_id,plan_code,plan_name,plan_type) values (1,'CHECK-001','check plan','CHECK'), (2,'MAINT-001','maintenance plan','MAINTEN')");
+        jdbc.update("insert into dv_check_plan(plan_id,plan_code,plan_name,plan_type,status) values (1,'CHECK-001','check plan','CHECK','PREPARE'), (2,'MAINT-001','maintenance plan','MAINTEN','PREPARE')");
 
         SqlSessionFactoryBean bean = new SqlSessionFactoryBean();
         bean.setDataSource(db);

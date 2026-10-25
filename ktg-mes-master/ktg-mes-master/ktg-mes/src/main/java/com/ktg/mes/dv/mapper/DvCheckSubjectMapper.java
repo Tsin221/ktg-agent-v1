@@ -19,6 +19,8 @@ public interface DvCheckSubjectMapper
      */
     public DvCheckSubject selectDvCheckSubjectByRecordId(Long recordId);
 
+    public List<DvCheckSubject> selectDvCheckSubjectByRecordIds(Long[] recordIds);
+
     /**
      * 查询点检项目列表
      * 

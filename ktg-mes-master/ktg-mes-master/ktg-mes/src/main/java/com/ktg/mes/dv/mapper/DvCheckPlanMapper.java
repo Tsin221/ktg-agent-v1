@@ -19,6 +19,15 @@ public interface DvCheckPlanMapper
      */
     public DvCheckPlan selectDvCheckPlanByPlanId(Long planId);
 
+    /** Locks a plan header for the duration of the caller's transaction. */
+    public DvCheckPlan selectDvCheckPlanForUpdate(Long planId);
+
+    public List<DvCheckPlan> selectDvCheckPlansForUpdate(List<Long> planIds);
+
+    public int countPlanMachinery(Long planId);
+
+    public int countPlanSubjects(Long planId);
+
     /**
      * 查询设备点检计划头列表
      * 

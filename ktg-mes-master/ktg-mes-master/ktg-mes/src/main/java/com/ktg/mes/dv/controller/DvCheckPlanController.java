@@ -3,15 +3,9 @@ package com.ktg.mes.dv.controller;
 import java.util.List;
 import javax.servlet.http.HttpServletResponse;
 
-import cn.hutool.core.collection.CollUtil;
 import com.ktg.common.constant.UserConstants;
-import com.ktg.mes.dv.domain.DvCheckMachinery;
-import com.ktg.mes.dv.domain.DvCheckSubject;
-import com.ktg.mes.dv.service.IDvCheckMachineryService;
-import com.ktg.mes.dv.service.IDvCheckSubjectService;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -42,11 +36,6 @@ public class DvCheckPlanController extends BaseController
     @Autowired
     private IDvCheckPlanService dvCheckPlanService;
 
-    @Autowired
-    IDvCheckMachineryService dvCheckMachineryService;
-
-    @Autowired
-    IDvCheckSubjectService dvCheckSubjectService;
 
     /**
      * 查询设备点检计划头列表
@@ -110,21 +99,6 @@ public class DvCheckPlanController extends BaseController
         if (UserConstants.NOT_UNIQUE.equals(dvCheckPlanService.checkPlanCodeUnique(dvCheckPlan))) {
             return AjaxResult.error("方案编号已存在！");
         }
-        if(UserConstants.ORDER_STATUS_FINISHED.equals(dvCheckPlan.getStatus())){
-            DvCheckMachinery para1 = new DvCheckMachinery();
-            para1.setPlanId(dvCheckPlan.getPlanId());
-            List<DvCheckMachinery> machinerys = dvCheckMachineryService.selectDvCheckMachineryList(para1);
-            if(!CollUtil.isNotEmpty(machinerys)){
-                return AjaxResult.error("请指定设备!");
-            }
-
-            DvCheckSubject para2 = new DvCheckSubject();
-            para2.setPlanId(dvCheckPlan.getPlanId());
-            List<DvCheckSubject> subjects = dvCheckSubjectService.selectDvCheckSubjectList(para2);
-            if(!CollUtil.isNotEmpty(subjects)){
-                return AjaxResult.error("请指定项目!");
-            }
-        }
         return toAjax(dvCheckPlanService.updateDvCheckPlan(dvCheckPlan));
     }
 
@@ -133,23 +107,9 @@ public class DvCheckPlanController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('mes:dv:checkplan:remove')")
     @Log(title = "设备点检计划头", businessType = BusinessType.DELETE)
-    @Transactional
 	@DeleteMapping("/{planIds}")
     public AjaxResult remove(@PathVariable Long[] planIds)
     {
-        for (Long planId:planIds
-             ) {
-            DvCheckPlan plan = dvCheckPlanService.selectDvCheckPlanByPlanId(planId);
-            if(!UserConstants.ORDER_STATUS_PREPARE.equals(plan.getStatus())){
-                return AjaxResult.error("只能删除草稿状态单据！");
-            }
-
-            dvCheckMachineryService.deleteByPlanId(planId);
-            dvCheckSubjectService.deleteByPlanId(planId);
-        }
-
-
-
         return toAjax(dvCheckPlanService.deleteDvCheckPlanByPlanIds(planIds));
     }
 }

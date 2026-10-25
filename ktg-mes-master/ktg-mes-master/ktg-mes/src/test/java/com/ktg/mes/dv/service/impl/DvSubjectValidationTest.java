@@ -5,6 +5,7 @@ import com.ktg.common.exception.ServiceException;
 import com.ktg.mes.dv.domain.DvCheckSubject;
 import com.ktg.mes.dv.domain.DvSubject;
 import com.ktg.mes.dv.mapper.DvCheckSubjectMapper;
+import com.ktg.mes.dv.mapper.DvCheckPlanMapper;
 import com.ktg.mes.dv.mapper.DvSubjectMapper;
 import org.apache.ibatis.mapping.ResultMapping;
 import org.apache.ibatis.session.SqlSessionFactory;
@@ -41,18 +42,20 @@ class DvSubjectValidationTest {
         bean.setTypeAliasesPackage("com.ktg.mes.dv.domain");
         PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
         bean.setMapperLocations(resolver.getResource("classpath:mapper/dv/DvSubjectMapper.xml"),
+                resolver.getResource("classpath:mapper/dv/DvCheckPlanMapper.xml"),
                 resolver.getResource("classpath:mapper/dv/DvCheckSubjectMapper.xml"));
         SqlSessionFactory factory = bean.getObject();
         createTable(factory, "DvSubject", "dv_subject", "subject_id");
         createTable(factory, "DvCheckSubject", "dv_check_subject", "record_id");
-        jdbc.execute("create table dv_check_plan(plan_id bigint primary key, plan_type varchar(20))");
-        jdbc.update("insert into dv_check_plan values (10,'CHECK'),(20,'MAINTEN')");
+        jdbc.execute("create table dv_check_plan(plan_id bigint primary key,plan_code varchar(64),plan_name varchar(100),plan_type varchar(20),start_date date,end_date date,cycle_type varchar(20),cycle_count bigint,status varchar(20),remark varchar(255),attr1 varchar(255),attr2 varchar(255),attr3 bigint,attr4 bigint,create_by varchar(64),create_time timestamp,update_by varchar(64),update_time timestamp)");
+        jdbc.update("insert into dv_check_plan(plan_id,plan_type,status) values (10,'CHECK','PREPARE'),(20,'MAINTEN','PREPARE')");
         SqlSessionTemplate session = new SqlSessionTemplate(factory);
         subjects = new DvSubjectServiceImpl();
         ReflectionTestUtils.setField(subjects, "dvSubjectMapper", session.getMapper(DvSubjectMapper.class));
         links = new DvCheckSubjectServiceImpl();
         linkMapper = session.getMapper(DvCheckSubjectMapper.class);
         ReflectionTestUtils.setField(links, "dvCheckSubjectMapper", linkMapper);
+        ReflectionTestUtils.setField(links, "dvCheckPlanMapper", session.getMapper(DvCheckPlanMapper.class));
         addSource(1, "ONE", "CHECK", "Y");
         addSource(2, "TWO", "MAINTEN", "Y");
         addSource(3, "DISABLED", "CHECK", "N");

@@ -44,6 +44,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where record_id = #{recordId}
     </select>
 
+    <select id="selectDvCheckMachineryByRecordIds" resultMap="DvCheckMachineryResult">
+        <include refid="selectDvCheckMachineryVo"/>
+        where record_id in
+        <foreach item="recordId" collection="array" open="(" separator="," close=")">
+            #{recordId}
+        </foreach>
+        order by record_id
+    </select>
+
     <select id="checkMachineryUnique" parameterType="DvCheckMachinery" resultMap="DvCheckMachineryResult">
         select record_id, cm.plan_id, machinery_id, machinery_code, machinery_name, machinery_brand, machinery_spec, cm.remark, cm.attr1, cm.attr2, cm.attr3, cm.attr4, cm.create_by, cm.create_time, cm.update_by, cm.update_time
         from dv_check_machinery cm
@@ -53,7 +62,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             select plan_type
             from dv_check_plan
             where plan_id = #{planId}
-        )  limit 1
+        )
+        <if test="recordId != null">
+            and cm.record_id != #{recordId}
+        </if>
+        limit 1
     </select>
         
     <insert id="insertDvCheckMachinery" parameterType="DvCheckMachinery" useGeneratedKeys="true" keyProperty="recordId">

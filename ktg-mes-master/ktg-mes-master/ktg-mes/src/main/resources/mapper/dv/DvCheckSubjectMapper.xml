@@ -46,6 +46,15 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where record_id = #{recordId}
     </select>
 
+    <select id="selectDvCheckSubjectByRecordIds" resultMap="DvCheckSubjectResult">
+        <include refid="selectDvCheckSubjectVo"/>
+        where record_id in
+        <foreach item="recordId" collection="array" open="(" separator="," close=")">
+            #{recordId}
+        </foreach>
+        order by record_id
+    </select>
+
     <select id="checkSubjectUnique" parameterType="DvCheckSubject" resultMap="DvCheckSubjectResult">
         <include refid="selectDvCheckSubjectVo"/>
         where plan_id = #{planId} and subject_id = #{subjectId} limit 1
