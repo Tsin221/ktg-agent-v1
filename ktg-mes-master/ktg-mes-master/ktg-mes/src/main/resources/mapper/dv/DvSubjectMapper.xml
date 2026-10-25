@@ -44,9 +44,10 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where subject_id = #{subjectId}
     </select>
 
-    <select id="checkSubjectCodeUnique" parameterType="DvSubject" resultMap="DvSubjectResult">
-        <include refid="selectDvSubjectVo"/>
+    <select id="countSubjectCodeConflicts" parameterType="DvSubject" resultType="int">
+        select count(*) from dv_subject
         where subject_code = #{subjectCode}
+        <if test="subjectId != null">and subject_id != #{subjectId}</if>
     </select>
 
     <insert id="insertDvSubject" parameterType="DvSubject" useGeneratedKeys="true" keyProperty="subjectId">

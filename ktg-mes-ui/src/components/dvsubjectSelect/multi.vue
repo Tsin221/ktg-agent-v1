@@ -100,7 +100,7 @@ export default {
         subjectType: this.subjectType,
         subjectContent: null,
         subjectStandard: null,
-        enableFlag: null,
+        enableFlag: 'Y',
       },
       // 表单参数
       form: {}
@@ -134,7 +134,7 @@ export default {
         subjectType: this.subjectType,
         subjectContent: null,
         subjectStandard: null,
-        enableFlag: null,
+        enableFlag: 'Y',
       };
       this.clearSelection();
       this.dvsubjectList = [];
@@ -150,7 +150,7 @@ export default {
     /** 查询设备点检保养项目列表 */
     getList() {
       const requestSequence = ++this.requestSequence;
-      const params = { ...this.queryParams, subjectType: this.subjectType };
+      const params = { ...this.queryParams, subjectType: this.subjectType, enableFlag: 'Y' };
       this.loading = true;
       return listDvsubject(params).then(response => {
         if (requestSequence !== this.requestSequence) return;

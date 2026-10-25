@@ -28,7 +28,8 @@ public interface DvSubjectMapper
     public List<DvSubject> selectDvSubjectList(DvSubject dvSubject);
 
 
-    public DvSubject checkSubjectCodeUnique(DvSubject dvSubject);
+    /** Count same-code records other than the record being edited. */
+    public int countSubjectCodeConflicts(DvSubject dvSubject);
 
     /**
      * 新增设备点检保养项目

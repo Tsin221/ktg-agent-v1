@@ -4,7 +4,6 @@ import java.util.List;
 
 import com.ktg.common.constant.UserConstants;
 import com.ktg.common.utils.DateUtils;
-import com.ktg.common.utils.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import com.ktg.mes.dv.mapper.DvSubjectMapper;
@@ -49,9 +48,7 @@ public class DvSubjectServiceImpl implements IDvSubjectService
 
     @Override
     public String checkSubjectCodeUnique(DvSubject dvSubject) {
-        DvSubject subject = dvSubjectMapper.checkSubjectCodeUnique(dvSubject);
-        Long subjectId = dvSubject.getSubjectId()==null?-1L:dvSubject.getSubjectId();
-        if(StringUtils.isNotNull(subject) && subject.getSubjectId().longValue() == subjectId.longValue()){
+        if (dvSubjectMapper.countSubjectCodeConflicts(dvSubject) > 0) {
             return UserConstants.NOT_UNIQUE;
         }
         return UserConstants.UNIQUE;

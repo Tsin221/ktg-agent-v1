@@ -3,6 +3,7 @@ package com.ktg.mes.dv.service.impl;
 import java.util.List;
 
 import com.ktg.common.constant.UserConstants;
+import com.ktg.common.exception.ServiceException;
 import com.ktg.common.utils.DateUtils;
 import com.ktg.common.utils.StringUtils;
 import org.apache.catalina.User;
@@ -69,7 +70,11 @@ public class DvCheckSubjectServiceImpl implements IDvCheckSubjectService
     public int insertDvCheckSubject(DvCheckSubject dvCheckSubject)
     {
         dvCheckSubject.setCreateTime(DateUtils.getNowDate());
-        return dvCheckSubjectMapper.insertDvCheckSubject(dvCheckSubject);
+        int inserted = dvCheckSubjectMapper.insertDvCheckSubject(dvCheckSubject);
+        if (inserted == 0) {
+            throw new ServiceException("项目不存在、已停用或与方案类型不匹配，请刷新后重试");
+        }
+        return inserted;
     }
 
     /**

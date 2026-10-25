@@ -51,44 +51,18 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where plan_id = #{planId} and subject_id = #{subjectId} limit 1
     </select>
 
+    <!-- Snapshot only an enabled source matching the target plan, in the write itself. -->
     <insert id="insertDvCheckSubject" parameterType="DvCheckSubject" useGeneratedKeys="true" keyProperty="recordId">
         insert into dv_check_subject
-        <trim prefix="(" suffix=")" suffixOverrides=",">
-            <if test="planId != null">plan_id,</if>
-            <if test="subjectId != null">subject_id,</if>
-            <if test="subjectCode != null and subjectCode != ''">subject_code,</if>
-            <if test="subjectName != null">subject_name,</if>
-            <if test="subjectType != null">subject_type,</if>
-            <if test="subjectContent != null and subjectContent != ''">subject_content,</if>
-            <if test="subjectStandard != null">subject_standard,</if>
-            <if test="remark != null">remark,</if>
-            <if test="attr1 != null">attr1,</if>
-            <if test="attr2 != null">attr2,</if>
-            <if test="attr3 != null">attr3,</if>
-            <if test="attr4 != null">attr4,</if>
-            <if test="createBy != null">create_by,</if>
-            <if test="createTime != null">create_time,</if>
-            <if test="updateBy != null">update_by,</if>
-            <if test="updateTime != null">update_time,</if>
-         </trim>
-        <trim prefix="values (" suffix=")" suffixOverrides=",">
-            <if test="planId != null">#{planId},</if>
-            <if test="subjectId != null">#{subjectId},</if>
-            <if test="subjectCode != null and subjectCode != ''">#{subjectCode},</if>
-            <if test="subjectName != null">#{subjectName},</if>
-            <if test="subjectType != null">#{subjectType},</if>
-            <if test="subjectContent != null and subjectContent != ''">#{subjectContent},</if>
-            <if test="subjectStandard != null">#{subjectStandard},</if>
-            <if test="remark != null">#{remark},</if>
-            <if test="attr1 != null">#{attr1},</if>
-            <if test="attr2 != null">#{attr2},</if>
-            <if test="attr3 != null">#{attr3},</if>
-            <if test="attr4 != null">#{attr4},</if>
-            <if test="createBy != null">#{createBy},</if>
-            <if test="createTime != null">#{createTime},</if>
-            <if test="updateBy != null">#{updateBy},</if>
-            <if test="updateTime != null">#{updateTime},</if>
-         </trim>
+            (plan_id, subject_id, subject_code, subject_name, subject_type, subject_content, subject_standard,
+             remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time)
+        select p.plan_id, s.subject_id, s.subject_code, s.subject_name, s.subject_type, s.subject_content, s.subject_standard,
+               coalesce(#{remark}, ''), #{attr1}, #{attr2}, coalesce(#{attr3}, 0), coalesce(#{attr4}, 0),
+               coalesce(#{createBy}, ''), #{createTime}, coalesce(#{updateBy}, ''), #{updateTime}
+        from dv_subject s
+        inner join dv_check_plan p on p.plan_id = #{planId} and p.plan_type = s.subject_type
+        where s.subject_id = #{subjectId} and s.enable_flag = 'Y'
+          and s.subject_type in ('CHECK', 'MAINTEN')
     </insert>
 
     <update id="updateDvCheckSubject" parameterType="DvCheckSubject">
