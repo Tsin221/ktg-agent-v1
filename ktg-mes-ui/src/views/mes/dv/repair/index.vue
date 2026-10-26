@@ -365,8 +365,29 @@ export default {
   },
   created() {
     this.getList();
+    window.addEventListener('ktg:dv-repair-changed', this.handleAgentRepairChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:dv-repair-changed', this.handleAgentRepairChanged);
   },
   methods: {
+    handleAgentRepairChanged(event) {
+      this.getList();
+      const result = event && event.detail;
+      if (this.open && this.form.repairId && result && result.repair_id === this.form.repairId) {
+        if (result.action === 'delete') {
+          this.cancel();
+          return;
+        }
+        const repairId = this.form.repairId;
+        getRepair(repairId).then(response => {
+          if (this.open && this.form.repairId === repairId && response && response.data) {
+            this.form = response.data;
+            if (this.$refs.line) this.$refs.line.getList();
+          }
+        });
+      }
+    },
     /** 查询设备维修单列表 */
     getList() {
       this.loading = true;

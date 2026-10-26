@@ -141,3 +141,10 @@ export function confirmDvCheckPlan(previewId) {
     data: { preview_id: previewId }, timeout: 120000, headers: { repeatSubmit: false }
   })
 }
+
+export function confirmDvRepair(previewId) {
+  return request({
+    baseURL: '', url: '/agent-api/v1/dv-repair/confirm', method: 'post',
+    data: { preview_id: previewId }, timeout: 120000, headers: { repeatSubmit: false }
+  })
+}
