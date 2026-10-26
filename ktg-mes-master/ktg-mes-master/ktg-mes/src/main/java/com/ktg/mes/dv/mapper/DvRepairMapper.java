@@ -19,6 +19,8 @@ public interface DvRepairMapper
      */
     public DvRepair selectDvRepairByRepairId(Long repairId);
 
+    public DvRepair selectDvRepairForUpdate(Long repairId);
+
     /**
      * 查询设备维修单列表
      * 

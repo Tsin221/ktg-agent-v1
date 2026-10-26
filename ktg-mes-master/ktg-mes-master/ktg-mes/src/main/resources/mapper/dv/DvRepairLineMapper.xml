@@ -101,7 +101,6 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <update id="updateDvRepairLine" parameterType="DvRepairLine">
         update dv_repair_line
         <trim prefix="SET" suffixOverrides=",">
-            <if test="repairId != null">repair_id = #{repairId},</if>
             <if test="subjectId != null">subject_id = #{subjectId},</if>
             <if test="subjectCode != null and subjectCode != ''">subject_code = #{subjectCode},</if>
             <if test="subjectName != null">subject_name = #{subjectName},</if>

@@ -62,6 +62,11 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where repair_id = #{repairId}
     </select>
 
+    <select id="selectDvRepairForUpdate" parameterType="Long" resultMap="DvRepairResult">
+        <include refid="selectDvRepairVo"/>
+        where repair_id = #{repairId} for update
+    </select>
+
     <select id="checkCodeUnique" parameterType="DvRepair" resultMap="DvRepairResult">
         <include refid="selectDvRepairVo"/>
         where repair_code = #{repairCode} limit 1
