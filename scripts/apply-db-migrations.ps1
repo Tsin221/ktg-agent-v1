@@ -16,7 +16,8 @@ $migrationFiles = @(
     '20261013_s3_04_stock_atomicity.sql',
     '20261013_s3_05_stock_dimension_repair.sql',
     '20261023_dv_repair_add_permission.sql',
-    '20261023_dv_check_detail_permissions.sql'
+    '20261023_dv_check_detail_permissions.sql',
+    '20261026_dv_repair_autocode.sql'
 )
 
 foreach ($migrationFile in $migrationFiles) {

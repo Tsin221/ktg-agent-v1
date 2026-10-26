@@ -496,7 +496,7 @@ export default {
         //自动生成编码
     handleAutoGenChange(autoGenFlag){
       if(autoGenFlag){
-        genCode('DV_REPAIR_CODE').then(response =>{
+        genCode('REPAIR_CODE').then(response =>{
           this.form.repairCode = response;
         });
       }else{
