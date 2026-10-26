@@ -1,0 +1,25 @@
+{
+  "completed_runs": 45,
+  "original_repair_projected_fields_unchanged": true,
+  "original_lines_still_empty": true,
+  "final_repair_count": 1,
+  "test_A_absent": true,
+  "test_B_absent": true,
+  "successful_confirmations": 8,
+  "successful_actions": {
+    "create": 1,
+    "update": 2,
+    "line_create": 2,
+    "line_update": 1,
+    "line_delete": 1,
+    "delete": 1
+  },
+  "line_delete_preserved_other_test_line": true,
+  "parent_delete_verified": true,
+  "stale_preview_rejected": true,
+  "expired_preview_rejected": true,
+  "median_seconds": 18.67,
+  "min_seconds": 4.1,
+  "max_seconds": 49.12,
+  "inactive_tool_errors": 18
+}

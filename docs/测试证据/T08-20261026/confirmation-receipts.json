@@ -1,0 +1,211 @@
+[
+  {
+    "preview_id": "a0d5f221-3943-4f31-8f79-a862f4e2a5b8",
+    "action": "create",
+    "state": "completed",
+    "expires_at": 1793025722.025533,
+    "result": {
+      "content": "维修单已创建并唯一回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "create",
+        "preview_id": "a0d5f221-3943-4f31-8f79-a862f4e2a5b8",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修单已创建并唯一回读核验。",
+        "repair_id": 2
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "a0d5f221-3943-4f31-8f79-a862f4e2a5b8",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "3bf49c35-b26c-404a-ba7d-52d2a96bbb63",
+    "action": "update",
+    "state": "completed",
+    "expires_at": 1793025919.8551939,
+    "result": {
+      "content": "维修单已变化或不再是草稿。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "update",
+        "preview_id": "3bf49c35-b26c-404a-ba7d-52d2a96bbb63",
+        "outcome": "failed",
+        "verified": false,
+        "label": "维修单已变化或不再是草稿。",
+        "error_code": "PREVIEW_STALE"
+      },
+      "status": "failed",
+      "error_code": "PREVIEW_STALE",
+      "operation_id": "3bf49c35-b26c-404a-ba7d-52d2a96bbb63",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "c5588de0-d842-416a-a046-d4a1e345f3f4",
+    "action": "update",
+    "state": "completed",
+    "expires_at": 1793026104.5475287,
+    "result": {
+      "content": "维修单已修改并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "update",
+        "preview_id": "c5588de0-d842-416a-a046-d4a1e345f3f4",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修单已修改并回读核验。",
+        "repair_id": 2
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "c5588de0-d842-416a-a046-d4a1e345f3f4",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "da572093-bc79-4dd6-a7ab-559814b88172",
+    "action": "line_create",
+    "state": "completed",
+    "expires_at": 1793026196.7071993,
+    "result": {
+      "content": "维修内容已新增并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "line_create",
+        "preview_id": "da572093-bc79-4dd6-a7ab-559814b88172",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修内容已新增并回读核验。",
+        "repair_id": 2,
+        "line_id": 1
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "da572093-bc79-4dd6-a7ab-559814b88172",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "89f5159e-4651-4bbc-9c88-7df7bc62fd83",
+    "action": "line_update",
+    "state": "completed",
+    "expires_at": 1793026302.2228813,
+    "result": {
+      "content": "维修内容已修改并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "line_update",
+        "preview_id": "89f5159e-4651-4bbc-9c88-7df7bc62fd83",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修内容已修改并回读核验。",
+        "repair_id": 2,
+        "line_id": 1
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "89f5159e-4651-4bbc-9c88-7df7bc62fd83",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "5d7cc357-b8fc-4ad3-a9d2-776578cd9e39",
+    "action": "line_create",
+    "state": "completed",
+    "expires_at": 1793026356.2844496,
+    "result": {
+      "content": "维修内容已新增并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "line_create",
+        "preview_id": "5d7cc357-b8fc-4ad3-a9d2-776578cd9e39",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修内容已新增并回读核验。",
+        "repair_id": 2,
+        "line_id": 2
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "5d7cc357-b8fc-4ad3-a9d2-776578cd9e39",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "2081c246-da25-49b0-8d93-42f2ecc71440",
+    "action": "update",
+    "state": "completed",
+    "expires_at": 1793026831.0634649,
+    "result": {
+      "content": "维修单已修改并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "update",
+        "preview_id": "2081c246-da25-49b0-8d93-42f2ecc71440",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修单已修改并回读核验。",
+        "repair_id": 2
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "2081c246-da25-49b0-8d93-42f2ecc71440",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "e9a5c1c7-afb0-4aef-837c-1eca98b89ec4",
+    "action": "create",
+    "state": "pending",
+    "expires_at": 1793027214.314281,
+    "result": null
+  },
+  {
+    "preview_id": "13de9923-d0db-47b4-8974-a87d55b6d018",
+    "action": "line_delete",
+    "state": "completed",
+    "expires_at": 1793027614.2992485,
+    "result": {
+      "content": "维修内容已删除并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "line_delete",
+        "preview_id": "13de9923-d0db-47b4-8974-a87d55b6d018",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修内容已删除并回读核验。",
+        "repair_id": 2,
+        "line_id": 1
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "13de9923-d0db-47b4-8974-a87d55b6d018",
+      "verification": null
+    }
+  },
+  {
+    "preview_id": "196503d0-50f7-4ce2-aba3-04ece0df3806",
+    "action": "delete",
+    "state": "completed",
+    "expires_at": 1793027703.8775656,
+    "result": {
+      "content": "维修单及维修内容已删除并回读核验。",
+      "details": {
+        "kind": "dv_repair_result",
+        "action": "delete",
+        "preview_id": "196503d0-50f7-4ce2-aba3-04ece0df3806",
+        "outcome": "succeeded",
+        "verified": true,
+        "label": "维修单及维修内容已删除并回读核验。",
+        "repair_id": 2
+      },
+      "status": "succeeded",
+      "error_code": null,
+      "operation_id": "196503d0-50f7-4ce2-aba3-04ece0df3806",
+      "verification": null
+    }
+  }
+]

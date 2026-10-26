@@ -1,0 +1,16 @@
+{
+  "original_repair_projected_fields_unchanged": true,
+  "original_lines_still_empty": true,
+  "test_repair_id": 2,
+  "test_lines": [
+    1,
+    2
+  ],
+  "test_remark_cleared": true,
+  "line_update_verified": true,
+  "completed_runs": 42,
+  "median_seconds": 18.72,
+  "min_seconds": 4.1,
+  "max_seconds": 49.12,
+  "inactive_tool_errors": 12
+}
