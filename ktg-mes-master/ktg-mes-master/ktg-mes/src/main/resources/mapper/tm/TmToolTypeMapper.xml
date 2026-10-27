@@ -94,8 +94,8 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="toolTypeCode != null and toolTypeCode != ''">tool_type_code = #{toolTypeCode},</if>
             <if test="toolTypeName != null and toolTypeName != ''">tool_type_name = #{toolTypeName},</if>
             <if test="codeFlag != null and codeFlag != ''">code_flag = #{codeFlag},</if>
-            <if test="maintenType != null">mainten_type = #{maintenType},</if>
-            <if test="maintenPeriod != null">mainten_period = #{maintenPeriod},</if>
+            mainten_type = #{maintenType},
+            mainten_period = #{maintenPeriod},
             <if test="remark != null">remark = #{remark},</if>
             <if test="attr1 != null">attr1 = #{attr1},</if>
             <if test="attr2 != null">attr2 = #{attr2},</if>

@@ -2,6 +2,7 @@ package com.ktg.mes.tm.domain;
 
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.ktg.common.annotation.Excel;
 import com.ktg.common.core.domain.BaseEntity;
 
@@ -36,6 +37,7 @@ public class TmToolType extends BaseEntity
 
     /** 保养周期 */
     @Excel(name = "保养周期")
+    @JsonDeserialize(using = ToolTypePeriodDeserializer.class)
     private Long maintenPeriod;
 
     /** 预留字段1 */

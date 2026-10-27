@@ -98,15 +98,12 @@
       </el-table-column>
       <el-table-column label="保养维护类型" align="center" prop="maintenType">
         <template slot-scope="scope">
-          <dict-tag v-if="scope.row.codeFlag =='Y'" :options="dict.type.mes_mainten_type" :value="scope.row.maintenType"/>
-          <span v-else>{{ "无"  }}</span>
+          <span>{{ formatMaintenanceType(scope.row.codeFlag, scope.row.maintenType) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="保养周期" align="center" prop="maintenPeriod" >
         <template slot-scope="scope">
-          <span v-if="scope.row.codeFlag =='Y' && scope.row.maintenType =='REGULAR'">{{ scope.row.maintenPeriod +"天"  }}</span>
-          <span v-else-if="scope.row.codeFlag =='Y' && scope.row.maintenType =='USAGE'">{{ scope.row.maintenPeriod +"次"  }}</span>
-          <span v-else>{{ "无"  }}</span>
+          <span>{{ formatMaintenancePeriod(scope.row.codeFlag, scope.row.maintenType, scope.row.maintenPeriod) }}</span>
         </template>
       </el-table-column>
       <el-table-column label="备注" align="center" prop="remark" :show-overflow-tooltip="true"/>
@@ -144,7 +141,7 @@
         <el-row>
           <el-col :span="8">
             <el-form-item label="类型编码" prop="toolTypeCode">
-              <el-input v-model="form.toolTypeCode" placeholder="请输入类型编码" />
+              <el-input v-model="form.toolTypeCode" placeholder="请输入类型编码" :disabled="optType === 'view'" />
             </el-form-item>
           </el-col>
           <el-col :span="4">
@@ -156,32 +153,25 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="类型名称" prop="toolTypeName">
-              <el-input v-model="form.toolTypeName" placeholder="请输入类型名称" />
+              <el-input v-model="form.toolTypeName" placeholder="请输入类型名称" :disabled="optType === 'view'" />
             </el-form-item>
           </el-col>
         </el-row>
         <el-row>
           <el-col :span="8">
             <el-form-item label="是否编码管理" prop="codeFlag">
-              <el-radio-group v-model="form.codeFlag" disabled v-if="optType=='view'">
-                    <el-radio
-                      v-for="dict in dict.type.sys_yes_no"
-                      :key="dict.value"
-                      :label="dict.value"
-                    >{{dict.label}}</el-radio>
-                  </el-radio-group>
-                  <el-radio-group v-model="form.codeFlag" v-else>
-                    <el-radio
-                      v-for="dict in dict.type.sys_yes_no"
-                      :key="dict.value"
-                      :label="dict.value"
-                    >{{dict.label}}</el-radio>
-                </el-radio-group>
+              <el-radio-group v-model="form.codeFlag" :disabled="optType === 'view'" @change="handleCodeFlagChange">
+                <el-radio
+                  v-for="dict in dict.type.sys_yes_no"
+                  :key="dict.value"
+                  :label="dict.value"
+                >{{dict.label}}</el-radio>
+              </el-radio-group>
             </el-form-item>
           </el-col>
           <el-col :span="8" v-if="form.codeFlag=='Y'">
             <el-form-item label="保养维护类型" prop="maintenType">
-              <el-select v-model="form.maintenType" placeholder="请选择保养维护类型">
+              <el-select v-model="form.maintenType" placeholder="请选择保养维护类型" :disabled="optType === 'view'">
                 <el-option
                   v-for="dict in dict.type.mes_mainten_type"
                   :key="dict.value"
@@ -193,14 +183,14 @@
           </el-col>
           <el-col :span="8" v-if="form.codeFlag=='Y'">
             <el-form-item label="保养周期" prop="maintenPeriod">
-              <el-input v-model="form.maintenPeriod" placeholder="请输入保养周期" />
+              <el-input v-model="form.maintenPeriod" placeholder="请输入保养周期" :disabled="optType === 'view'" />
             </el-form-item>
           </el-col>
         </el-row>
         <el-row>
           <el-col :span="24">
             <el-form-item label="备注" prop="remark">
-              <el-input v-model="form.remark" type="textarea" placeholder="请输入内容" />
+            <el-input v-model="form.remark" type="textarea" placeholder="请输入内容" :disabled="optType === 'view'" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -228,6 +218,7 @@ export default {
       loading: true,
       // 选中数组
       ids: [],
+      selectedRows: [],
       // 非单个禁用
       single: true,
       // 非多个禁用
@@ -267,11 +258,32 @@ export default {
         codeFlag: [
           { required: true, message: "是否启用不能为空", trigger: "blur" }
         ],
+        maintenType: [
+          {
+            validator: (rule, value, callback) => {
+              if (this.form.codeFlag !== 'Y' || value === 'REGULAR' || value === 'USAGE') {
+                callback();
+              } else {
+                callback(new Error('请选择保养维护类型'));
+              }
+            },
+            trigger: 'change'
+          }
+        ],
         remark: [
           { max: 250, message: '长度必须小于250个字符', trigger: 'blur' }
         ],
         maintenPeriod: [
-          { pattern: /^-?\d+(\.\d+)?$/, message: '输入必须为数字类型', trigger: 'blur' }
+          {
+            validator: (rule, value, callback) => {
+              if (this.form.codeFlag !== 'Y' || this.isValidMaintenancePeriod(value)) {
+                callback();
+              } else {
+                callback(new Error('保养周期必须为1至2147483647的正整数'));
+              }
+            },
+            trigger: ['blur', 'change']
+          }
         ]
       }
     };
@@ -324,6 +336,7 @@ export default {
     },
     // 多选框选中数据
     handleSelectionChange(selection) {
+      this.selectedRows = selection;
       this.ids = selection.map(item => item.toolTypeId)
       this.single = selection.length!==1
       this.multiple = !selection.length
@@ -357,6 +370,48 @@ export default {
         this.optType = "edit";
       });
     },
+    handleCodeFlagChange() {
+      this.form.maintenType = null;
+      this.form.maintenPeriod = null;
+      if (this.$refs.form) {
+        this.$nextTick(() => this.$refs.form.clearValidate(['maintenType', 'maintenPeriod']));
+      }
+    },
+    isValidMaintenancePeriod(value) {
+      if (typeof value === 'number') {
+        return Number.isInteger(value) && value > 0 && value <= 2147483647;
+      }
+      if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+        return false;
+      }
+      const normalized = value.replace(/^0+/, '') || '0';
+      if (normalized === '0') {
+        return false;
+      }
+      const max = '2147483647';
+      return normalized.length < max.length || (normalized.length === max.length && normalized <= max);
+    },
+    formatMaintenanceType(codeFlag, maintenType) {
+      if (codeFlag !== 'Y') return '无';
+      if (maintenType === 'REGULAR') return '定期维护';
+      if (maintenType === 'USAGE') return '按使用次数维护';
+      return '未设置';
+    },
+    formatMaintenancePeriod(codeFlag, maintenType, maintenPeriod) {
+      if (codeFlag !== 'Y') return '无';
+      if ((maintenType !== 'REGULAR' && maintenType !== 'USAGE')
+        || !this.isValidMaintenancePeriod(maintenPeriod)) {
+        return '未设置';
+      }
+      return String(maintenPeriod) + (maintenType === 'REGULAR' ? '天' : '次');
+    },
+    buildDeleteConfirmText(rows) {
+      const labels = rows.map(row => {
+        const code = row.toolTypeCode || '（编码缺失）';
+        return row.toolTypeName ? code + '（' + row.toolTypeName + '）' : code;
+      });
+      return '是否确认删除工装夹具类型：' + labels.join('、') + '？';
+    },
     /** 提交按钮 */
     submitForm() {
       this.$refs["form"].validate(valid => {
@@ -379,9 +434,12 @@ export default {
     },
     /** 删除按钮操作 */
     handleDelete(row) {
-      const toolTypeIds = row.toolTypeId || this.ids;
-      this.$modal.confirm('是否确认删除工装夹具类型编号为"' + toolTypeIds + '"的数据项？').then(function() {
-        return delTooltype(toolTypeIds);
+      const rows = row && row.toolTypeId != null ? [row] : this.selectedRows;
+      if (!rows.length) return Promise.resolve();
+      const toolTypeIds = rows.map(item => item.toolTypeId);
+      const deleteIds = toolTypeIds.length === 1 ? toolTypeIds[0] : toolTypeIds;
+      return this.$modal.confirm(this.buildDeleteConfirmText(rows)).then(function() {
+        return delTooltype(deleteIds);
       }).then(() => {
         this.getList();
         this.$modal.msgSuccess("删除成功");

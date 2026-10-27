@@ -14,6 +14,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import com.ktg.common.annotation.Log;
 import com.ktg.common.core.controller.BaseController;
 import com.ktg.common.core.domain.AjaxResult;
@@ -35,6 +37,21 @@ public class TmToolTypeController extends BaseController
 {
     @Autowired
     private ITmToolTypeService tmToolTypeService;
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public AjaxResult handleUnreadableToolTypeRequest(HttpMessageNotReadableException exception)
+    {
+        Throwable cause = exception;
+        while (cause != null)
+        {
+            if (cause.getMessage() != null && cause.getMessage().contains("保养周期"))
+            {
+                return AjaxResult.error("保养周期格式不正确，请输入大于0且不超过2147483647的整数");
+            }
+            cause = cause.getCause();
+        }
+        return AjaxResult.error("工装夹具类型数据格式不正确，请检查输入内容");
+    }
 
     /**
      * 查询工装夹具类型列表
