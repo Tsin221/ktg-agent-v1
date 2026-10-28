@@ -20,6 +20,7 @@ from ktg_agent.sessions.coordinator import RunCoordinator
 from ktg_agent.sessions.repository import (
     EVENT_RETENTION_DAYS, Page, RunConflictError, SessionRecord, SessionRepository,
 )
+from ktg_agent.tools.discovery import MODULES
 
 _PRIVATE_FIELD = re.compile(
     r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -287,12 +288,15 @@ class SessionService:
         if value is None:
             return None
         context = _json_object(value, "page_context")
-        if set(context) - {"route_name", "selected_entity", "filters", "captured_at"}:
+        if set(context) - {"route_name", "module", "selected_entity", "filters", "captured_at"}:
             raise ValueError("page_context 包含不允许的字段。")
         for key in ("route_name", "captured_at"):
             item = context.get(key)
             if item is not None and (not isinstance(item, str) or len(item) > 100):
                 raise ValueError(f"page_context.{key} 无效。")
+        module = context.get("module")
+        if module is not None and (not isinstance(module, str) or module not in MODULES):
+            raise ValueError("page_context.module 无效。")
         entity = context.get("selected_entity")
         if entity is not None:
             if not isinstance(entity, dict) or set(entity) - {"type", "id"} or not all(

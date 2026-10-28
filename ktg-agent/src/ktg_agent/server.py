@@ -28,6 +28,7 @@ from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
 from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
 from ktg_agent.ktg.dv_checkplan_writes import DvCheckPlanPreviewStore
 from ktg_agent.ktg.dv_repair_writes import DvRepairPreviewStore
+from ktg_agent.ktg.tm_tooltype_writes import TmToolTypePreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
@@ -74,6 +75,8 @@ class Settings:
     enable_dv_checkplan_write: bool = False
     dv_repair_db_path: str = ""
     enable_dv_repair_write: bool = False
+    tm_tooltype_db_path: str = ""
+    enable_tm_tooltype_write: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -174,6 +177,8 @@ class Settings:
             enable_dv_checkplan_write=os.environ.get("AGENT_ENABLE_DV_CHECKPLAN_WRITE", "false").lower() == "true",
             dv_repair_db_path=os.environ.get("AGENT_DV_REPAIR_DB", "").strip(),
             enable_dv_repair_write=os.environ.get("AGENT_ENABLE_DV_REPAIR_WRITE", "false").lower() == "true",
+            tm_tooltype_db_path=os.environ.get("AGENT_TM_TOOLTYPE_DB", "").strip(),
+            enable_tm_tooltype_write=os.environ.get("AGENT_ENABLE_TM_TOOLTYPE_WRITE", "false").lower() == "true",
             dv_machinery_db_path=os.environ.get("AGENT_DV_MACHINERY_DB", "").strip(),
             enable_dv_machinery_write=os.environ.get(
                 "AGENT_ENABLE_DV_MACHINERY_WRITE", "false").lower() == "true",
@@ -352,6 +357,30 @@ def create_service(settings: Settings) -> QueryService:
                 ("AGENT_DV_CHECKPLAN_DB", dv_checkplan_db_path)):
             if db_path and repair_path.resolve() == Path(db_path).resolve():
                 raise RuntimeError(f"AGENT_DV_REPAIR_DB must differ from {db_name}")
+    tm_tooltype_db_path = settings.tm_tooltype_db_path
+    if settings.enable_tm_tooltype_write:
+        if not tm_tooltype_db_path:
+            if settings.session_db_path:
+                session_path = Path(settings.session_db_path)
+                if not session_path.is_absolute():
+                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
+                tm_tooltype_db_path = str(session_path.with_name("agent-tm-tooltype.sqlite3"))
+            else:
+                tm_tooltype_db_path = str(Path.home() / ".ktg-agent" / "agent-tm-tooltype.sqlite3")
+        tm_tooltype_path = Path(tm_tooltype_db_path)
+        if not tm_tooltype_path.is_absolute():
+            raise RuntimeError("AGENT_TM_TOOLTYPE_DB must be an absolute path")
+        for db_name, db_path in (
+                ("AGENT_SESSION_DB", settings.session_db_path),
+                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
+                ("AGENT_WORKORDER_DB", workorder_db_path),
+                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
+                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
+                ("AGENT_DV_SUBJECT_DB", dv_subject_db_path),
+                ("AGENT_DV_CHECKPLAN_DB", dv_checkplan_db_path),
+                ("AGENT_DV_REPAIR_DB", dv_repair_db_path)):
+            if db_path and tm_tooltype_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError(f"AGENT_TM_TOOLTYPE_DB must differ from {db_name}")
     return QueryService(
         provider=provider,
         model_config=model_config,
@@ -368,6 +397,8 @@ def create_service(settings: Settings) -> QueryService:
                             if settings.enable_dv_checkplan_write else None),
         dv_repair_store=(DvRepairPreviewStore(path=dv_repair_db_path)
                          if settings.enable_dv_repair_write else None),
+        tm_tooltype_store=(TmToolTypePreviewStore(path=tm_tooltype_db_path)
+                           if settings.enable_tm_tooltype_write else None),
         dv_machinery_store=(
             DvMachineryPreviewStore(path=dv_machinery_db_path)
             if settings.enable_dv_machinery_write else None),
@@ -513,6 +544,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             "/agent-api/v1/dv-subject/confirm",
             "/agent-api/v1/dv-checkplan/confirm",
             "/agent-api/v1/dv-repair/confirm",
+            "/agent-api/v1/tm-tooltype/confirm",
             "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -629,6 +661,14 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 if not isinstance(preview_id, str):
                     raise ValueError("preview_id 必须是文本。")
                 response = asyncio.run(self.server.query_service.confirm_dv_repair(
+                    preview_id=preview_id, authorization=authorization))
+            elif self.path == "/agent-api/v1/tm-tooltype/confirm":
+                if set(payload) != {"preview_id"}:
+                    raise ValueError("确认请求仅允许 preview_id。")
+                preview_id = payload.get("preview_id")
+                if not isinstance(preview_id, str):
+                    raise ValueError("preview_id 必须是文本。")
+                response = asyncio.run(self.server.query_service.confirm_tm_tooltype(
                     preview_id=preview_id, authorization=authorization))
             else:
                 operation_id = payload.get("operation_id")

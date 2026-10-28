@@ -60,6 +60,11 @@ from ktg_agent.ktg.dv_machinery_writes import (APPLY_CREATE as MACHINERY_APPLY_C
     APPLY_DELETE as MACHINERY_APPLY_DELETE, APPLY_UPDATE as MACHINERY_APPLY_UPDATE,
     DvMachineryPreviewStore, build_dv_machinery_write_tools,
     dv_machinery_write_factories, dv_machinery_write_manifests)
+from ktg_agent.ktg.tm_tooltype import (build_tm_tooltype_tools, tm_tooltype_factories, tm_tooltype_manifests)
+from ktg_agent.ktg.tm_tooltype_writes import (APPLY_CREATE as TOOLTYPE_APPLY_CREATE,
+    APPLY_UPDATE as TOOLTYPE_APPLY_UPDATE, APPLY_DELETE as TOOLTYPE_APPLY_DELETE,
+    TmToolTypePreviewStore, build_tm_tooltype_write_tools, tm_tooltype_write_factories,
+    tm_tooltype_write_manifests)
 from ktg_agent.ktg.workorder_progress import (build_workorder_progress_tool,
     workorder_progress_factories, workorder_progress_manifests)
 from ktg_agent.ktg.client import KTGError
@@ -115,6 +120,7 @@ class QueryService:
         dv_subject_store: DvSubjectPreviewStore | None = None,
         dv_checkplan_store: DvCheckPlanPreviewStore | None = None,
         dv_repair_store: DvRepairPreviewStore | None = None,
+        tm_tooltype_store: TmToolTypePreviewStore | None = None,
         limits: RunLimits | None = None,
         spill_settings: SpillSettings | None = None,
         context_policy: ContextPolicy | None = None,
@@ -133,6 +139,7 @@ class QueryService:
         self._dv_subject_store = dv_subject_store
         self._dv_checkplan_store = dv_checkplan_store
         self._dv_repair_store = dv_repair_store
+        self._tm_tooltype_store = tm_tooltype_store
         self._inventory_store = inventory_store
         self._inventory_actions = inventory_actions
         self._spill = spill_settings
@@ -148,6 +155,7 @@ class QueryService:
                        *build_production_query_tools(),
                        *build_dv_machinerytype_tools(),
                        *build_dv_machinery_tools(), *build_dv_subject_tools(), *build_dv_checkplan_tools(),
+                       *build_tm_tooltype_tools(),
                        *build_dv_repair_tools())
         if inventory_store and inventory_actions:
             definitions = (*definitions, build_inventory_result_tool(inventory_store))
@@ -165,6 +173,9 @@ class QueryService:
         definitions = (*definitions, *checkplan_write_definitions)
         repair_write_definitions = (build_dv_repair_write_tools(dv_repair_store) if dv_repair_store else ())
         definitions = (*definitions, *repair_write_definitions)
+        tm_tooltype_write_definitions = (build_tm_tooltype_write_tools(tm_tooltype_store)
+                                         if tm_tooltype_store else ())
+        definitions = (*definitions, *tm_tooltype_write_definitions)
         self._registry = ToolRegistry(definitions)
         extra_factories = {**production_query_factories(), **workorder_progress_factories(),
                            **dv_machinerytype_factories(),
@@ -174,6 +185,8 @@ class QueryService:
                            **dv_subject_write_factories(subject_write_definitions),
                            **dv_checkplan_write_factories(checkplan_write_definitions),
                            **dv_repair_write_factories(repair_write_definitions),
+                           **tm_tooltype_factories(),
+                           **tm_tooltype_write_factories(tm_tooltype_write_definitions),
                            **dv_machinery_write_factories(machinery_write_definitions),
                            **dv_machinerytype_write_factories(write_definitions)}
         extra_manifests = (*production_query_manifests(), *workorder_progress_manifests(),
@@ -184,6 +197,8 @@ class QueryService:
                            *dv_subject_write_manifests(subject_write_definitions),
                            *dv_checkplan_write_manifests(checkplan_write_definitions),
                            *dv_repair_write_manifests(repair_write_definitions),
+                           *tm_tooltype_manifests(),
+                           *tm_tooltype_write_manifests(tm_tooltype_write_definitions),
                            *dv_machinery_write_manifests(machinery_write_definitions),
                            *dv_machinerytype_write_manifests(write_definitions))
         if inventory_store and inventory_actions:
@@ -204,7 +219,7 @@ class QueryService:
             extra_manifests = (*extra_manifests, result_manifest)
         self._catalog = build_legacy_catalog(definitions, extra_manifests=extra_manifests,
                                              extra_factories=extra_factories)
-        enabled_modules = {"md": True, "wm": True, "pro": True, "dv": True}
+        enabled_modules = {"md": True, "wm": True, "pro": True, "dv": True, "tm": True}
         enabled_tools = {definition.name: (enable_workorder_progress or definition.name != "ktg_pro_workorder_progress")
                          for definition in definitions}
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
@@ -680,6 +695,39 @@ class QueryService:
                         "failed" if result.is_error else "succeeded"),
             "label": result.content, "preview_id": clean_preview_id,
         }
+        if result.error_code is not None:
+            details["error_code"] = result.error_code
+        return {"result": details}
+
+    async def confirm_tm_tooltype(self, *, preview_id: str, authorization: str) -> JsonObject:
+        store = self._tm_tooltype_store
+        if store is None:
+            raise ValueError("工装夹具类型写入未启用。")
+        clean_preview_id = preview_id.strip()
+        if not clean_preview_id or len(clean_preview_id) > 100:
+            raise ValueError("preview_id 无效。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        user_key = self._identity_key(identity)
+        try:
+            action = store.action_for(preview_id=clean_preview_id, user_key=user_key)
+        except PreviewError as exc:
+            return {"result": {"kind": "tm_tooltype_result", "outcome": "failed",
+                "label": str(exc), "error_code": exc.code, "preview_id": clean_preview_id}}
+        apply_name = {"create": TOOLTYPE_APPLY_CREATE, "update": TOOLTYPE_APPLY_UPDATE,
+                      "delete": TOOLTYPE_APPLY_DELETE}.get(action)
+        if apply_name is None:
+            raise ValueError("工装夹具类型预览操作类型无效。")
+        call_id = str(uuid4())
+        result = await self._tool_runner().run(
+            ToolCall(call_id, apply_name, {"operation_id": clean_preview_id}),
+            ToolContext(run_id=str(uuid4()), tool_call_id=call_id,
+                operation_id=clean_preview_id, channel=ToolChannel.TRUSTED_CONFIRMATION,
+                confirmation_id=call_id, identity=identity, ktg_client=client),
+        )
+        details = result.details or {"kind": "tm_tooltype_result",
+            "outcome": "unknown" if result.status is ToolStatus.UNKNOWN else "failed" if result.is_error else "succeeded",
+            "label": result.content, "preview_id": clean_preview_id}
         if result.error_code is not None:
             details["error_code"] = result.error_code
         return {"result": details}

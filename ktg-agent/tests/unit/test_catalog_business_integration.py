@@ -98,8 +98,8 @@ def test_service_assembles_complete_candidate_set_and_keeps_experiment_off(tmp_p
     catalog = service._catalog
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
     candidates = catalog.candidate_snapshot(admin, service._switches_provider())
-    assert len(catalog._manifests) == 38  # includes six read-only repair tools
-    assert len(candidates.candidates) == 33
+    assert len(catalog._manifests) == 41  # includes six read-only repair tools and three tool type reads
+    assert len(candidates.candidates) == 36
     assert len(service.model_tool_schemas) == 2  # search_tools and load_tools
     for name, manifest in catalog._manifests.items():
         assert catalog.resolve_definition(name, manifest.version).name == name
