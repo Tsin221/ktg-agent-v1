@@ -89,6 +89,13 @@
               :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
               @confirm="confirmDvSubjectPreview"
             />
+            <agent-tm-tool-type-card
+              v-else-if="isTmToolTypeResult(result)"
+              :result="result"
+              :confirming="confirmingTmToolTypePreviewId === result.preview_id"
+              :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
+              @confirm="confirmTmToolTypePreview"
+            />
             <agent-dv-check-plan-card
               v-else-if="isDvCheckPlanResult(result)"
               :result="result"
@@ -186,13 +193,15 @@
 <script>
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
-  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair } from '@/api/agent'
+  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
+  confirmTmToolType } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
 import AgentDvMachineryCard from './DvMachineryCard.vue'
 import AgentDvSubjectCard from './DvSubjectCard.vue'
+import AgentTmToolTypeCard from './TmToolTypeCard.vue'
 import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import AgentDvRepairCard from './DvRepairCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
@@ -216,7 +225,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentDvCheckPlanCard, AgentDvRepairCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentDvCheckPlanCard, AgentDvRepairCard },
   data() {
     return {
       open: false,
@@ -252,6 +261,8 @@ export default {
       confirmingMachineryPreviewId: '',
       confirmingSubjectPreviewId: '',
       completedDvSubjectPreviewIds: [],
+      confirmingTmToolTypePreviewId: '',
+      completedTmToolTypePreviewIds: [],
       confirmingCheckPlanPreviewId: '',
       completedDvCheckPlanPreviewIds: [],
       confirmingRepairPreviewId: '',
@@ -286,6 +297,7 @@ export default {
       return this.loading || this.sessionLoading || (this.activeRun && !isTerminalRun(this.activeRun.status)) ||
         Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId) ||
         Boolean(this.confirmingDvPreviewId)
+        || Boolean(this.confirmingTmToolTypePreviewId)
     }
   },
   mounted() {
@@ -317,6 +329,7 @@ export default {
         completedDvPreviewIds: this.completedDvPreviewIds,
         completedDvMachineryPreviewIds: this.completedDvMachineryPreviewIds,
         completedDvSubjectPreviewIds: this.completedDvSubjectPreviewIds,
+        completedTmToolTypePreviewIds: this.completedTmToolTypePreviewIds,
         completedDvCheckPlanPreviewIds: this.completedDvCheckPlanPreviewIds,
         completedDvRepairPreviewIds: this.completedDvRepairPreviewIds,
         pastInputs: this.pastInputs,
@@ -336,6 +349,7 @@ export default {
       this.completedDvPreviewIds = state.completedDvPreviewIds || []
       this.completedDvMachineryPreviewIds = state.completedDvMachineryPreviewIds || []
       this.completedDvSubjectPreviewIds = state.completedDvSubjectPreviewIds || []
+      this.completedTmToolTypePreviewIds = state.completedTmToolTypePreviewIds || []
       this.completedDvCheckPlanPreviewIds = state.completedDvCheckPlanPreviewIds || []
       this.completedDvRepairPreviewIds = state.completedDvRepairPreviewIds || []
       this.pastInputs = state.pastInputs || []
@@ -374,6 +388,7 @@ export default {
       this.completedDvPreviewIds = []
       this.completedDvMachineryPreviewIds = []
       this.completedDvSubjectPreviewIds = []
+      this.completedTmToolTypePreviewIds = []
       this.completedDvCheckPlanPreviewIds = []
       this.completedDvRepairPreviewIds = []
       this.confirmingInventoryId = ''
@@ -381,6 +396,7 @@ export default {
       this.confirmingDvPreviewId = ''
       this.confirmingMachineryPreviewId = ''
       this.confirmingSubjectPreviewId = ''
+      this.confirmingTmToolTypePreviewId = ''
       this.confirmingCheckPlanPreviewId = ''
       this.confirmingRepairPreviewId = ''
     },
@@ -822,6 +838,10 @@ export default {
         'dv_subject_preview', 'dv_subject_create_result', 'dv_subject_update_result',
         'dv_subject_delete_result', 'dv_subject_result'].includes(result.kind)
     },
+    isTmToolTypeResult(result) {
+      return result && ['tm_tooltype_list', 'tm_tooltype_detail', 'tm_tooltype_options', 'tm_tooltype_preview',
+        'tm_tooltype_create_result', 'tm_tooltype_update_result', 'tm_tooltype_delete_result', 'tm_tooltype_result'].includes(result.kind)
+    },
     showInventoryResult(result) {
       const id = `confirm-inventory-${result.operation_id}`
       const entry = { id, role: 'assistant', text: '', results: [result] }
@@ -1069,6 +1089,46 @@ export default {
           this.confirmingSubjectPreviewId = ''
           this.scrollToBottom()
         }
+      }
+    },
+    async confirmTmToolTypePreview(previewId) {
+      if (!previewId || this.confirmingTmToolTypePreviewId || this.completedTmToolTypePreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingTmToolTypePreviewId = previewId
+      this.completedTmToolTypePreviewIds.push(previewId)
+      const entryId = `confirm-tm-tooltype-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '工装夹具类型确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmTmToolType(previewId)
+        if (epoch !== this.epoch) return
+        const result = response && response.result
+        const verified = result && result.outcome === 'succeeded' && result.verified === true
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, {
+          id: entryId, role: 'assistant',
+          text: verified ? '工装夹具类型操作已完成回读核验。' :
+            result && result.outcome === 'unknown' ? '操作结果未知，请先核对MES；系统不会自动重新提交。' :
+            result && result.label || '工装夹具类型操作未能确认成功，请重新预览。',
+          results: result ? [result] : []
+        })
+        this.saveLocalState()
+        if (verified) {
+          const item = result[({ create: 'created', update: 'updated', delete: 'deleted' })[result.action]] || {}
+          window.dispatchEvent(new CustomEvent('ktg:tm-tooltype-changed', {
+            detail: { result, action: result.action, tool_type_id: item.toolTypeId || null }
+          }))
+        }
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
+          text: message || '确认结果尚未核实。系统不会自动重新提交，请先核对工装夹具类型。' })
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) { this.confirmingTmToolTypePreviewId = ''; this.scrollToBottom() }
       }
     },
     async confirmPreview(previewId) {

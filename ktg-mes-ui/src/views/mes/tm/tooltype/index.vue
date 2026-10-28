@@ -291,6 +291,12 @@ export default {
   created() {
     this.getList();
   },
+  mounted() {
+    window.addEventListener('ktg:tm-tooltype-changed', this.handleAgentToolTypeChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:tm-tooltype-changed', this.handleAgentToolTypeChanged);
+  },
   methods: {
     /** 查询工装夹具类型列表 */
     getList() {
@@ -460,6 +466,24 @@ export default {
       }else{
         this.form.toolTypeCode = null;
       }
+    },
+    handleAgentToolTypeChanged(event) {
+      const detail = event && event.detail
+      const result = detail && detail.result
+      if (!result || result.outcome !== 'succeeded' || result.verified !== true) return
+      if (detail.action === 'delete' && this.open && detail.tool_type_id != null
+        && this.form.toolTypeId === detail.tool_type_id) {
+        this.cancel()
+      } else if (detail.action === 'update' && this.open && detail.tool_type_id != null
+        && this.form.toolTypeId === detail.tool_type_id) {
+        const openedId = this.form.toolTypeId
+        const openedMode = this.optType
+        getTooltype(openedId).then(response => {
+          if (!this.open || this.form.toolTypeId !== openedId || this.optType !== openedMode) return
+          this.form = response.data
+        }).catch(() => {})
+      }
+      this.getList()
     }
   }
 };

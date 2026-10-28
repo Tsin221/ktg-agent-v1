@@ -127,6 +127,17 @@ export function confirmDvSubject(previewId) {
   })
 }
 
+export function confirmTmToolType(previewId) {
+  return request({
+    baseURL: '',
+    url: '/agent-api/v1/tm-tooltype/confirm',
+    method: 'post',
+    data: { preview_id: previewId },
+    timeout: 120000,
+    headers: { repeatSubmit: false }
+  })
+}
+
 export function getInventoryOperation(operationId) {
   return request({
     baseURL: '', url: '/agent-api/v1/inventory-operations/' + encodeURIComponent(operationId),

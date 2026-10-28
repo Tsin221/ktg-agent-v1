@@ -5,6 +5,9 @@ export const isTerminalRun = status => terminal.includes(status)
 export function pageContext(route) {
   const context = { captured_at: new Date().toISOString() }
   if (route && typeof route.name === 'string') context.route_name = route.name.slice(0, 100)
+  if (route && (route.path === '/tm/tooltype' || route.path === '/mes/tm/tooltype' || route.name === 'Tooltype')) {
+    context.module = 'tm'
+  }
   const query = route && route.query || {}
   const filters = {}
   for (const key of ['itemCode', 'warehouseId', 'workorderCode']) {
