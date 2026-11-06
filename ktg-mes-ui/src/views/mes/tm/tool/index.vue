@@ -407,7 +407,29 @@ export default {
     this.getList();
     this.getTypeList();
   },
+  mounted() {
+    window.addEventListener('ktg:tm-tool-changed', this.handleAgentToolChanged);
+  },
+  beforeDestroy() {
+    window.removeEventListener('ktg:tm-tool-changed', this.handleAgentToolChanged);
+  },
   methods: {
+    handleAgentToolChanged(event) {
+      const detail = event && event.detail;
+      const result = detail && detail.result;
+      if (!result || result.outcome !== 'succeeded' || result.verified !== true) return;
+      if (detail.action === 'delete' && this.open && detail.tool_id != null && this.form.toolId === detail.tool_id) {
+        this.cancel();
+      } else if (detail.action === 'update' && this.open && detail.tool_id != null && this.form.toolId === detail.tool_id) {
+        const openedId = this.form.toolId;
+        const openedMode = this.optType;
+        getTool(openedId).then(response => {
+          if (!this.open || this.form.toolId !== openedId || this.optType !== openedMode) return;
+          this.form = response.data;
+        }).catch(() => {});
+      }
+      this.getList();
+    },
     /** 查询工装夹具清单列表 */
     getList() {
       this.loading = true;

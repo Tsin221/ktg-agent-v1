@@ -8,6 +8,9 @@ export function pageContext(route) {
   if (route && (route.path === '/tm/tooltype' || route.path === '/mes/tm/tooltype' || route.name === 'Tooltype')) {
     context.module = 'tm'
   }
+  if (route && (route.path === '/tm/tool' || route.path === '/mes/tm/tool' || route.name === 'Tool')) {
+    context.module = 'tm'
+  }
   const query = route && route.query || {}
   const filters = {}
   for (const key of ['itemCode', 'warehouseId', 'workorderCode']) {

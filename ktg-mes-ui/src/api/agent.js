@@ -138,6 +138,17 @@ export function confirmTmToolType(previewId) {
   })
 }
 
+export function confirmTmTool(previewId) {
+  return request({
+    baseURL: '',
+    url: '/agent-api/v1/tm-tool/confirm',
+    method: 'post',
+    data: { preview_id: previewId },
+    timeout: 120000,
+    headers: { repeatSubmit: false }
+  })
+}
+
 export function getInventoryOperation(operationId) {
   return request({
     baseURL: '', url: '/agent-api/v1/inventory-operations/' + encodeURIComponent(operationId),

@@ -96,6 +96,13 @@
               :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
               @confirm="confirmTmToolTypePreview"
             />
+            <agent-tm-tool-card
+              v-else-if="isTmToolResult(result)"
+              :result="result"
+              :confirming="confirmingTmToolPreviewId === result.preview_id"
+              :completed="completedTmToolPreviewIds.includes(result.preview_id)"
+              @confirm="confirmTmToolPreview"
+            />
             <agent-dv-check-plan-card
               v-else-if="isDvCheckPlanResult(result)"
               :result="result"
@@ -194,7 +201,7 @@
 import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
   confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
-  confirmTmToolType } from '@/api/agent'
+  confirmTmToolType, confirmTmTool } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
@@ -202,6 +209,7 @@ import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
 import AgentDvMachineryCard from './DvMachineryCard.vue'
 import AgentDvSubjectCard from './DvSubjectCard.vue'
 import AgentTmToolTypeCard from './TmToolTypeCard.vue'
+import AgentTmToolCard from './TmToolCard.vue'
 import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import AgentDvRepairCard from './DvRepairCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
@@ -225,7 +233,7 @@ async function allMessages(sessionId) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentDvCheckPlanCard, AgentDvRepairCard },
+  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentTmToolCard, AgentDvCheckPlanCard, AgentDvRepairCard },
   data() {
     return {
       open: false,
@@ -263,6 +271,8 @@ export default {
       completedDvSubjectPreviewIds: [],
       confirmingTmToolTypePreviewId: '',
       completedTmToolTypePreviewIds: [],
+      confirmingTmToolPreviewId: '',
+      completedTmToolPreviewIds: [],
       confirmingCheckPlanPreviewId: '',
       completedDvCheckPlanPreviewIds: [],
       confirmingRepairPreviewId: '',
@@ -842,6 +852,10 @@ export default {
       return result && ['tm_tooltype_list', 'tm_tooltype_detail', 'tm_tooltype_options', 'tm_tooltype_preview',
         'tm_tooltype_create_result', 'tm_tooltype_update_result', 'tm_tooltype_delete_result', 'tm_tooltype_result'].includes(result.kind)
     },
+    isTmToolResult(result) {
+      return result && ['tm_tool_list','tm_tool_detail','tm_tool_options','tm_tool_preview',
+        'tm_tool_create_result','tm_tool_update_result','tm_tool_delete_result','tm_tool_result'].includes(result.kind)
+    },
     showInventoryResult(result) {
       const id = `confirm-inventory-${result.operation_id}`
       const entry = { id, role: 'assistant', text: '', results: [result] }
@@ -1089,6 +1103,46 @@ export default {
           this.confirmingSubjectPreviewId = ''
           this.scrollToBottom()
         }
+      }
+    },
+    async confirmTmToolPreview(previewId) {
+      if (!previewId || this.confirmingTmToolPreviewId || this.completedTmToolPreviewIds.includes(previewId)) return
+      const epoch = this.epoch
+      this.confirmingTmToolPreviewId = previewId
+      this.completedTmToolPreviewIds.push(previewId)
+      const entryId = `confirm-tm-tool-${previewId}`
+      this.businessMessages.push({ id: entryId, role: 'assistant', text: '工装夹具台账确认请求已发出，仍在核验结果。请勿再次提交。' })
+      this.saveLocalState()
+      try {
+        const response = await confirmTmTool(previewId)
+        if (epoch !== this.epoch) return
+        const result = response && response.result
+        const verified = result && result.outcome === 'succeeded' && result.verified === true
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, {
+          id: entryId, role: 'assistant',
+          text: verified ? '工装夹具台账操作已完成回读核验。' :
+            result && result.outcome === 'unknown' ? '操作结果未知，请先核对MES；系统不会自动重新提交。' :
+            result && result.label || '工装夹具台账操作未能确认成功，请重新预览。',
+          results: result ? [result] : []
+        })
+        this.saveLocalState()
+        if (verified) {
+          const item = result[({ create: 'verified_record', update: 'verified_record', delete: 'deleted' })[result.action]] || {}
+          window.dispatchEvent(new CustomEvent('ktg:tm-tool-changed', {
+            detail: { result, action: result.action, tool_id: item.toolId || null }
+          }))
+        }
+      } catch (error) {
+        if (epoch !== this.epoch) return
+        const data = error && error.response && error.response.data
+        const message = data && data.error && data.error.message
+        const index = this.businessMessages.findIndex(item => item.id === entryId)
+        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
+          text: message || '确认结果尚未核实。系统不会自动重新提交，请先核对工装夹具。' })
+        this.saveLocalState()
+      } finally {
+        if (epoch === this.epoch) { this.confirmingTmToolPreviewId = ''; this.scrollToBottom() }
       }
     },
     async confirmTmToolTypePreview(previewId) {
