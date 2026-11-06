@@ -24,7 +24,7 @@
         </el-col>
         <el-col :span="8">
           <el-form-item label="工装夹具类型" prop="toolTypeId">
-            <el-select v-model="form.toolTypeId" placeholder="请选择类型">
+            <el-select v-model="queryParams.toolTypeId" placeholder="请选择类型" clearable>
               <el-option
                 v-for="dict in toolTypeOptions"
                 :key="dict.toolTypeId"
@@ -565,7 +565,7 @@ export default {
     },
     /** 导出按钮操作 */
     handleExport() {
-      this.download('tm/tool/export', {
+      this.download('mes/tm/tool/export', {
         ...this.queryParams
       }, `tool_${new Date().getTime()}.xlsx`)
     },
