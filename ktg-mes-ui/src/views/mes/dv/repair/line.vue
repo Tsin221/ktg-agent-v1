@@ -9,7 +9,7 @@
           icon="el-icon-plus"
           size="mini"
           @click="handleAdd"
-          v-hasPermi="['mes:dv:repair:add']"
+          v-hasPermi="['mes:dv:repairline:add']"
         >新增</el-button>
       </el-col>
       <el-col :span="1.5">
@@ -20,7 +20,7 @@
           size="mini"
           :disabled="multiple"
           @click="handleDelete"
-          v-hasPermi="['mes:dv:repair:remove']"
+          v-hasPermi="['mes:dv:repairline:remove']"
         >删除</el-button>
       </el-col>
       <right-toolbar :showSearch.sync="showSearch" @queryTable="getList"></right-toolbar>
@@ -45,14 +45,14 @@
             type="text"
             icon="el-icon-edit"
             @click="handleUpdate(scope.row)"
-            v-hasPermi="['mes:dv:repair:edit']"
+            v-hasPermi="['mes:dv:repairline:edit']"
           >修改</el-button>
           <el-button
             size="mini"
             type="text"
             icon="el-icon-delete"
             @click="handleDelete(scope.row)"
-            v-hasPermi="['mes:dv:repair:remove']"
+            v-hasPermi="['mes:dv:repairline:remove']"
           >删除</el-button>
         </template>
       </el-table-column>
