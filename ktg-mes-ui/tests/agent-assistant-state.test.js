@@ -85,7 +85,12 @@ const mockRequire = name => {
 }
 const browserState = new Map()
 let generatedIds = 0
-global.window = { crypto: { randomUUID: () => `request-${++generatedIds}` },
+const listeners = new Map()
+global.window = { innerWidth: 1200, innerHeight: 900,
+  addEventListener: (name, fn) => listeners.set(name, fn),
+  removeEventListener: name => listeners.delete(name),
+  localStorage: { getItem: key => browserState.get(key) || null, setItem: (key, value) => browserState.set(key, value) },
+  crypto: { randomUUID: () => `request-${++generatedIds}` },
   sessionStorage: {
     getItem: key => browserState.get(key) || null,
     setItem: (key, value) => browserState.set(key, value)
@@ -308,6 +313,113 @@ async function main() {
   assert.strictEqual(view.inputAttempt.requestId, uncertain.requestId)
   assert.strictEqual(view.displayedInputs.find(input => input.request_id === uncertain.requestId).status,
     'unconfirmed')
+  // Names are durable API results; cancelled/failed/stale saves never invent a title.
+  view.resetIdentity()
+  view.sessionId = 'session-1'
+  view.sessions = [{ session_id: 'session-1', title: 'original' }]
+  const beforeCreate = createCount
+  view.editTitle('create')
+  view.cancelTitle()
+  assert.strictEqual(createCount, beforeCreate)
+  let renameCalls = 0
+  api.renameAgentSession = async (id, title) => { renameCalls++; return { session_id: id, title } }
+  view.editTitle('rename')
+  view.titleDraft = '   '
+  await view.saveTitle()
+  assert.ok(view.titleError)
+  view.titleDraft = '中'.repeat(200) + '😀'
+  await view.saveTitle()
+  assert.strictEqual(renameCalls, 0)
+  view.titleDraft = '  ' + '中'.repeat(199) + '😀  '
+  await view.saveTitle()
+  assert.strictEqual(view.sessions[0].title, '中'.repeat(199) + '😀')
+  api.renameAgentSession = async () => { throw new Error('offline') }
+  view.editTitle('rename')
+  view.titleDraft = 'failed'
+  const oldTitle = view.sessions[0].title
+  await view.saveTitle()
+  assert.strictEqual(view.sessions[0].title, oldTitle)
+  assert.ok(view.titleError)
+  let releaseRename
+  api.renameAgentSession = (id, title) => new Promise(resolve => { releaseRename = () => resolve({ session_id: id, title }) })
+  for (const changeIdentity of [false, true]) {
+    view.sessionId = 'session-1'
+    view.sessions = [{ session_id: 'session-1', title: 'original' }]
+    view.editTitle('rename')
+    view.titleDraft = 'stale'
+    const saving = view.saveTitle()
+    if (changeIdentity) view.resetIdentity()
+    else { view.epoch++; view.cancelTitle(); view.sessionId = 'session-2' }
+    releaseRename()
+    await saving
+    assert.ok(!view.sessions.some(item => item.title === 'stale'))
+    assert.strictEqual(view.titleSaving, false)
+  }
+  api.createAgentSession = async () => { throw new Error('offline') }
+  view.editTitle('create')
+  view.titleDraft = 'new'
+  await view.saveTitle()
+  assert.ok(view.titleError)
+  assert.strictEqual(view.titleSaving, false)
+  api.createAgentSession = async title => ({ session_id: `session-${++createCount}`, title })
+  client.listInputs = async () => []
+  view.titleDraft = '  named new  '
+  await view.saveTitle()
+  assert.ok(view.sessions.some(item => item.title === 'named new'))
+  assert.strictEqual(view.titleMode, '')
+
+  const { clampPanelSize } = componentModule.exports
+  assert.deepStrictEqual(clampPanelSize({ width: 1000, height: 1000 }, { width: 800, height: 600 }), { width: 752, height: 552 })
+  view.updateViewport()
+  view.panelSize = { width: 390, height: 620 }
+  view.startResize({ button: 0, clientX: 800, clientY: 200 })
+  view.moveResize({ clientX: 600, clientY: 100 })
+  assert.deepStrictEqual(view.panelSize, { width: 590, height: 720 })
+  view.closePanel()
+  assert.strictEqual(listeners.size, 0)
+  assert.deepStrictEqual(JSON.parse(browserState.get('ktg-agent-panel-size')), view.panelSize)
+  view.openPanel()
+  assert.deepStrictEqual(view.panelSize, { width: 590, height: 720 })
+  view.viewport = { width: 750, height: 500 }
+  assert.deepStrictEqual(options.computed.panelStyle.call(view), { width: '590px', height: '452px' })
+  view.viewport = { width: 375, height: 600 }
+  assert.deepStrictEqual(options.computed.panelStyle.call(view), {})
+  view.startResize({ button: 0, clientX: 10, clientY: 10 })
+  assert.strictEqual(listeners.size, 0)
+  view.viewport = { width: 1200, height: 900 }
+  view.resizeKey({ key: 'ArrowLeft', preventDefault() {} })
+  assert.strictEqual(view.panelSize.width, 610)
+  const originalStorage = window.localStorage
+  window.localStorage = { setItem() { throw new Error('blocked') } }
+  assert.doesNotThrow(() => view.persistSize())
+  window.localStorage = originalStorage
+  // A fresh mounted component restores preferences; malformed storage stays usable.
+  for (const [stored, expected] of [
+    [JSON.stringify({ width: 700, height: 750 }), { width: 700, height: 750 }],
+    ['{broken', { width: 390, height: 620 }],
+    [JSON.stringify({ width: null, height: 750 }), { width: 390, height: 620 }],
+    [JSON.stringify({ width: -1, height: 750 }), { width: 390, height: 620 }]
+  ]) {
+    browserState.set('ktg-agent-panel-size', stored)
+    let unsubscribed = false
+    const mountedView = { ...options.data(), $store: { subscribe: () => () => { unsubscribed = true } } }
+    for (const [name, method] of Object.entries(options.methods)) mountedView[name] = method.bind(mountedView)
+    mountedView.bootstrap = () => {}
+    options.mounted.call(mountedView)
+    assert.deepStrictEqual(mountedView.panelSize, expected)
+    mountedView.startResize({ button: 0, clientX: 800, clientY: 200 })
+    assert.ok(listeners.has('pointermove'))
+    options.beforeDestroy.call(mountedView)
+    assert.strictEqual(listeners.size, 0)
+    assert.ok(unsubscribed)
+  }
+  window.localStorage = { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') } }
+  const blockedView = { ...options.data(), $store: { subscribe: () => () => {} } }
+  for (const [name, method] of Object.entries(options.methods)) blockedView[name] = method.bind(blockedView)
+  blockedView.bootstrap = () => {}
+  assert.doesNotThrow(() => options.mounted.call(blockedView))
+  options.beforeDestroy.call(blockedView)
+  window.localStorage = originalStorage
   console.log('agent assistant component state tests passed')
 }
 

@@ -12,6 +12,11 @@ export const createAgentSession = title => request({
   headers: { repeatSubmit: false }
 })
 
+export const renameAgentSession = (sessionId, title) => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/title', method: 'post', data: { title },
+  headers: { repeatSubmit: false }
+})
+
 export const listAgentSessions = params => request({
   baseURL: '', url: sessionUrl, method: 'get', params
 })

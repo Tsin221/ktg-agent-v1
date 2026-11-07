@@ -569,6 +569,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_run_create = (path.startswith("/agent-api/v1/sessions/")
                          and len(run_segments) == 2 and bool(run_segments[0])
                          and run_segments[1] == "runs" and not urlsplit(self.path).query)
+        is_title = (path.startswith("/agent-api/v1/sessions/")
+                    and len(run_segments) == 2 and bool(run_segments[0])
+                    and run_segments[1] == "title" and not urlsplit(self.path).query)
         is_compact = (path.startswith("/agent-api/v1/sessions/")
                       and len(run_segments) == 2 and bool(run_segments[0])
                       and run_segments[1] == "compact" and not urlsplit(self.path).query)
@@ -579,7 +582,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_input = (path.startswith("/agent-api/v1/runs/")
                     and len(cancel_segments) == 2 and bool(cancel_segments[0])
                     and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
-        if not is_run_create and not is_compact and not is_cancel and not is_input and self.path not in {
+        if not is_run_create and not is_title and not is_compact and not is_cancel and not is_input and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
@@ -618,6 +621,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 if title is not None and (not isinstance(title, str) or not title.strip()):
                     raise ValueError("title 必须是非空文本。")
                 response = asyncio.run(self.server.session_service.create(authorization, title))
+            elif is_title:
+                if set(payload) != {"title"} or not isinstance(payload["title"], str):
+                    raise ValueError("请求仅允许文本 title。")
+                response = asyncio.run(self.server.session_service.rename(
+                    authorization, run_segments[0], payload["title"]))
             elif is_run_create:
                 response = asyncio.run(self.server.session_service.create_run(
                     authorization, run_segments[0], payload.get("request_id"),

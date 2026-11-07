@@ -11,7 +11,8 @@
       <span>智能助手</span>
     </button>
 
-    <section v-else class="agent-panel" role="dialog" aria-label="KTG 智能助手">
+    <section v-else class="agent-panel" :style="panelStyle" role="dialog" aria-label="KTG 智能助手">
+      <button class="agent-panel__resize" type="button" aria-label="调整助手窗口大小：方向键调整宽高" title="拖动调整宽高；方向键每次调整20像素" @pointerdown.prevent="startResize" @keydown="resizeKey">⤢</button>
       <header class="agent-panel__header">
         <div>
           <h2>KTG 智能助手</h2>
@@ -28,8 +29,19 @@
           <option value="">选择会话</option>
           <option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.title || '未命名会话' }}</option>
         </select>
-        <button type="button" :disabled="sessionLoading" @click="newSession">新会话</button>
+        <button type="button" :disabled="sessionLoading || titleSaving" @click="editTitle('create')">新会话</button>
+        <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
       </div>
+
+      <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
+        <label for="agent-session-title">{{ titleMode === 'create' ? '新会话名称（可留空）' : '会话名称' }}</label>
+        <input id="agent-session-title" ref="titleInput" v-model="titleDraft" :disabled="titleSaving" placeholder="最多200个字符" @keydown.esc.prevent="cancelTitle">
+        <div>
+          <button type="submit" :disabled="titleSaving">{{ titleSaving ? '保存中…' : '保存' }}</button>
+          <button type="button" :disabled="titleSaving" @click="cancelTitle">取消</button>
+        </div>
+        <p v-if="titleError" role="alert">{{ titleError }}</p>
+      </form>
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <div class="agent-message agent-message--assistant">
@@ -206,7 +218,7 @@
 </template>
 
 <script>
-import { agentSession, createAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
+import { agentSession, createAgentSession, renameAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
   confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
   confirmTmToolType, confirmTmTool } from '@/api/agent'
@@ -239,12 +251,29 @@ async function allMessages(sessionId) {
   return items
 }
 
+export function clampPanelSize(size, viewport) {
+  const maxWidth = Math.max(1, viewport.width - 48)
+  const maxHeight = Math.max(1, viewport.height - 48)
+  return {
+    width: Math.round(Math.min(maxWidth, Math.max(Math.min(360, maxWidth), size.width))),
+    height: Math.round(Math.min(maxHeight, Math.max(Math.min(420, maxHeight), size.height)))
+  }
+}
+
 export default {
   name: 'AgentAssistant',
   components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentTmToolCard, AgentDvCheckPlanCard, AgentDvRepairCard },
   data() {
     return {
       open: false,
+      panelSize: { width: 390, height: 620 },
+      viewport: { width: 1024, height: 768 },
+      resizeStart: null,
+      titleMode: '',
+      titleDraft: '',
+      titleError: '',
+      titleSaving: false,
+      titleRequest: 0,
       loading: false,
       sessionLoading: false,
       draft: '',
@@ -291,6 +320,11 @@ export default {
     }
   },
   computed: {
+    panelStyle() {
+      if (this.viewport.width <= 600) return {}
+      const size = clampPanelSize(this.panelSize, this.viewport)
+      return { width: `${size.width}px`, height: `${size.height}px` }
+    },
     displayedMessages() { return optionCardPresentation([...this.messages, ...this.businessMessages], this.expandedOptions) },
     contextStatus() {
       const context = this.sessionStats && this.sessionStats.context
@@ -320,6 +354,14 @@ export default {
     }
   },
   mounted() {
+    this.updateViewport()
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('ktg-agent-panel-size'))
+      if (saved && Number.isFinite(saved.width) && saved.width > 0 && Number.isFinite(saved.height) && saved.height > 0) {
+        this.panelSize = saved
+      }
+    } catch (_) { /* Storage may be unavailable. */ }
+    window.addEventListener('resize', this.updateViewport)
     this.unsubscribeStore = this.$store.subscribe(mutation => {
       if (mutation.type === 'SET_TOKEN' || mutation.type === 'SET_ID') {
         this.resetIdentity()
@@ -329,11 +371,96 @@ export default {
     this.bootstrap()
   },
   beforeDestroy() {
+    this.finishResize()
+    this.cancelTitle()
+    window.removeEventListener('resize', this.updateViewport)
     this.epoch++
     agentSession.close()
     if (this.unsubscribeStore) this.unsubscribeStore()
   },
   methods: {
+    updateViewport() {
+      this.finishResize()
+      this.viewport = { width: window.innerWidth, height: window.innerHeight }
+    },
+    persistSize() {
+      try { window.localStorage.setItem('ktg-agent-panel-size', JSON.stringify(this.panelSize)) } catch (_) { /* Optional preference. */ }
+    },
+    startResize(event) {
+      if (event.button !== 0 || this.viewport.width <= 600) return
+      this.finishResize()
+      this.resizeStart = { x: event.clientX, y: event.clientY, ...clampPanelSize(this.panelSize, this.viewport) }
+      window.addEventListener('pointermove', this.moveResize)
+      window.addEventListener('pointerup', this.finishResize)
+      window.addEventListener('pointercancel', this.finishResize)
+      window.addEventListener('blur', this.finishResize)
+    },
+    moveResize(event) {
+      if (!this.resizeStart) return
+      const start = this.resizeStart
+      this.panelSize = clampPanelSize({ width: start.width + start.x - event.clientX,
+        height: start.height + start.y - event.clientY }, this.viewport)
+    },
+    finishResize() {
+      if (this.resizeStart) this.persistSize()
+      this.resizeStart = null
+      window.removeEventListener('pointermove', this.moveResize)
+      window.removeEventListener('pointerup', this.finishResize)
+      window.removeEventListener('pointercancel', this.finishResize)
+      window.removeEventListener('blur', this.finishResize)
+    },
+    resizeKey(event) {
+      const changes = { ArrowLeft: [20, 0], ArrowRight: [-20, 0], ArrowUp: [0, 20], ArrowDown: [0, -20] }
+      if (!changes[event.key]) return
+      event.preventDefault()
+      const size = clampPanelSize(this.panelSize, this.viewport)
+      const delta = changes[event.key]
+      this.panelSize = clampPanelSize({ width: size.width + delta[0], height: size.height + delta[1] }, this.viewport)
+      this.persistSize()
+    },
+    editTitle(mode) {
+      this.cancelTitle()
+      this.titleMode = mode
+      const session = this.sessions.find(item => item.session_id === this.sessionId)
+      this.titleDraft = mode === 'rename' && session ? session.title || '' : ''
+      this.$nextTick(() => this.$refs.titleInput && this.$refs.titleInput.focus())
+    },
+    cancelTitle() {
+      this.titleRequest++
+      this.titleMode = ''
+      this.titleDraft = ''
+      this.titleError = ''
+      this.titleSaving = false
+    },
+    async saveTitle() {
+      if (this.titleSaving || !this.titleMode) return
+      const title = this.titleDraft.trim()
+      const mode = this.titleMode
+      if ((mode === 'rename' && !title) || [...title].length > 200) {
+        this.titleError = '会话名称须为1至200个字符。'
+        return
+      }
+      const request = ++this.titleRequest
+      const epoch = this.epoch
+      const sessionId = this.sessionId
+      this.titleSaving = true
+      this.titleError = ''
+      try {
+        if (mode === 'create') {
+          await this.newSession(title || undefined)
+          if (request === this.titleRequest) this.cancelTitle()
+          return
+        }
+        const session = await renameAgentSession(sessionId, title)
+        if (request !== this.titleRequest || epoch !== this.epoch || sessionId !== this.sessionId) return
+        this.sessions = this.sessions.map(item => item.session_id === sessionId ? { ...item, ...session } : item)
+        this.cancelTitle()
+      } catch (error) {
+        if (request === this.titleRequest && (mode === 'create' || epoch === this.epoch)) this.titleError = this.errorText(error, '会话名称保存失败，请重试。')
+      } finally {
+        if (request === this.titleRequest) this.titleSaving = false
+      }
+    },
     toggleOptions(card) {
       this.$set(this.expandedOptions, card.id, !card.open)
       this.saveLocalState()
@@ -385,6 +512,7 @@ export default {
       if (this.inputAttempt) this.draft = this.inputAttempt.message
     },
     resetIdentity() {
+      this.cancelTitle()
       this.expandedOptions = {}
       this.sessionStats = null
       this.epoch++
@@ -446,6 +574,7 @@ export default {
       }
     },
     async loadSession(sessionId, epoch = ++this.epoch) {
+      this.cancelTitle()
       this.expandedOptions = {}
       agentSession.close()
       this.sessionLoading = true
@@ -468,6 +597,7 @@ export default {
         const session = await getAgentSession(sessionId)
         if (epoch !== this.epoch) return
         if (!this.sessions.some(item => item.session_id === sessionId)) this.sessions.unshift(session)
+        else this.sessions = this.sessions.map(item => item.session_id === sessionId ? { ...item, ...session } : item)
         if (!agentSession.getState() || agentSession.getState().sessionId !== sessionId) agentSession.setSession(sessionId)
         this.sessionId = sessionId
         this.restoreLocalState()
@@ -512,12 +642,12 @@ export default {
     selectSession(sessionId) {
       if (sessionId && sessionId !== this.sessionId) this.loadSession(sessionId)
     },
-    async newSession() {
+    async newSession(title) {
       const epoch = ++this.epoch
       agentSession.close()
       this.sessionLoading = true
       try {
-        const session = await createAgentSession()
+        const session = await createAgentSession(title)
         if (epoch !== this.epoch) return
         this.sessions.unshift(session)
         agentSession.setSession(session.session_id)
@@ -525,6 +655,7 @@ export default {
         this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
       } catch (error) {
         if (epoch === this.epoch) this.panelError = this.errorText(error, '新建会话失败。')
+        throw error
       } finally {
         if (epoch === this.epoch) this.sessionLoading = false
       }
@@ -607,6 +738,7 @@ export default {
       this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
     },
     closePanel() {
+      this.finishResize()
       this.open = false
     },
     submitExample(example) {
@@ -1294,6 +1426,7 @@ export default {
 .agent-panel {
   display: flex;
   flex-direction: column;
+  box-sizing: border-box;
   width: 390px;
   height: min(620px, calc(100vh - 48px));
   overflow: hidden;
@@ -1303,11 +1436,17 @@ export default {
   box-shadow: 0 12px 36px rgba(31, 45, 61, 0.22);
 }
 
+.agent-panel__resize { position: absolute; top: 0; left: 0; width: 24px; height: 24px; border: 0; background: transparent; color: #606266; cursor: nwse-resize; touch-action: none; }
+.agent-panel__title-form { flex-shrink: 0; padding: 8px 12px; background: #fff; display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-panel__title-form label { width: 100%; font-size: 12px; }
+.agent-panel__title-form input { min-width: 0; flex: 1; border: 1px solid #dcdfe6; border-radius: 4px; padding: 6px; }
+.agent-panel__title-form p { width: 100%; margin: 0; color: #f56c6c; font-size: 12px; }
 .agent-panel__header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 14px 16px 14px 26px;
   background: #fff;
   border-bottom: 1px solid #e4e7ed;
 }
@@ -1322,6 +1461,7 @@ export default {
 .agent-panel__header button { border: 0; background: transparent; color: #606266; cursor: pointer; font-size: 18px; }
 
 .agent-panel__sessions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1336,6 +1476,7 @@ export default {
 .agent-message--loading button { border: 0; background: transparent; color: #409eff; cursor: pointer; }
 
 .agent-panel__messages {
+  min-height: 0;
   flex: 1;
   overflow-y: auto;
   padding: 16px;
@@ -1389,6 +1530,7 @@ export default {
 }
 
 .agent-panel__composer {
+  flex-shrink: 0;
   display: flex;
   gap: 8px;
   padding: 12px;
@@ -1397,6 +1539,7 @@ export default {
 }
 
 .agent-panel__composer textarea {
+  min-width: 0;
   flex: 1;
   resize: none;
   padding: 9px 10px;
@@ -1422,6 +1565,7 @@ export default {
 
 @media (max-width: 600px) {
   .agent-launcher { right: 16px; bottom: 16px; }
+  .agent-panel__resize { display: none; }
   .agent-panel { inset: 0; width: 100%; height: 100%; border: 0; border-radius: 0; }
 }
 </style>

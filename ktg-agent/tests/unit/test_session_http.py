@@ -399,3 +399,29 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
                 ]
         assert request(server, "POST", f"/agent-api/v1/sessions/{sid}/runs",
                        body={"request_id": "interrupted", "message": "different"})[0] == 409
+
+
+def test_session_rename_validation_ownership_and_persistence(tmp_path: Path) -> None:
+    db = tmp_path / "sessions.sqlite3"
+    repo = SessionRepository(db)
+    with running_server(repo) as server:
+        status, created = request(server, "POST", "/agent-api/v1/sessions", body={"title": "  original  "})
+        assert status == 201 and created["title"] == "original"
+        sid = cast(str, created["session_id"])
+        path = f"/agent-api/v1/sessions/{sid}/title"
+        assert request(server, "POST", path, token="Bearer bob", body={"title": "other"})[0] == 404
+        assert request(server, "POST", path, token="Bearer expired", body={"title": "expired"})[0] == 401
+        boundary = "中" * 199 + "😀"
+        assert request(server, "POST", path, body={"title": boundary})[1]["title"] == boundary
+        assert request(server, "POST", "/agent-api/v1/sessions", body={"title": boundary})[0] == 201
+        for title in ("   ", "x" * 201, 123, None):
+            assert request(server, "POST", path, body={"title": title})[0] == 400
+        assert request(server, "POST", path, body={"title": "new", "userId": 8})[0] == 400
+        status, renamed = request(server, "POST", path, body={"title": "  renamed  "})
+        assert status == 200 and renamed["title"] == "renamed"
+        assert request(server, "GET", f"/agent-api/v1/sessions/{sid}")[1]["title"] == "renamed"
+        items = cast(list[dict[str, object]], request(server, "GET", "/agent-api/v1/sessions")[1]["items"])
+        assert next(item for item in items if item["session_id"] == sid)["title"] == "renamed"
+        assert request(server, "POST", "/agent-api/v1/sessions", body={"title": "x" * 201})[0] == 400
+    persisted = SessionRepository(db).get_session("id:7", sid)
+    assert persisted is not None and persisted.title == "renamed"

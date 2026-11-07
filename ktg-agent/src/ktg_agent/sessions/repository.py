@@ -369,8 +369,7 @@ class SessionRepository:
         owner_user_id = _required_text(owner_user_id, "owner user id")
         _safe_json({"owner_user_id": owner_user_id})
         if title is not None:
-            title = _required_text(title, "title")
-            _safe_json({"title": title})
+            title = self._title(title)
         session_id, now = str(uuid4()), _now()
         with self._connect() as db:
             db.execute(
@@ -378,6 +377,27 @@ class SessionRepository:
                 (session_id, owner_user_id, title, now, now),
             )
         return SessionRecord(session_id, owner_user_id, title, now, now)
+
+    @staticmethod
+    def _title(title: str) -> str:
+        title = _required_text(title, "title").strip()
+        if not title or len(title) > 200:
+            raise ValueError("会话名称须为 1 至 200 个字符。")
+        _safe_json({"title": title})
+        return title
+
+    def rename_session(self, owner_user_id: str, session_id: str, title: str) -> SessionRecord:
+        title = self._title(title)
+        with self._connect() as db:
+            changed = db.execute(
+                "UPDATE sessions SET title=?,updated_at=? WHERE id=? AND owner_user_id=?",
+                (title, _now(), session_id, owner_user_id),
+            )
+            if not changed.rowcount:
+                raise KeyError("session not found")
+            row = db.execute("SELECT * FROM sessions WHERE id=? AND owner_user_id=?",
+                             (session_id, owner_user_id)).fetchone()
+            return _session(row)
 
     def get_session(self, owner_user_id: str, session_id: str) -> SessionRecord | None:
         with self._connect() as db:

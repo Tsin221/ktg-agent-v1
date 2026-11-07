@@ -83,6 +83,10 @@ class SessionService:
         owner = await self._owner(authorization)
         return self._session(self._repository.create_session(owner, title=title))
 
+    async def rename(self, authorization: str, session_id: str, title: str) -> JsonObject:
+        owner = await self._owner(authorization)
+        return self._session(self._repository.rename_session(owner, session_id, title))
+
     async def list(self, authorization: str, *, cursor: int | None,
                    limit: int) -> JsonObject:
         owner = await self._owner(authorization)
