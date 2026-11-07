@@ -40,15 +40,54 @@ export function presentMessages(items) {
     } else if (item.role === 'assistant' || item.role === 'tool') {
       let entry = turns.get(runId)
       if (!entry || (item.role === 'assistant' && entry.text)) {
-        entry = { id: `message-${item.message_id}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId), results: [] }
+        entry = { id: `message-${item.message_id}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId), results: [], resultIds: [] }
         turns.set(runId, entry)
         entries.push(entry)
       }
       if (item.role === 'assistant' && textOf(item)) entry.text = textOf(item)
-      if (item.role === 'tool' && item.details && item.details.kind) entry.results.push(item.details)
+      if (item.role === 'tool' && item.details && item.details.kind) {
+        entry.results.push(item.details)
+        entry.resultIds.push(`result-${item.message_id}`)
+      }
     }
   }
   return entries.filter(entry => entry.role === 'user' || entry.text || (entry.results && entry.results.length))
+}
+
+// Compare only options and query scope, not timestamps or unrelated card kinds.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical)
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = canonical(value[key])
+      return result
+    }, {})
+  }
+  return value
+}
+
+export function optionCardPresentation(messages, expanded = {}) {
+  const previous = new Map()
+  return messages.map(message => ({ ...message,
+    resultPresentation: (message.results || []).map((result, index) => {
+      if (!['tm_tool_options', 'tm_tooltype_options'].includes(result.kind)) return null
+      const id = message.resultIds && message.resultIds[index] || `${message.id}-result-${index}`
+      const scope = JSON.stringify(canonical([result.kind, result.filters || null]))
+      const data = JSON.stringify(canonical(result.options))
+      const seen = previous.has(scope)
+      const same = seen && previous.get(scope) === data
+      previous.set(scope, data)
+      const explicit = /重新查询|重新查|再查|最新|展开/.test(message.sourceText || '')
+      const title = result.kind === 'tm_tool_options' ? '工装夹具基础选项' : '工装夹具类型选项'
+      const count = result.options && result.options.tool_types
+      return {
+        id, title,
+        open: Object.prototype.hasOwnProperty.call(expanded, id) ? expanded[id] : !same || explicit,
+        summary: `${same ? '与上次查询内容相同' : seen ? '选项内容已更新' : '首次查询结果'}${count ? ` · 本次返回${count.length}个类型` : ''}`,
+        queriedAt: result.queried_at || ''
+      }
+    })
+  }))
 }
 
 export function progressFromEvent(progress, event) {

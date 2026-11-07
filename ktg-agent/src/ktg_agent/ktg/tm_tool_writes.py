@@ -185,7 +185,12 @@ def _definition(store: TmToolPreviewStore, action: str, hidden: bool) -> ToolDef
   else: props.update(_UPDATE_SCHEMA_FIELDS)
  if hidden: props={"operation_id":{"type":"string","minLength":1,"maxLength":100}}
  schema: JsonObject={"type":"object","properties":props,"required":["operation_id"] if hidden else (["tool_code","tool_name","tool_type_id","quantity"] if action=="create" else ["tool_id"]),"additionalProperties":False}
- return ToolDefinition(name=name,version="1.0",label=f"{'确认' if hidden else '预览'}工装夹具{_label(action)}",description=(f"可信确认专用且对模型隐藏的{_label(action)}执行。" if hidden else f"生成单条工装夹具{_label(action)}预览，用户必须通过网页确认后才写入。"),input_schema=schema,output_schema={"type":"object","properties":{},"additionalProperties":True},required_permissions=_permissions(action),effect=ToolEffect.WRITE if hidden else ToolEffect.READ,execution_mode=ExecutionMode.SEQUENTIAL,retry_policy=RetryPolicy.NEVER,timeout_seconds=30,execute=run,expose_to_model=not hidden)
+ guidance={
+  "create":"新增必传tool_code、tool_name、真实tool_type_id、quantity；可从本会话已有选项匹配类型名称，不把名称当ID。缺失、变化或明确重查才读取选项。codeFlag=Y数量必须1，冲突时解释并追问，不擅自改变用户数量。",
+  "update":"仅支持名称、品牌、型号、维护方式、下次保养日期/次数周期和备注；不支持状态、数量、可用数量、类型或编码修改，拒绝这些请求无需查询基础选项。只传tool_id及用户要求改变的字段，工具会读取并保留其余字段，无需重复列表或选项查询。",
+  "delete":"按准确tool_id生成删除预览，工具会实时核对记录及类型条件，无需先查询基础选项。"
+ }[action]
+ return ToolDefinition(name=name,version="1.0",label=f"{'确认' if hidden else '预览'}工装夹具{_label(action)}",description=(f"可信确认专用且对模型隐藏的{_label(action)}执行。" if hidden else f"生成单条工装夹具{_label(action)}预览，用户必须通过网页确认后才写入。"+guidance),input_schema=schema,output_schema={"type":"object","properties":{},"additionalProperties":True},required_permissions=_permissions(action),effect=ToolEffect.WRITE if hidden else ToolEffect.READ,execution_mode=ExecutionMode.SEQUENTIAL,retry_policy=RetryPolicy.NEVER,timeout_seconds=30,execute=run,expose_to_model=not hidden)
 def _label(a: str) -> str:return {"create":"新增","update":"修改","delete":"删除"}[a]
 def _permissions(a: str) -> tuple[str, ...]:
  extra={"create":("mes:tm:tool:list","mes:tm:tooltype:query"),"update":("mes:tm:tool:query","mes:tm:tooltype:query"),"delete":("mes:tm:tool:query","mes:tm:tooltype:query")}

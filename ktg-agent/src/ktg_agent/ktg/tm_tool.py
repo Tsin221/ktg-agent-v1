@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import cast
+import json
 
 from ktg_agent.core.messages import JsonObject, JsonValue
 from ktg_agent.ktg.client import KTGClient, KTGError
@@ -269,18 +270,19 @@ def _read_content(label: str, data: JsonObject) -> str:
     if data.get("kind") == "tm_tool_detail":
         row = cast(JsonObject, data["tool"])
         return (
-            f"{label}：{row['toolCode']} {row['toolName']}；类型{row['toolTypeName']}；"
+            f"{label}：ID={row['toolId']}；{row['toolCode']} {row['toolName']}；类型ID={row['toolTypeId']} {row['toolTypeName']}；品牌{row['brand'] or '无'}；型号{row['spec'] or '无'}；"
             f"数量{row['quantity']}，可用{row['quantityAvail']}；状态{row['status']}；"
-            f"维护{row['maintenType']}，日期{row['nextMaintenDate'] or '无'}，"
-            f"周期{row['nextMaintenPeriod'] or '无'}；备注{row['remark'] or '无'}"
+            f"维护方式{row['maintenType']}；下次保养日期(nextMaintenDate)={row['nextMaintenDate'] or '未设置'}；"
+            f"下次按使用次数保养周期(nextMaintenPeriod)={row['nextMaintenPeriod'] or '未设置'}次；备注{row['remark'] or '无'}。"
+            "台账已有下次保养日期时直接据实回答，不需要从类型维护周期推算；次数周期为空不影响已保存日期。无日期时说明未设置，USAGE次数不能换算为日期。"
         )
     options = cast(JsonObject, data["options"])
     types = cast(list[JsonValue], options["tool_types"])
     statuses = cast(list[JsonValue], options["statuses"])
     truncation = "（已截断）" if options["tool_types_truncated"] else ""
     return (
-        f"{label}：工装类型候选{len(types)}条{truncation}；维护方式{options['maintenance_types']}；"
-        f"状态{statuses}；数量0至99999999整数；定期维护用天，按使用次数维护用次。"
+        f"{label}：工装类型候选{len(types)}条{truncation}：{json.dumps(types, ensure_ascii=False)}；维护方式{options['maintenance_types']}；"
+        f"状态{statuses}；数量0至99999999整数；codeFlag=Y为一件一码，数量必须1，用户指定2时说明冲突，不擅自改数量。类型名称不是ID，新增必传真实toolTypeId为tool_type_id；台账REGULAR用nextMaintenDate日期，USAGE用nextMaintenPeriod次数；类型维护周期是另一概念。"
     )[:4000]
 
 
@@ -330,7 +332,7 @@ def build_tm_tool_tools() -> tuple[ToolDefinition, ...]:
         ),
         ToolDefinition(
             name=OPTIONS_NAME, version="1.0", label="查询工装夹具选项",
-            description="读取工装类型、维护方式、状态字典及数量和维护周期规则。",
+            description="读取真实工装类型ID/名称/codeFlag、维护方式和状态选项。新增需要类型ID时可用本会话已查询选项，缺失、不完整、类型变化或用户明确重查时再读取；codeFlag=Y数量必须1。状态字典仅用于解释/查询，不代表支持修改状态；拒绝状态修改无需读取本工具。",
             input_schema=_schema({}),
             output_schema=_output_schema(("kind", "options", "queried_at")),
             required_permissions=("mes:tm:tooltype:list",), effect=ToolEffect.READ,

@@ -22,6 +22,38 @@ const presentationCode = transformFileSync(presentationPath, { babelrc: false, c
 const presentationModule = { exports: {} }
 new Function('exports', 'module', 'require', presentationCode)(presentationModule.exports, presentationModule, require)
 
+const { optionCardPresentation, presentMessages } = presentationModule.exports
+const items = [
+  { message_id: 101, run_id: 'one', role: 'user', content: [{ type: 'text', text: '有哪些类型' }] },
+  { message_id: 102, run_id: 'one', role: 'tool', details: { kind: 'tm_tool_options', options: { tool_types: [{ toolTypeId: 1 }], statuses: [] }, queried_at: 'first' } },
+  { message_id: 103, run_id: 'two', role: 'user', content: [{ type: 'text', text: '再说一次' }] },
+  { message_id: 104, run_id: 'two', role: 'tool', details: { kind: 'tm_tool_options', options: { statuses: [], tool_types: [{ toolTypeId: 1 }] }, queried_at: 'later' } },
+  { message_id: 105, run_id: 'three', role: 'tool', details: { kind: 'tm_tooltype_options', options: { tool_types: [{ toolTypeId: 1 }], statuses: [] } } },
+  { message_id: 106, run_id: 'four', role: 'tool', details: { kind: 'tm_tool_options', options: { tool_types: [{ toolTypeId: 2 }], statuses: [] } } },
+  { message_id: 107, run_id: 'five', role: 'user', content: [{ type: 'text', text: '请重新查询最新的工装夹具基础选项，并展开给我看。' }] },
+  { message_id: 108, run_id: 'five', role: 'tool', details: { kind: 'tm_tool_options', options: { tool_types: [{ toolTypeId: 2 }], statuses: [] } } },
+  { message_id: 109, run_id: 'six', role: 'tool', details: { kind: 'tm_tool_preview', preview_id: 'write-1', action: 'update' } }
+]
+const history = presentMessages(items)
+const views = optionCardPresentation(history)
+const cards = views.flatMap(item => item.resultPresentation || [])
+assert.strictEqual(cards[0].open, true, 'first necessary options remain visible')
+assert.strictEqual(cards[1].open, false, 'timestamps and object key order do not create business changes')
+assert.match(cards[1].summary, /相同/)
+assert.strictEqual(cards[2].open, true, 'different result kinds are independent')
+assert.strictEqual(cards[3].open, true, 'changed business data remains visible')
+assert.match(cards[3].summary, /更新/)
+assert.strictEqual(cards[4].open, true, 'explicit fresh query remains open even when equal')
+assert.strictEqual(cards[5], null, 'write preview never participates')
+const expanded = optionCardPresentation(presentMessages(items), { [cards[1].id]: true })
+assert.strictEqual(expanded[3].resultPresentation[0].open, true, 'expansion survives history reconstruction')
+assert.deepStrictEqual(optionCardPresentation(presentMessages(items)), views)
+assert.strictEqual(views.flatMap(item => item.results || []).length, 6, 'no results removed')
+const filtered = JSON.parse(JSON.stringify(items))
+filtered[3].details.filters = { scope: 'different' }
+assert.strictEqual(optionCardPresentation(presentMessages(filtered))[3].resultPresentation[0].open, true,
+  'different filters never count as repeats')
+
 async function main() {
   assert.strictEqual(presentationModule.exports.pageContext({ path: '/tm/tool' }).module, 'tm')
 
@@ -44,6 +76,23 @@ async function main() {
   const events = []
   global.CustomEvent = function (type, options) { this.type = type; this.detail = options.detail }
   global.window = { dispatchEvent: event => events.push(event) }
+  const saved = new Map()
+  window.sessionStorage = { setItem: (key, value) => saved.set(key, value), getItem: key => saved.get(key) }
+  const foldView = { ...assistant.data(), sessionId: 'options-session', $store: { state: { user: { id: 7 } } },
+    $set(target, key, value) { target[key] = value } }
+  foldView.localKey = assistant.methods.localKey.bind(foldView)
+  foldView.saveLocalState = assistant.methods.saveLocalState.bind(foldView)
+  assistant.methods.toggleOptions.call(foldView, cards[1])
+  assert.strictEqual(foldView.expandedOptions[cards[1].id], true)
+  foldView.expandedOptions = {}
+  assistant.methods.restoreLocalState.call(foldView)
+  assert.strictEqual(foldView.expandedOptions[cards[1].id], true, 'user expansion survives a history reload')
+  assistant.methods.toggleOptions.call(foldView, { ...cards[1], open: true })
+  assert.strictEqual(foldView.expandedOptions[cards[1].id], false, 'user can collapse an expanded result')
+  foldView.sessionId = 'another-session'
+  foldView.expandedOptions = {}
+  assistant.methods.restoreLocalState.call(foldView)
+  assert.deepStrictEqual(foldView.expandedOptions, {}, 'preferences do not cross sessions')
   const view = { ...assistant.data(), epoch: 1, saveLocalState() {}, scrollToBottom() {} }
   await assistant.methods.confirmTmToolPreview.call(view, 'preview-1')
   await assistant.methods.confirmTmToolPreview.call(view, 'preview-1')

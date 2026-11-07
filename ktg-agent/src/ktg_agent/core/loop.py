@@ -23,6 +23,7 @@ from ktg_agent.core.messages import (
     JsonObject,
     Message,
     StopReason,
+    SystemMessage,
     TextBlock,
     ToolCall,
     ToolResultMessage,
@@ -839,7 +840,13 @@ class AgentLoop:
                     text = " ".join(block.text for block in entry.content if isinstance(block, TextBlock))
                     if text:
                         summaries.append(text[:600])
-            text = "本轮已达到执行上限，尚未完成你的请求。"
+            prepared = any(
+                isinstance(entry, ToolResultMessage) and not entry.is_error
+                and isinstance((entry.details or {}).get("preview_id"), str)
+                for entry in history[baseline:]
+            )
+            text = ("本轮对话达到执行上限；已生成的业务预览仍可查看，等待网页确认。预览不代表已写入。"
+                    if prepared else "本轮已达到执行上限，尚未完成你的请求。")
             if failures:
                 text += "\n最后的工具调用未完成：\n" + "\n".join(
                     f"{name}：{failure}" for name, failure in list(failures.items())[-2:]
@@ -922,6 +929,16 @@ class AgentLoop:
         projected = project_model_messages(history)
         schemas = (self._discovery.begin_request(f"{publisher.run_id}:{turn}").schemas
                    if self._discovery is not None else self._tool_registry.model_schemas())
+        if self._discovery is not None:
+            # Activation belongs to this run, while conversation history may contain
+            # successful loads from earlier runs. State the authoritative snapshot.
+            active = "、".join(schema.name for schema in schemas)
+            projected = (*projected, SystemMessage((TextBlock(
+                "当前模型请求可调用工具仅为：" + active +
+                "。历史会话中加载过的工具不代表本轮已激活。缺少的工具先load_tools；"
+                "可一次加载当前任务需要的多个工具。只按当前提供的schema传递完整必填参数；"
+                "已经激活的工具不重复加载。详情已取得准确ID时不再额外查询列表。"
+            ),)))
         if self._context_policy is not None:
             # Projection removes invisible messages and clears result details. Preserve
             # the original spill markers in the projected sequence's coordinates.
@@ -936,6 +953,8 @@ class AgentLoop:
                 and isinstance(message.details, dict) and "spill" in message.details
                 for message in visible
             )
+            if self._discovery is not None:
+                spill_flags = (*spill_flags, False)
             try:
                 plan = fit_window(
                     projected, self._context_policy,

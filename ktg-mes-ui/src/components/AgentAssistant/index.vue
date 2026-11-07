@@ -48,76 +48,84 @@
           <div class="agent-message">{{ message.text }}</div>
           <div
             v-for="(result, index) in message.results || []"
-            :key="`${message.id}-${index}`"
+            :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
           >
-            <agent-workorder-draft-card
-              v-if="isWorkorderResult(result)"
-              :result="result"
-              :confirming="confirmingPreviewId === result.preview_id"
-              :completed="completedPreviewIds.includes(result.preview_id)"
-              @confirm="confirmPreview"
-              @select-product="selectProduct($event, message.sourceText)"
-              @view-workorder="viewWorkorder"
-            />
-            <agent-inventory-card
-              v-else-if="isInventoryResult(result)"
-              :result="result"
-              :confirming="confirmingInventoryId === result.operation_id"
-              :completed="completedInventoryIds.includes(result.operation_id)"
-              @confirm="confirmInventory"
-              @refresh="refreshInventory"
-              @view="viewInventory"
-            />
-            <agent-dv-machinery-type-card
-              v-else-if="isDvMachineryTypeResult(result)"
-              :result="result"
-              :confirming="confirmingDvPreviewId === result.preview_id"
-              :completed="completedDvPreviewIds.includes(result.preview_id)"
-              @confirm="confirmDvPreview"
-            />
-            <agent-dv-machinery-card
-              v-else-if="isDvMachineryResult(result)"
-              :result="result"
-              :confirming="confirmingMachineryPreviewId === result.preview_id"
-              :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
-              @confirm="confirmDvMachineryPreview"
-            />
-            <agent-dv-subject-card
-              v-else-if="isDvSubjectResult(result)"
-              :result="result"
-              :confirming="confirmingSubjectPreviewId === result.preview_id"
-              :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
-              @confirm="confirmDvSubjectPreview"
-            />
-            <agent-tm-tool-type-card
-              v-else-if="isTmToolTypeResult(result)"
-              :result="result"
-              :confirming="confirmingTmToolTypePreviewId === result.preview_id"
-              :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
-              @confirm="confirmTmToolTypePreview"
-            />
-            <agent-tm-tool-card
-              v-else-if="isTmToolResult(result)"
-              :result="result"
-              :confirming="confirmingTmToolPreviewId === result.preview_id"
-              :completed="completedTmToolPreviewIds.includes(result.preview_id)"
-              @confirm="confirmTmToolPreview"
-            />
-            <agent-dv-check-plan-card
-              v-else-if="isDvCheckPlanResult(result)"
-              :result="result"
-              :confirming="confirmingCheckPlanPreviewId === result.preview_id"
-              :completed="completedDvCheckPlanPreviewIds.includes(result.preview_id)"
-              @confirm="confirmDvCheckPlanPreview"
-            />
-            <agent-dv-repair-card
-              v-else-if="isDvRepairResult(result)"
-              :result="result"
-              :confirming="confirmingRepairPreviewId === result.preview_id"
-              :completed="completedDvRepairPreviewIds.includes(result.preview_id)"
-              @confirm="confirmDvRepairPreview"
-            />
-            <agent-result-card v-else :result="result" />
+            <div v-if="message.resultPresentation[index]" class="agent-option-summary">
+              <button type="button" :aria-expanded="message.resultPresentation[index].open ? 'true' : 'false'" :aria-controls="message.resultPresentation[index].id" @click="toggleOptions(message.resultPresentation[index])">
+                {{ message.resultPresentation[index].title }} · {{ message.resultPresentation[index].open ? '收起' : '展开完整内容' }}
+              </button>
+              <p>{{ message.resultPresentation[index].summary }}<span v-if="message.resultPresentation[index].queriedAt"> · 查询时间 {{ message.resultPresentation[index].queriedAt }}</span></p>
+            </div>
+            <div v-show="!message.resultPresentation[index] || message.resultPresentation[index].open" :id="message.resultPresentation[index] ? message.resultPresentation[index].id : null">
+              <agent-workorder-draft-card
+                v-if="isWorkorderResult(result)"
+                :result="result"
+                :confirming="confirmingPreviewId === result.preview_id"
+                :completed="completedPreviewIds.includes(result.preview_id)"
+                @confirm="confirmPreview"
+                @select-product="selectProduct($event, message.sourceText)"
+                @view-workorder="viewWorkorder"
+              />
+              <agent-inventory-card
+                v-else-if="isInventoryResult(result)"
+                :result="result"
+                :confirming="confirmingInventoryId === result.operation_id"
+                :completed="completedInventoryIds.includes(result.operation_id)"
+                @confirm="confirmInventory"
+                @refresh="refreshInventory"
+                @view="viewInventory"
+              />
+              <agent-dv-machinery-type-card
+                v-else-if="isDvMachineryTypeResult(result)"
+                :result="result"
+                :confirming="confirmingDvPreviewId === result.preview_id"
+                :completed="completedDvPreviewIds.includes(result.preview_id)"
+                @confirm="confirmDvPreview"
+              />
+              <agent-dv-machinery-card
+                v-else-if="isDvMachineryResult(result)"
+                :result="result"
+                :confirming="confirmingMachineryPreviewId === result.preview_id"
+                :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
+                @confirm="confirmDvMachineryPreview"
+              />
+              <agent-dv-subject-card
+                v-else-if="isDvSubjectResult(result)"
+                :result="result"
+                :confirming="confirmingSubjectPreviewId === result.preview_id"
+                :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
+                @confirm="confirmDvSubjectPreview"
+              />
+              <agent-tm-tool-type-card
+                v-else-if="isTmToolTypeResult(result)"
+                :result="result"
+                :confirming="confirmingTmToolTypePreviewId === result.preview_id"
+                :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
+                @confirm="confirmTmToolTypePreview"
+              />
+              <agent-tm-tool-card
+                v-else-if="isTmToolResult(result)"
+                :result="result"
+                :confirming="confirmingTmToolPreviewId === result.preview_id"
+                :completed="completedTmToolPreviewIds.includes(result.preview_id)"
+                @confirm="confirmTmToolPreview"
+              />
+              <agent-dv-check-plan-card
+                v-else-if="isDvCheckPlanResult(result)"
+                :result="result"
+                :confirming="confirmingCheckPlanPreviewId === result.preview_id"
+                :completed="completedDvCheckPlanPreviewIds.includes(result.preview_id)"
+                @confirm="confirmDvCheckPlanPreview"
+              />
+              <agent-dv-repair-card
+                v-else-if="isDvRepairResult(result)"
+                :result="result"
+                :confirming="confirmingRepairPreviewId === result.preview_id"
+                :completed="completedDvRepairPreviewIds.includes(result.preview_id)"
+                @confirm="confirmDvRepairPreview"
+              />
+              <agent-result-card v-else :result="result" />
+            </div>
           </div>
         </div>
         <div v-for="input in displayedInputs" :key="input.request_id" class="agent-entry agent-entry--user">
@@ -213,7 +221,7 @@ import AgentTmToolCard from './TmToolCard.vue'
 import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import AgentDvRepairCard from './DvRepairCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
-import { isTerminalRun, pageContext, presentMessages, progressFromEvent, runStatusText, usageText,
+import { isTerminalRun, pageContext, presentMessages, optionCardPresentation, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
@@ -278,11 +286,12 @@ export default {
       confirmingRepairPreviewId: '',
       completedDvRepairPreviewIds: [],
       messages: [],
+      expandedOptions: {},
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
   },
   computed: {
-    displayedMessages() { return [...this.messages, ...this.businessMessages] },
+    displayedMessages() { return optionCardPresentation([...this.messages, ...this.businessMessages], this.expandedOptions) },
     contextStatus() {
       const context = this.sessionStats && this.sessionStats.context
       if (!context || !context.configured) return null
@@ -325,6 +334,10 @@ export default {
     if (this.unsubscribeStore) this.unsubscribeStore()
   },
   methods: {
+    toggleOptions(card) {
+      this.$set(this.expandedOptions, card.id, !card.open)
+      this.saveLocalState()
+    },
     isTerminalRun, inputStatusText,
     runStatusText, usageText, contextStatusText, contextPressureText,
     localKey() {
@@ -333,6 +346,7 @@ export default {
     saveLocalState() {
       if (!this.sessionId || !window.sessionStorage) return
       window.sessionStorage.setItem(this.localKey(), JSON.stringify({
+        expandedOptions: this.expandedOptions,
         businessMessages: this.businessMessages,
         completedPreviewIds: this.completedPreviewIds,
         completedInventoryIds: this.completedInventoryIds,
@@ -353,6 +367,7 @@ export default {
       const saved = window.sessionStorage.getItem(this.localKey())
       if (!saved) return
       const state = JSON.parse(saved)
+      this.expandedOptions = state.expandedOptions || {}
       this.businessMessages = state.businessMessages || []
       this.completedPreviewIds = state.completedPreviewIds || []
       this.completedInventoryIds = state.completedInventoryIds || []
@@ -370,6 +385,7 @@ export default {
       if (this.inputAttempt) this.draft = this.inputAttempt.message
     },
     resetIdentity() {
+      this.expandedOptions = {}
       this.sessionStats = null
       this.epoch++
       agentSession.checkIdentity()
@@ -430,6 +446,7 @@ export default {
       }
     },
     async loadSession(sessionId, epoch = ++this.epoch) {
+      this.expandedOptions = {}
       agentSession.close()
       this.sessionLoading = true
       this.panelError = ''
@@ -1327,6 +1344,10 @@ export default {
 .agent-entry { display: flex; flex-direction: column; margin-top: 12px; }
 .agent-entry--user { align-items: flex-end; }
 .agent-entry--assistant { align-items: stretch; }
+.agent-option-summary { margin-top: 10px; padding: 10px 12px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; color: #303133; }
+.agent-option-summary button { padding: 0; border: 0; background: transparent; color: var(--current-color, #409eff); cursor: pointer; text-align: left; min-height: 32px; }
+.agent-option-summary button:focus-visible { outline: 2px solid var(--current-color, #409eff); outline-offset: 2px; }
+.agent-option-summary p { margin: 4px 0 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .agent-message {
   max-width: 88%;
