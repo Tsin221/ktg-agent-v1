@@ -13,6 +13,7 @@ import sqlite3
 
 import pytest
 
+from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.tm_tooltype import (
     LIST_NAME, DETAIL_NAME, OPTIONS_NAME, build_tm_tooltype_tools,
@@ -26,7 +27,7 @@ from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.service import SessionService
 from ktg_agent.tools.discovery import MODULES
 from ktg_agent.tools import CatalogIdentity
-from ktg_agent.tools import ToolContext, ToolStatus
+from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner, ToolStatus
 from ktg_agent.tools.registry import ToolChannel, ToolDefinition, ToolResult
 
 
@@ -153,6 +154,38 @@ def test_list_content_reports_when_page_rows_are_not_all_expanded() -> None:
                  {"page_size": 100})
     assert "本页共50条，以上展示30条，另有20条未展开" in result.content
     assert "缩小page_size或继续分页查询" in result.content
+
+
+@pytest.mark.parametrize(("name", "arguments"), [
+    (DETAIL_NAME, {}),
+    (DETAIL_NAME, {"tool_type_id": 10, "tool_type_code": "TT001"}),
+    (DETAIL_NAME, {"tool_type_id": "10"}),
+    (DETAIL_NAME, {"tool_type_id": 9223372036854775808}),
+    (DETAIL_NAME, {"tool_type_code": " "}),
+    (DETAIL_NAME, {"toolTypeId": 10}),
+    (LIST_NAME, {"tool_type_name": " "}),
+    (LIST_NAME, {"page": 1000001}),
+    (LIST_NAME, {"code_flag": "YES"}),
+    (OPTIONS_NAME, {"tool_type_id": 10}),
+])
+def test_read_runner_rejects_invalid_arguments_before_mes(name: str, arguments: JsonObject) -> None:
+    mes = FakeMES()
+    runner = ToolRunner(ToolRegistry(build_tm_tooltype_tools()))
+    result = asyncio.run(runner.run(ToolCall("call", name, arguments),
+                                    ToolContext("run", "call", ktg_client=mes.client())))
+    assert result.error_code == "VALIDATION_ERROR"
+    assert result.details is not None and "path" in result.details
+    assert mes.reads == []
+
+
+@pytest.mark.parametrize("arguments", [{"tool_type_id": 10}, {"tool_type_code": "TT001"}])
+def test_detail_runner_accepts_either_locator(arguments: JsonObject) -> None:
+    mes = FakeMES()
+    runner = ToolRunner(ToolRegistry(build_tm_tooltype_tools()))
+    result = asyncio.run(runner.run(ToolCall("call", DETAIL_NAME, arguments),
+                                    ToolContext("run", "call", ktg_client=mes.client())))
+    assert result.status is ToolStatus.SUCCEEDED
+    assert result.details is not None and result.details["tool_type"] == ROW
 
 
 def write_tools(store: TmToolTypePreviewStore) -> dict[str, ToolDefinition]:

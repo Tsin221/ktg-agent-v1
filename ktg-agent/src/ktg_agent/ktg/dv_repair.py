@@ -28,6 +28,22 @@ LINE_FIELDS = ("lineId", "repairId", "subjectId", "subjectCode", "subjectName", 
 FILTERS = {"repair_code": ("repairCode", 64), "repair_name": ("repairName", 100),
     "machinery_code": ("machineryCode", 64), "machinery_name": ("machineryName", 255),
     "repair_result": ("repairResult", 64), "status": ("status", 64)}
+_FILTER_DESCRIPTIONS = {
+    "repair_code": "维修单业务编号，精确筛选。",
+    "repair_name": "维修单名称，模糊筛选。",
+    "machinery_code": "维修单所关联设备的业务编码，精确筛选。",
+    "machinery_name": "维修单所关联设备的名称，模糊筛选。",
+    "repair_result": "维修结果字典值，取自维修选项中的 repair_results[].value，精确筛选。",
+    "status": "维修单据状态字典值，取自维修选项中的 statuses[].value，精确筛选。",
+}
+_READ_DESCRIPTIONS = {
+    "list": "分页筛选维修单列表，返回维修单头、总数和可用于后续查询的 repairId。可按维修单名称、设备、维修结果或单据状态筛选。",
+    "detail": "读取一张维修单的单头详情，包括关联设备、报修日期、完工日期、验收和维修结果。必须且只能传 repair_id 或 repair_code 之一。",
+    "lines": "分页读取指定维修单的维修内容行，包括维修项目、故障现象、维修描述和 lineId。先从维修单列表或详情取得 repair_id。",
+    "options": "查询维修选项和字典值，返回维修结果、单据状态和当前支持的草稿操作。无需参数。",
+    "machinery_candidates": "为草稿维修单选取关联设备，按设备编码或名称查询维修设备候选，返回可传入预览的 machineryId。",
+    "subject_candidates": "为草稿维修内容选取关联项目，按项目编码或名称查询维修项目候选，返回可传入预览的 subjectId。",
+}
 
 
 def _project(value: object, fields: tuple[str, ...], id_key: str) -> JsonObject:
@@ -164,18 +180,36 @@ def build_dv_repair_tools() -> tuple[ToolDefinition, ...]:
     result = []
     for kind, label, perms in _CONFIG:
         if kind == "list":
-            props: dict[str, JsonValue] = {key: {"type": "string", "minLength": 1, "maxLength": limit} for key, (_wire, limit) in FILTERS.items()}
+            props: dict[str, JsonValue] = {
+                key: {"type": "string", "minLength": 1, "maxLength": limit,
+                      "description": _FILTER_DESCRIPTIONS[key]}
+                for key, (_wire, limit) in FILTERS.items()
+            }
         elif kind == "detail":
-            props = {"repair_id": {"type": "integer", "minimum": 1}, "repair_code": {"type": "string", "minLength": 1, "maxLength": 64}}
+            props = {
+                "repair_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                              "description": "维修单系统 ID，取自维修单查询结果中的 repairId。"},
+                "repair_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                                "description": "完整且唯一的维修单业务编号，按精确编号定位。"},
+            }
         elif kind == "lines":
-            props = {"repair_id": {"type": "integer", "minimum": 1}}
+            props = {"repair_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                                   "description": "内容行所属维修单的系统 ID，取自维修单查询结果中的 repairId。"}}
         elif kind.endswith("candidates"):
             key = "machinery" if kind.startswith("machinery") else "subject"
-            props = {f"{key}_code": {"type": "string", "minLength": 1, "maxLength": 64},
-                     f"{key}_name": {"type": "string", "minLength": 1, "maxLength": 255}}
+            entity = "设备" if key == "machinery" else "项目"
+            props = {f"{key}_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                                    "description": f"{entity}业务编码，精确筛选。"},
+                     f"{key}_name": {"type": "string", "minLength": 1, "maxLength": 255,
+                                    "description": f"{entity}名称，模糊筛选。"}}
         else: props = {}
         if kind not in {"detail", "options"}:
-            props.update(page={"type": "integer", "minimum": 1}, page_size={"type": "integer", "minimum": 1, "maximum": 100})
+            props.update(
+                page={"type": "integer", "minimum": 1, "maximum": 1_000_000, "default": 1,
+                      "description": "页码，从第 1 页开始。"},
+                page_size={"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                           "description": "每页记录数。"},
+            )
         schema = _schema(props, ("repair_id",) if kind == "lines" else ())
         if kind == "detail":
             schema = {"type": "object", "properties": props, "oneOf": [
@@ -220,7 +254,7 @@ def build_dv_repair_tools() -> tuple[ToolDefinition, ...]:
             ("kind", "rows", "total", "page", "page_size", "repair", "queried_at") if kind == "lines" else
             ("kind", "rows", "total", "page", "page_size", "queried_at"))
         result.append(ToolDefinition(name=f"ktg_dv_repair_{kind}", version="1.0", label=label,
-            description=label + "；仅查询当前 MES 数据。", input_schema=schema,
+            description=_READ_DESCRIPTIONS[kind], input_schema=schema,
             output_schema=_output_schema(fields), required_permissions=perms,
             effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,
             retry_policy=RetryPolicy.BOUNDED_READ, timeout_seconds=20, execute=execute))

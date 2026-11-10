@@ -167,27 +167,48 @@ def build_tm_tooltype_tools() -> tuple[ToolDefinition, ...]:
 
     return (
         ToolDefinition(name=LIST_NAME, version="1.0", label="查询工装夹具类型",
-            description="分页查询工装夹具类型；编码精确匹配，名称按页面规则模糊匹配，可按编码管理和维护类型过滤。",
-            input_schema=_schema({**{key: {"type": "string", "minLength": 1, "maxLength": maximum}
-                                    for key, (_wire, maximum) in FILTER_FIELDS.items()},
-                                  "code_flag": {"type": "string", "enum": ["Y", "N"]},
-                                  "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"]},
-                                  "page": {"type": "integer", "minimum": 1, "default": 1},
-                                  "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}),
+            description="分页查看有哪些工装夹具类型，返回类型系统 ID、编码、名称和维护配置。编码精确匹配，名称模糊匹配。",
+            input_schema=_schema({
+                "tool_type_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                                   "description": "完整类型业务编码，精确筛选。"},
+                "tool_type_name": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
+                                   "description": "类型名称关键字，模糊筛选。"},
+                "code_flag": {"type": "string", "enum": ["Y", "N"],
+                              "description": "类型的编码管理方式。Y 一件一码，N 非独立编码管理。"},
+                "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"],
+                                 "description": "类型维护方式。REGULAR 定期维护，USAGE 按使用次数维护。"},
+                "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1,
+                         "description": "页码，从 1 开始，省略时查第 1 页。"},
+                "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                              "description": "每页记录数，省略时为 20。"},
+            }),
             output_schema=_output_schema(("kind", "rows", "total", "page", "page_size", "filters", "queried_at")),
             required_permissions=("mes:tm:tooltype:list",), effect=ToolEffect.READ,
             execution_mode=ExecutionMode.PARALLEL, retry_policy=RetryPolicy.BOUNDED_READ,
             timeout_seconds=20, execute=execute_list),
         ToolDefinition(name=DETAIL_NAME, version="1.0", label="查询工装夹具类型详情",
-            description="按明确ID或精确编码读取单条工装夹具类型；编码多命中时要求用户明确选择ID。",
-            input_schema=_schema({"tool_type_id": {"type": "integer", "minimum": 1},
-                                  "tool_type_code": {"type": "string", "minLength": 1, "maxLength": 64}}),
+            description=(
+                "读取一条工装夹具类型记录，查看编码管理、维护方式及类型维护周期。"
+                "必须且只能提供类型系统 ID 或完整类型编码；编码命中多条时请用系统 ID。"
+            ),
+            input_schema={
+                **_schema({
+                    "tool_type_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                                     "description": "类型系统 ID，取自类型查询或台账选项中的 toolTypeId。"},
+                    "tool_type_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                                       "description": "类型的完整业务编码，精确匹配。"},
+                }),
+                "oneOf": [{"required": ["tool_type_id"]}, {"required": ["tool_type_code"]}],
+            },
             output_schema=_output_schema(("kind", "tool_type", "queried_at")),
             required_permissions=("mes:tm:tooltype:query", "mes:tm:tooltype:list"), effect=ToolEffect.READ,
             execution_mode=ExecutionMode.PARALLEL, retry_policy=RetryPolicy.BOUNDED_READ,
             timeout_seconds=20, execute=execute_detail),
         ToolDefinition(name=OPTIONS_NAME, version="1.0", label="查询工装夹具类型选项",
-            description="读取页面使用的是否编码管理、维护类型字典，以及维护周期正整数范围与单位。",
+            description=(
+                "读取工装夹具类型表单的编码管理和维护方式字典，以及类型维护周期规则。"
+                "REGULAR 周期单位为天，USAGE 周期单位为次。需要已有类型记录和真实类型 ID 时查询工装夹具类型列表。"
+            ),
             input_schema=_schema({}), output_schema=_output_schema(("kind", "options", "queried_at")),
             required_permissions=("mes:tm:tooltype:list",), effect=ToolEffect.READ,
             execution_mode=ExecutionMode.PARALLEL, retry_policy=RetryPolicy.BOUNDED_READ,

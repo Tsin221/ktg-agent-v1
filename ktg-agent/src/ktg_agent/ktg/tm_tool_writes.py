@@ -34,7 +34,22 @@ CREATE_FIELDS=("toolCode","toolName","brand","spec","toolTypeId","toolTypeCode",
 _ARG_TO_WIRE={"tool_name":"toolName","brand":"brand","spec":"spec","mainten_type":"maintenType","next_mainten_date":"nextMaintenDate","next_mainten_period":"nextMaintenPeriod","remark":"remark"}
 _WIRE_TO_ARG={v:k for k,v in _ARG_TO_WIRE.items()}
 _ACTIONS={"create":(PREVIEW_CREATE,APPLY_CREATE,"mes:tm:tool:add"),"update":(PREVIEW_UPDATE,APPLY_UPDATE,"mes:tm:tool:edit"),"delete":(PREVIEW_DELETE,APPLY_DELETE,"mes:tm:tool:remove")}
-_UPDATE_SCHEMA_FIELDS: dict[str, JsonValue] = {"tool_name":{"type":"string","minLength":1,"maxLength":100},"brand":{"type":["string","null"],"maxLength":100},"spec":{"type":["string","null"],"maxLength":100},"mainten_type":{"type":"string","enum":["REGULAR","USAGE"]},"next_mainten_date":{"type":["string","null"]},"next_mainten_period":{"type":["integer","null"],"minimum":1,"maximum":2147483647},"remark":{"type":["string","null"],"maxLength":250}}
+_UPDATE_SCHEMA_FIELDS: dict[str, JsonValue] = {
+    "tool_name": {"type": "string", "minLength": 1, "maxLength": 100,
+                  "description": "工装夹具台账名称，传非空文本。"},
+    "brand": {"type": ["string", "null"], "maxLength": 100,
+              "description": "品牌，传 null 或空字符串可清空。"},
+    "spec": {"type": ["string", "null"], "maxLength": 100,
+             "description": "型号，传 null 或空字符串可清空。"},
+    "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"],
+                     "description": "维护方式。REGULAR 为定期维护，USAGE 为按使用次数维护。"},
+    "next_mainten_date": {"type": ["string", "null"],
+                          "description": "台账下次保养日期，仅 REGULAR 适用。用 yyyy-MM-dd，传 null 可清空。"},
+    "next_mainten_period": {"type": ["integer", "null"], "minimum": 1, "maximum": 2147483647,
+                            "description": "台账下次保养的使用次数，仅 USAGE 适用。传正整数次数，传 null 可清空。"},
+    "remark": {"type": ["string", "null"], "maxLength": 250,
+               "description": "台账备注，传 null 或空字符串可清空。"},
+}
 @dataclass(slots=True)
 class _Preview:
     preview_id: str
@@ -177,18 +192,30 @@ def _definition(store: TmToolPreviewStore, action: str, hidden: bool) -> ToolDef
  preview,apply,_=_ACTIONS[action]; name=apply if hidden else preview
  def run(context: ToolContext, arguments: Mapping[str, Any]) -> Awaitable[ToolResult]:
   return _apply(store,action,context,arguments) if hidden else _preview(store,action,context,arguments)
- props: dict[str, JsonValue]={"tool_id":{"type":"integer","minimum":1}} if action!="create" else {}
+ props: dict[str, JsonValue] = {}
+ if action != "create":
+  props["tool_id"] = {"type": "integer", "minimum": 1,
+                      "description": "目标台账记录的系统 ID，取自台账查询结果的 toolId。"}
  if action!="delete":
   if action=="create":
-   props.update({"tool_code":{"type":"string","minLength":1,"maxLength":64},"tool_name":{"type":"string","minLength":1,"maxLength":100},"tool_type_id":{"type":"integer","minimum":1},"quantity":{"type":"integer","minimum":0,"maximum":99999999}})
-   props.update({k:v for k,v in _UPDATE_SCHEMA_FIELDS.items() if k not in {"tool_name"}})
+   props.update(_UPDATE_SCHEMA_FIELDS)
+   props.update({
+    "tool_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                  "description": "新工装夹具的完整唯一业务编码。"},
+    "tool_type_id": {"type": "integer", "minimum": 1,
+                     "description": "关联类型的真实系统 ID，取自类型查询结果的 toolTypeId。若只有名称，先用 ktg_tm_tool_options 的候选核对。"},
+    "quantity": {"type": "integer", "minimum": 0, "maximum": 99999999,
+                 "description": "新增工装数量，按件计。类型 codeFlag=Y 时必须为 1，N 时接受非负整数。"},
+    "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"], "default": "REGULAR",
+                     "description": "省略时默认 REGULAR（定期维护），只适用日期。USAGE（按使用次数维护）只适用次数。"},
+   })
   else: props.update(_UPDATE_SCHEMA_FIELDS)
  if hidden: props={"operation_id":{"type":"string","minLength":1,"maxLength":100}}
  schema: JsonObject={"type":"object","properties":props,"required":["operation_id"] if hidden else (["tool_code","tool_name","tool_type_id","quantity"] if action=="create" else ["tool_id"]),"additionalProperties":False}
  guidance={
-  "create":"新增必传tool_code、tool_name、真实tool_type_id、quantity；可从本会话已有选项匹配类型名称，不把名称当ID。缺失、变化或明确重查才读取选项。codeFlag=Y数量必须1，冲突时解释并追问，不擅自改变用户数量。",
-  "update":"仅支持名称、品牌、型号、维护方式、下次保养日期/次数周期和备注；不支持状态、数量、可用数量、类型或编码修改，拒绝这些请求无需查询基础选项。只传tool_id及用户要求改变的字段，工具会读取并保留其余字段，无需重复列表或选项查询。",
-  "delete":"按准确tool_id生成删除预览，工具会实时核对记录及类型条件，无需先查询基础选项。"
+  "create":"新增必传tool_code、tool_name、真实tool_type_id、quantity；可从本会话已有选项匹配类型名称，不把名称当ID。缺失、变化或明确重查才读取选项。codeFlag=Y数量必须1，冲突时解释并追问，不擅自改变用户数量。维护方式默认REGULAR。REGULAR的次数周期与USAGE的下次保养日期须省略或传null。",
+  "update":"仅支持名称、品牌、型号、维护方式、下次保养日期/次数周期和备注；不支持状态、数量、可用数量、类型或编码修改，拒绝这些请求无需查询基础选项。只传tool_id及用户要求改变的字段，省略字段通常保留原值。显式传维护方式时会清空该方式不适用的日期或次数周期，无需重复列表或选项查询。",
+  "delete":"按准确tool_id生成删除预览，仅在库且数量全部可用的台账记录允许删除。工具会实时核对记录，无需先查询基础选项。"
  }[action]
  return ToolDefinition(name=name,version="1.0",label=f"{'确认' if hidden else '预览'}工装夹具{_label(action)}",description=(f"可信确认专用且对模型隐藏的{_label(action)}执行。" if hidden else f"生成单条工装夹具{_label(action)}预览，用户必须通过网页确认后才写入。"+guidance),input_schema=schema,output_schema={"type":"object","properties":{},"additionalProperties":True},required_permissions=_permissions(action),effect=ToolEffect.WRITE if hidden else ToolEffect.READ,execution_mode=ExecutionMode.SEQUENTIAL,retry_policy=RetryPolicy.NEVER,timeout_seconds=30,execute=run,expose_to_model=not hidden)
 def _label(a: str) -> str:return {"create":"新增","update":"修改","delete":"删除"}[a]

@@ -9,7 +9,7 @@ from itertools import islice
 import json
 from typing import Any, Protocol
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 
 from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.tools.catalog import CandidateSnapshot, CatalogSwitches, ToolCatalog
@@ -55,6 +55,18 @@ class CallAuthorization:
 
 
 type AuthorizationProvider = Callable[[ToolContext], Awaitable[CallAuthorization]]
+
+
+def _input_error_reason(error: ValidationError) -> str:
+    branches = error.validator_value
+    if error.validator == "oneOf" and isinstance(branches, list) and branches and all(
+        isinstance(branch, dict) and branch.keys() == {"required"}
+        and isinstance(branch["required"], list) and len(branch["required"]) == 1
+        for branch in branches
+    ):
+        fields = " 或 ".join(branch["required"][0] for branch in branches)
+        return f"必须且只能提供 {fields}。"
+    return error.message[:400]
 
 
 class ToolRunner:
@@ -155,7 +167,7 @@ class ToolRunner:
             Draft202012Validator(tool.input_schema).iter_errors(call.arguments), 5,
         ))
         if validation_errors:
-            errors = [{"path": error.json_path, "reason": error.message[:400]}
+            errors = [{"path": error.json_path, "reason": _input_error_reason(error)}
                       for error in validation_errors]
             properties = tool.input_schema.get("properties")
             # Diagnostic details are deliberately stripped from model messages.

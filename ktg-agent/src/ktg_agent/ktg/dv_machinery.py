@@ -56,14 +56,21 @@ def _output_schema(fields: tuple[str, ...]) -> JsonObject:
 
 def _list_definition() -> ToolDefinition:
     properties: dict[str, JsonValue] = {
-        key: {"type": "string", "minLength": 1, "maxLength": limit,
+        key: {"type": "string", "minLength": 1, "maxLength": limit, "pattern": r"\S",
               "description": f"筛选字段 {wire}；编码/品牌/规格/分类编码/车间编码精确匹配，名称字段按页面规则模糊匹配"}
         for key, (wire, limit) in _FILTER_FIELDS.items() if limit is not None
     }
-    for key in ("machinery_type_id", "workshop_id"):
-        properties[key] = {"type": "integer", "minimum": 1}
-    properties["status"] = {"type": "string", "enum": cast(JsonValue, sorted(_STATUS))}
-    properties["page"] = {"type": "integer", "minimum": 1, "default": 1}
+    properties["machinery_type_id"] = {
+        "type": "integer", "minimum": 1, "description": "设备分类系统 ID，取自分类树的 machineryTypeId。",
+    }
+    properties["workshop_id"] = {
+        "type": "integer", "minimum": 1, "description": "车间系统 ID，取自车间候选的 workshopId。",
+    }
+    properties["status"] = {
+        "type": "string", "enum": cast(JsonValue, sorted(_STATUS)),
+        "description": "设备状态。STOP 停机，WORKING 生产中，REPAIR 维修中。",
+    }
+    properties["page"] = {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1}
     properties["page_size"] = {"type": "integer", "minimum": 1, "maximum": _PAGE_SIZE_MAX, "default": 20}
 
     async def execute(context: ToolContext, arguments: Mapping[str, object]) -> ToolResult:
@@ -88,7 +95,7 @@ def _list_definition() -> ToolDefinition:
 
     return ToolDefinition(
         name=LIST_NAME, version="1.0", label="查询设备台账",
-        description=("按页面支持的筛选条件查询设备台账。编码、品牌、规格和分类/车间编码精确匹配，"
+        description=("分页筛选设备台账记录，可按车间、分类、设备状态等查找设备。编码、品牌、规格和分类/车间编码精确匹配，"
                      "名称字段按后端模糊匹配。分页有上限；名称命中多个设备时只列出候选，不代替用户选择。"),
         input_schema=_schema(properties),
         output_schema=_output_schema(("kind", "rows", "total", "page", "page_size", "filters", "queried_at")),
@@ -115,12 +122,17 @@ def _detail_definition() -> ToolDefinition:
 
     return ToolDefinition(
         name=DETAIL_NAME, version="1.0", label="查询设备详情",
-        description=("按设备 ID 或精确设备编码查询详情。必须且只能提供其中一个；编码查找若有多条结果会返回歧义，"
-                     "请改用 ID，不要按名称猜测目标。"),
-        input_schema=_schema({
-            "machinery_id": {"type": "integer", "minimum": 1},
-            "machinery_code": {"type": "string", "minLength": 1, "maxLength": 64},
-        }),
+        description=("查询一台设备的台账详情。必须且只能提供设备系统 ID 或完整设备编码；"
+                     "仅有设备名称时先筛选设备台账。完整编码命中多台设备时请改用 ID。"),
+        input_schema={
+            **_schema({
+                "machinery_id": {"type": "integer", "minimum": 1,
+                                 "description": "设备系统 ID，取自设备台账结果中的 machineryId。"},
+                "machinery_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                                   "description": "设备完整业务编码，按精确编码定位。"},
+            }),
+            "oneOf": [{"required": ["machinery_id"]}, {"required": ["machinery_code"]}],
+        },
         output_schema=_output_schema(("kind", "machinery", "queried_at")),
         required_permissions=("mes:dv:machinery:query", "mes:dv:machinery:list"),
         effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,
@@ -145,11 +157,17 @@ def _workshop_definition() -> ToolDefinition:
 
     return ToolDefinition(
         name=WORKSHOP_NAME, version="1.0", label="查询启用车间候选",
-        description="查询设备台账可选的启用车间。返回车间 ID、编码和名称；同名时须按编码/ID确认。",
+        description=(
+            "查询设备台账新增、修改可选的启用车间候选。返回车间 ID、编码和名称；"
+            "使用 workshopId 作为设备预览的 workshop_id。同名时按编码或系统 ID 确认。"
+        ),
         input_schema=_schema({
-            "workshop_name": {"type": "string", "minLength": 1, "maxLength": 255},
-            "workshop_code": {"type": "string", "minLength": 1, "maxLength": 64},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+            "workshop_name": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": r"\S",
+                              "description": "车间名称关键字，模糊匹配。"},
+            "workshop_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                              "description": "完整车间编码，精确匹配。"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50,
+                      "description": "最多返回的候选数，省略时为 50。"},
         }),
         output_schema=_output_schema(("kind", "rows", "total", "truncated", "queried_at")),
         required_permissions=("mes:md:workshop:list",), effect=ToolEffect.READ,

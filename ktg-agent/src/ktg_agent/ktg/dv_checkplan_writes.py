@@ -209,49 +209,64 @@ def _definition(store: DvCheckPlanPreviewStore, action: str, hidden: bool) -> To
 
 
 _PREVIEW_DESCRIPTION = {
-    "create": "创建手工编号的计划草稿预览。必须给编号、名称、类型、周期和周期次数；不调用自动编号。",
-    "update": "编辑PREPARE计划，或以互斥transition=activate/deactivate切换状态；启用需设备和项目明细均非空。",
-    "delete": "单条删除PREPARE计划，预览显示级联删除设备及项目关联的影响；不可恢复。",
-    "machinery_add": "给PREPARE计划关联单台设备；检查跨所有计划（含草稿）的同类型设备冲突。",
-    "machinery_remove": "按明确record_id从PREPARE计划移除一条设备快照。",
-    "subject_add": "给PREPARE计划关联一个已启用且计划类型匹配的项目；MES从源项目保存快照。",
-    "subject_remove": "按明确record_id从PREPARE计划移除一条项目快照。",
+    "create": "生成点检保养计划草稿新增预览，网页确认后才写入。编号由用户提供。必填计划名称、类型、周期单位和间隔数。",
+    "update": "生成点检保养计划修改或启停预览，网页确认后才写入。edit 仅修改草稿字段，activate 启用草稿，"
+              "deactivate 将已启用计划转回草稿。启用须至少关联一台设备和一个项目。",
+    "delete": "生成单条点检保养计划草稿删除预览，网页确认后才写入。预览显示级联删除设备及项目关联的影响。",
+    "machinery_add": "生成计划草稿关联单台设备的预览，网页确认后才写入。使用设备候选中的 machineryId，"
+                     "会检查跨所有计划（含草稿）的同类型设备冲突。",
+    "machinery_remove": "生成计划草稿移除单条设备关联的预览，网页确认后才写入。使用计划关联明细中的 recordId。",
+    "subject_add": "生成计划草稿关联单个项目的预览，网页确认后才写入。使用已启用且与计划类型匹配的项目候选中的 subjectId。",
+    "subject_remove": "生成计划草稿移除单条项目关联的预览，网页确认后才写入。使用计划关联明细中的 recordId。",
 }
 
 
 def _preview_schema(action: str) -> dict[str, object]:
     positive = {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
+    plan_id = {**positive, "description": "目标计划的系统 ID，取自计划列表或详情的 planId。"}
+    cycle_type = {"type": "string", "minLength": 1, "maxLength": 64,
+                  "description": "周期单位，取自当前计划选项的 cycle_types 中对应 value。"}
+    cycle_count = {"type": "integer", "minimum": 1, "maximum": 99999999,
+                   "description": "按周期单位计的间隔数，例如 cycle_type=DAY、cycle_count=3 表示每 3 天。"}
+    start_date = {"type": "string", "format": "date", "description": "计划开始日期，yyyy-MM-dd。"}
+    end_date = {"type": "string", "format": "date", "description": "计划结束日期，yyyy-MM-dd，须不早于开始日期。"}
     if action == "create":
-        props: dict[str, object] = {"plan_code": {"type": "string", "minLength": 1, "maxLength": 64},
+        props: dict[str, object] = {"plan_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                                                "description": "用户提供的业务编号，在点检和保养计划中共享且唯一。"},
             "plan_name": {"type": "string", "minLength": 1, "maxLength": 100},
-            "plan_type": {"type": "string", "enum": list(PLAN_TYPES)},
-            "cycle_type": {"type": "string", "minLength": 1, "maxLength": 64},
-            "cycle_count": {"type": "integer", "minimum": 1, "maximum": 99999999},
-            "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"},
+            "plan_type": {"type": "string", "enum": list(PLAN_TYPES), "description": "CHECK 为点检，MAINTEN 为保养。"},
+            "cycle_type": cycle_type, "cycle_count": cycle_count,
+            "start_date": start_date, "end_date": end_date,
             "remark": {"type": "string", "maxLength": 250}}
         required: tuple[str, ...] = ("plan_code", "plan_name", "plan_type", "cycle_type", "cycle_count")
     elif action == "update":
-        props = {"plan_id": positive, "transition": {"type": "string", "enum": ["edit", "activate", "deactivate"]}}
+        transition_schema = {"type": "string", "enum": ["edit", "activate", "deactivate"],
+                             "description": "edit 至少带一个改动字段，省略字段保留原值。activate 和 deactivate 仅传计划 ID 和动作。"}
         business = {"plan_code": {"type": "string", "minLength": 1, "maxLength": 64},
             "plan_name": {"type": "string", "minLength": 1, "maxLength": 100},
-            "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"},
-            "cycle_type": {"type": "string", "minLength": 1, "maxLength": 64},
-            "cycle_count": {"type": "integer", "minimum": 1, "maximum": 99999999}, "remark": {"type": "string", "maxLength": 250}}
-        base = {"plan_id": positive}
+            "start_date": start_date, "end_date": end_date,
+            "cycle_type": cycle_type, "cycle_count": cycle_count, "remark": {"type": "string", "maxLength": 250}}
+        base = {"plan_id": plan_id}
         edit_props = {**base, "transition": {"const": "edit"}, **business}
         branches: list[dict[str, object]] = [{"type": "object", "properties": edit_props,
             "required": ["plan_id", "transition"], "minProperties": 3, "additionalProperties": False}]
         for transition in ("activate", "deactivate"):
-            branches.append({"type": "object", "properties": {"plan_id": positive,
+            branches.append({"type": "object", "properties": {"plan_id": plan_id,
                 "transition": {"const": transition}}, "required": ["plan_id", "transition"], "additionalProperties": False})
-        return {"type": "object", "properties": {**base, "transition": props["transition"], **business},
+        return {"type": "object", "properties": {**base, "transition": transition_schema, **business},
                 "oneOf": branches, "additionalProperties": False}
     elif action in {"delete"}:
-        props, required = {"plan_id": positive}, ("plan_id",)
-    elif action in {"machinery_add", "subject_add"}:
-        props, required = {"plan_id": positive, "machinery_id" if action == "machinery_add" else "subject_id": positive}, ("plan_id", "machinery_id" if action == "machinery_add" else "subject_id")
+        props, required = {"plan_id": plan_id}, ("plan_id",)
+    elif action == "machinery_add":
+        props = {"plan_id": plan_id, "machinery_id": {**positive, "description": "设备系统 ID，取自设备候选的 machineryId。"}}
+        required = ("plan_id", "machinery_id")
+    elif action == "subject_add":
+        props = {"plan_id": plan_id, "subject_id": {**positive, "description": "项目系统 ID，取自项目候选的 subjectId。"}}
+        required = ("plan_id", "subject_id")
     else:
-        props, required = {"plan_id": positive, "record_id": positive}, ("plan_id", "record_id")
+        props = {"plan_id": plan_id, "record_id": {
+            **positive, "description": "该计划中对应关联记录的系统 ID，取自计划关联明细的 recordId。"}}
+        required = ("plan_id", "record_id")
     return {"type": "object", "properties": props, "required": list(required), "additionalProperties": False}
 
 

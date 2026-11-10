@@ -19,14 +19,19 @@ from ktg_agent.tools.registry import (
 
 
 _SPECS = (
-    ("ktg_pro_workorder_get", "工单详情", "按 ID 读取一张生产工单。", "workorder", "query", "workorder_id"),
-    ("ktg_pro_task_list", "生产任务列表", "按工单 ID 分页读取生产任务，按任务 ID 升序。", "protask", "list", None),
-    ("ktg_pro_task_get", "生产任务详情", "按 ID 读取一项生产任务。", "protask", "query", "task_id"),
-    ("ktg_pro_feedback_list", "报工列表", "按工单或任务 ID 分页读取报工，按记录 ID 升序；带时区的时间范围包含起点、不包含终点。", "feedback", "list", None),
-    ("ktg_pro_feedback_get", "报工详情", "按 ID 读取一条报工。", "feedback", "query", "record_id"),
+    ("ktg_pro_workorder_get", "查询生产工单详情", "按工单系统 ID 读取一张生产工单的基本信息，包括产品、计划量、已生产量、需求日期和状态。", "workorder", "query", "workorder_id"),
+    ("ktg_pro_task_list", "生产任务列表", "按工单系统 ID 分页列出该工单下的生产任务和工序，按任务 ID 升序，返回任务系统 ID。", "protask", "list", None),
+    ("ktg_pro_task_get", "生产任务详情", "按任务系统 ID 读取一项生产任务的工序、数量、开始和结束时间及状态。", "protask", "query", "task_id"),
+    ("ktg_pro_feedback_list", "报工列表", "分页查询工单或任务的报工记录，至少传一个系统 ID，也可同时传两个。可按报工时间和状态筛选，按记录 ID 升序。", "feedback", "list", None),
+    ("ktg_pro_feedback_get", "报工详情", "按报工记录系统 ID 读取单条报工详情，包括关联工单、任务、工序、报工时间和合格及不合格数量。", "feedback", "query", "record_id"),
 )
 _PATHS = {"workorder": "workorder", "protask": "protask", "feedback": "feedback"}
 _IDS = {"workorder": "workorderId", "protask": "taskId", "feedback": "recordId"}
+_ID_DESCRIPTIONS = {
+    "workorder_id": "生产工单的系统 ID，取自工单列表结果中的 workorderId。",
+    "task_id": "生产任务的系统 ID，取自生产任务列表结果中的 taskId。",
+    "record_id": "报工记录的系统 ID，取自报工列表结果中的 recordId。",
+}
 _FIELDS = {
     "workorder": ("workorderId", "workorderCode", "workorderName", "workorderType", "productCode", "productName", "unitOfMeasure", "quantity", "quantityProduced", "quantityChanged", "quantityScheduled", "requestDate", "status", "version", "updateTime"),
     "protask": ("taskId", "taskCode", "taskName", "workorderId", "workorderCode", "processId", "processCode", "processName", "unitOfMeasure", "quantity", "quantityProduced", "quantityChanged", "quantityQuanlify", "quantityUnquanlify", "startTime", "endTime", "status", "updateTime"),
@@ -35,28 +40,36 @@ _FIELDS = {
 _QUANTITIES = {"quantity", "quantityProduced", "quantityChanged", "quantityScheduled", "quantityQuanlify", "quantityUnquanlify", "quantityFeedback", "quantityQualified", "quantityUnquanlified"}
 
 
-def _positive() -> JsonObject:
-    return {"type": "integer", "minimum": 1}
+def _id_property(argument: str) -> JsonObject:
+    return {"type": "integer", "minimum": 1, "description": _ID_DESCRIPTIONS[argument]}
 
 
-def _schema(domain: str, list_mode: bool, id_argument: str | None) -> JsonObject:
+def _schema(domain: str, id_argument: str | None) -> JsonObject:
     properties: JsonObject = {}
     required: list[str] = []
     if id_argument:
-        properties[id_argument] = _positive()
+        properties[id_argument] = _id_property(id_argument)
         required.append(id_argument)
     else:
-        properties["workorder_id"] = _positive()
+        properties["workorder_id"] = _id_property("workorder_id")
         if domain == "feedback":
-            properties["task_id"] = _positive()
-            properties["status"] = {"type": "string", "minLength": 1, "maxLength": 64}
-            properties["from_time"] = {"type": "string", "format": "date-time"}
-            properties["to_time"] = {"type": "string", "format": "date-time"}
+            properties["task_id"] = _id_property("task_id")
+            properties["status"] = {"type": "string", "minLength": 1, "maxLength": 64,
+                                    "description": "报工记录的 MES 状态值，精确筛选。"}
+            properties["from_time"] = {"type": "string", "format": "date-time",
+                                       "description": "报工时间起点（含），使用带时区的 ISO 8601 时间，如 2026-01-01T08:00:00+08:00。"}
+            properties["to_time"] = {"type": "string", "format": "date-time",
+                                     "description": "报工时间终点（不含），使用带时区的 ISO 8601 时间。两端都提供时必须晚于起点。"}
         else:
             required.append("workorder_id")
-        properties["page"] = {"type": "integer", "minimum": 1, "default": 1}
-        properties["page_size"] = {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}
-    return {"type": "object", "properties": properties, "required": cast(list[JsonValue], required), "additionalProperties": False}
+        properties["page"] = {"type": "integer", "minimum": 1, "default": 1, "description": "页码，从第 1 页开始。"}
+        properties["page_size"] = {"type": "integer", "minimum": 1, "maximum": 20, "default": 10,
+                                   "description": "每页记录数。"}
+    schema: JsonObject = {"type": "object", "properties": properties,
+                          "required": cast(list[JsonValue], required), "additionalProperties": False}
+    if domain == "feedback" and id_argument is None:
+        schema["anyOf"] = [{"required": ["workorder_id"]}, {"required": ["task_id"]}]
+    return schema
 
 
 def _output_schema(list_mode: bool) -> JsonObject:
@@ -87,7 +100,7 @@ def _definition(spec: tuple[str, str, str, str, str, str | None]) -> ToolDefinit
         return ToolResult(content=summary[:4000], details=details)
     return ToolDefinition(
         name=name, version="1.0", label=label, description=description,
-        input_schema=_schema(domain, list_mode, id_argument),
+        input_schema=_schema(domain, id_argument),
         output_schema=_output_schema(list_mode),
         required_permissions=(f"mes:pro:{domain}:{action}",),
         effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,

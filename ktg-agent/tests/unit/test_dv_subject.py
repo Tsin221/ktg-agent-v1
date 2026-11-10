@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.ktg.dv_subject import LIST_NAME, DETAIL_NAME, build_dv_subject_tools
 from ktg_agent.ktg.dv_subject_writes import (
@@ -21,7 +22,7 @@ from ktg_agent.ktg.dv_subject_writes import (
 from ktg_agent.server import Settings, create_service, AgentHTTPServer
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.service import SessionService
-from ktg_agent.tools import CatalogIdentity, ToolContext, ToolStatus
+from ktg_agent.tools import CatalogIdentity, ToolContext, ToolRegistry, ToolRunner, ToolStatus
 from ktg_agent.tools.registry import ToolChannel, ToolDefinition, ToolResult
 
 SUBJECT = {"subjectId": 10, "subjectCode": "S10", "subjectName": "检查油位", "subjectType": "CHECK",
@@ -91,6 +92,28 @@ def test_read_filters_paging_and_code_ambiguity() -> None:
     assert run(ts[DETAIL_NAME], mes, {"subject_id": 10}).details["subject"]["subjectId"] == 10
     mes.rows.append({**SUBJECT, "subjectId": 12})
     assert run(ts[DETAIL_NAME], mes, {"subject_code": "S10"}).error_code == "AMBIGUOUS_MATCH"
+
+
+def test_subject_detail_declares_and_validates_exactly_one_locator() -> None:
+    definitions = build_dv_subject_tools()
+    detail = next(tool for tool in definitions if tool.name == DETAIL_NAME)
+    assert detail.model_schema().input_schema["oneOf"] == [
+        {"required": ["subject_id"]}, {"required": ["subject_code"]},
+    ]
+    mes = FakeMes()
+    runner = ToolRunner(ToolRegistry(definitions))
+    context = ToolContext(run_id="r", tool_call_id="c", ktg_client=mes.client())
+    invalid: tuple[JsonObject, ...] = (
+        {}, {"subject_id": 10, "subject_code": "S10"}, {"subject_id": "10"}, {"subjectId": 10},
+    )
+    for arguments in invalid:
+        result = asyncio.run(runner.run(ToolCall("c", DETAIL_NAME, arguments), context))
+        assert result.error_code == "VALIDATION_ERROR"
+    assert not mes.reads
+
+    for arguments in ({"subject_id": 10}, {"subject_code": "S10"}):
+        result = asyncio.run(runner.run(ToolCall("c", DETAIL_NAME, arguments), context))
+        assert result.status is ToolStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize("args", [{"page": True}, {"page_size": 101}, {"subject_type": "BAD"}, {"enable_flag": "yes"}, {"unknown": 1}])

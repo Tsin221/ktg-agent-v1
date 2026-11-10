@@ -4,11 +4,22 @@ from collections.abc import Mapping
 
 import pytest
 from typing import cast
-from ktg_agent.core.messages import JsonObject, JsonValue
+
+from jsonschema import Draft202012Validator
+
+from ktg_agent.core.messages import JsonObject, JsonValue, ToolCall
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.tm_tool import (
-    read_tool_detail, read_tool_list, read_tool_options, project_tool,
+    DETAIL_NAME,
+    LIST_NAME,
+    OPTIONS_NAME,
+    build_tm_tool_tools,
+    project_tool,
+    read_tool_detail,
+    read_tool_list,
+    read_tool_options,
 )
+from ktg_agent.tools import ToolContext, ToolRegistry, ToolResult, ToolRunner, ToolStatus
 
 ROW = {"toolId": 17, "toolCode": "LUNA-17", "toolName": "试验夹具", "brand": "B",
        "spec": "S", "toolTypeId": 2, "toolTypeCode": "TT2", "toolTypeName": "通用类型",
@@ -54,6 +65,54 @@ def test_detail_by_id_and_precise_code_and_not_found() -> None:
     assert object_value(asyncio.run(read_tool_detail(mes.client(),{"tool_code":"LUNA-17"}))["tool"])["toolId"]==17
     with pytest.raises(KTGError): asyncio.run(read_tool_detail(mes.client(),{"tool_id":99}))
 
+
+def run_detail(mes: FakeMES, arguments: JsonObject) -> ToolResult:
+    runner = ToolRunner(ToolRegistry(build_tm_tool_tools()))
+    call = ToolCall("detail", DETAIL_NAME, arguments)
+    context = ToolContext("run", call.id, ktg_client=mes.client())
+    return asyncio.run(runner.run(call, context))
+
+
+@pytest.mark.parametrize(("arguments", "expected_calls"), [
+    ({"tool_id": 17}, [("http://mes/mes/tm/tool/17", {})]),
+    ({"tool_code": "LUNA-17"}, [
+        ("http://mes/mes/tm/tool/list", {"toolCode": "LUNA-17", "pageNum": 1, "pageSize": 100}),
+        ("http://mes/mes/tm/tool/17", {}),
+    ]),
+], ids=["id", "code"])
+def test_detail_runner_accepts_one_locator(
+    arguments: JsonObject, expected_calls: list[tuple[str, dict[str, object]]],
+) -> None:
+    mes = FakeMES()
+    result = run_detail(mes, arguments)
+    assert result.status is ToolStatus.SUCCEEDED
+    assert result.details is not None
+    assert result.details["tool"] == ROW
+    assert mes.calls == expected_calls
+
+
+@pytest.mark.parametrize("arguments", [
+    {},
+    {"tool_id": 17, "tool_code": "LUNA-17"},
+    {"tool_id": "17"},
+    {"tool_code": 17},
+    {"toolId": 17},
+    {"tool_id": 17, "toolCode": "LUNA-17"},
+    {"tool_code": ""},
+    {"tool_code": " \t"},
+    {"tool_id": 9223372036854775808},
+], ids=[
+    "missing", "both", "id-type", "code-type", "misspelled", "extra", "empty-code",
+    "blank-code", "out-of-range-id",
+])
+def test_detail_runner_rejects_invalid_arguments_before_execution(arguments: JsonObject) -> None:
+    mes = FakeMES()
+    result = run_detail(mes, arguments)
+    assert result.error_code == "VALIDATION_ERROR"
+    assert result.details is not None
+    assert "path" in result.details
+    assert mes.calls == []
+
 def test_options_are_bounded_and_report_truncation() -> None:
     result=asyncio.run(read_tool_options(FakeMES().client()))
     options = object_value(result["options"])
@@ -61,6 +120,21 @@ def test_options_are_bounded_and_report_truncation() -> None:
     assert options["tool_types_total"]==101
     assert options["tool_types_truncated"] is True
     assert types[0]["codeFlag"]=="N"
+
+
+def test_list_and_options_input_declarations() -> None:
+    registry = ToolRegistry(build_tm_tool_tools())
+    listing = Draft202012Validator(registry.get(LIST_NAME).input_schema)
+    assert listing.is_valid({})
+    assert listing.is_valid({"tool_code": "LUNA-17", "tool_type_id": 2, "status": "REPARE",
+                             "mainten_type": "USAGE", "page": 2, "page_size": 100})
+    for invalid in ({"page": 1000001}, {"tool_type_id": 9223372036854775808},
+                    {"tool_name": " "}, {"status": "REPAIR"}, {"tool_id": 17}):
+        assert not listing.is_valid(invalid)
+    options = Draft202012Validator(registry.get(OPTIONS_NAME).input_schema)
+    assert options.is_valid({})
+    assert not options.is_valid({"tool_type_id": 2})
+
 
 def test_bad_ids_and_numeric_response_are_rejected() -> None:
     with pytest.raises(KTGError): project_tool({**ROW,"toolTypeId":"2"})

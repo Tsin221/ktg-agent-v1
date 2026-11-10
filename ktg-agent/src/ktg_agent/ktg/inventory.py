@@ -109,7 +109,7 @@ class InventoryStore:
 
 def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tuple[ToolDefinition, ...]:
     tools: list[ToolDefinition] = []
-    for action, (_, _, _, _, permission) in _ACTIONS.items():
+    for action, (_, id_field, code_field, _, permission) in _ACTIONS.items():
         if action not in enabled:
             continue
 
@@ -118,7 +118,8 @@ def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tup
                 proposal = await _read_proposal(context, selected, arguments)
                 operation_id = store.create(_user_key(context.identity), selected, proposal)
                 return ToolResult(
-                    content=f"已准备单据 {proposal['documentCode']} 的执行预览，请在网页卡片确认。",
+                    content=(f"已准备单据 {proposal['documentCode']} 的执行预览，尚未执行，请在网页卡片确认。"
+                             f"查询该操作回执时使用 operation_id={operation_id}。"),
                     details={"kind": "inventory_preview", "action_type": selected,
                              "operation_id": operation_id, **proposal},
                     operation_id=operation_id,
@@ -126,13 +127,17 @@ def build_inventory_tools(store: InventoryStore, enabled: frozenset[str]) -> tup
             except (ValueError, KTGError) as exc:
                 return _failure(str(exc), getattr(exc, "code", "VALIDATION_ERROR"))
 
+        document_label = "物料入库单" if action == RECEIPT else "生产领料单"
         tools.append(ToolDefinition(
             name="ktg_preview_item_receipt" if action == RECEIPT else "ktg_preview_production_issue",
             version="1.0", label="预览物料入库" if action == RECEIPT else "预览生产领料",
-            description="只读预览已有单据。仅传单据 ID 或准确单据编号，不接受库存数和执行参数。",
+            description=(f"生成一张已有且已审核（APPROVED）的{document_label}的执行预览。"
+                         "必须且只能传单据 ID 或完整编号。数量和库存位置取自单据，网页确认后才执行。"),
             input_schema={"type": "object", "properties": {
-                "document_id": {"type": "integer", "minimum": 1},
-                "document_code": {"type": "string", "minLength": 1, "maxLength": 100},
+                "document_id": {"type": "integer", "minimum": 1,
+                                "description": f"{document_label}的系统 ID，取自单据的 {id_field}。"},
+                "document_code": {"type": "string", "minLength": 1, "maxLength": 100,
+                                  "description": f"{document_label}的完整业务编号 {code_field}，须精确且唯一匹配。"},
             }, "oneOf": [{"required": ["document_id"]}, {"required": ["document_code"]}],
                 "additionalProperties": False},
             output_schema=None, required_permissions=(
@@ -195,10 +200,12 @@ def build_inventory_result_tool(store: InventoryStore) -> ToolDefinition:
         )
 
     return ToolDefinition(
-        name="ktg_wm_operation_result", version="1.0", label="查询库存操作回执",
-        description="查询当前用户有权读取的库存入库或领料操作回执。",
+        name="ktg_wm_operation_result", version="1.0", label="查询库存操作回执（入库、领料执行结果）",
+        description=("按操作 ID 查询已有物料入库或生产领料操作的状态和执行回执。"
+                     "支持查询待确认或结果待核实的操作；查询不会执行或重试写入。"),
         input_schema={"type": "object", "properties": {
-            "operation_id": {"type": "string", "minLength": 36, "maxLength": 36},
+            "operation_id": {"type": "string", "minLength": 36, "maxLength": 36,
+                             "description": "本次库存操作预览生成的 operation_id（36 字符 UUID），区别于业务单据 ID 或编号。"},
         }, "required": ["operation_id"], "additionalProperties": False},
         output_schema=None, required_permissions=("mes:wm:wmstock:list",),
         effect=ToolEffect.READ, execution_mode=ExecutionMode.SEQUENTIAL,

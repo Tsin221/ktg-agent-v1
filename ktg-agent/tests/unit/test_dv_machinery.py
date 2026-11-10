@@ -7,13 +7,18 @@ from collections.abc import Mapping
 from typing import cast
 
 import pytest
+from jsonschema import Draft202012Validator
 
+from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.ktg.dv_machinery import (
     DETAIL_NAME, LIST_NAME, WORKSHOP_NAME, build_dv_machinery_tools,
     dv_machinery_factories, dv_machinery_manifests,
 )
-from ktg_agent.tools import ToolContext, ToolStatus
+from ktg_agent.ktg.dv_machinery_writes import (
+    DvMachineryPreviewStore, PREVIEW_CREATE, PREVIEW_UPDATE, build_dv_machinery_write_tools,
+)
+from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner, ToolStatus
 from ktg_agent.tools.catalog import ToolCatalog
 from ktg_agent.tools.permissions import PermissionAll, PermissionLeaf
 from ktg_agent.tools.registry import ToolResult
@@ -122,6 +127,20 @@ def test_detail_rejects_missing_selector_ambiguous_and_not_found() -> None:
     assert absent.error_code == "MACHINERY_NOT_FOUND"
 
 
+@pytest.mark.parametrize("arguments", [
+    {}, {"machinery_id": 10, "machinery_code": "EQ-10"},
+    {"machinery_id": "10"}, {"machineryId": 10}, {"machinery_code": "  "},
+])
+def test_detail_runner_rejects_invalid_locator_before_mes(arguments: JsonObject) -> None:
+    calls: list[tuple[str, Mapping[str, object]]] = []
+    runner = ToolRunner(ToolRegistry(build_dv_machinery_tools()))
+    result = asyncio.run(runner.run(ToolCall("c", DETAIL_NAME, arguments),
+                                    ToolContext("r", "c", ktg_client=_client({}, calls))))
+    assert result.error_code == "VALIDATION_ERROR"
+    assert result.details is not None and "path" in result.details
+    assert calls == []
+
+
 def test_workshop_options_filter_disabled_rows_and_bound_results() -> None:
     result, calls = _run(WORKSHOP_NAME, {"workshop_name": "车间", "limit": 1}, {
         "/mes/md/workshop/listAll": {"code": 200, "data": WORKSHOPS},
@@ -130,6 +149,20 @@ def test_workshop_options_filter_disabled_rows_and_bound_results() -> None:
     assert result.details["total"] == 2 and result.details["truncated"] is True
     assert result.details["rows"][0]["enableFlag"] == "Y"
     assert calls[0][0].endswith("/mes/md/workshop/listAll")
+
+
+def test_preview_declarations_distinguish_blank_create_and_clear_update() -> None:
+    definitions = {tool.name: tool for tool in build_dv_machinery_write_tools(DvMachineryPreviewStore())}
+    create = Draft202012Validator(definitions[PREVIEW_CREATE].input_schema)
+    update = Draft202012Validator(definitions[PREVIEW_UPDATE].input_schema)
+    new_device = {"machinery_code": "EQ-20", "machinery_name": "新设备",
+                  "machinery_type_id": 201, "workshop_id": 5}
+    assert create.is_valid(new_device)
+    assert not create.is_valid({**new_device, "machinery_brand": ""})
+    assert not create.is_valid({**new_device, "machinery_type_id": "T-1"})
+    assert update.is_valid({"machinery_id": 10, "machinery_brand": ""})
+    assert not update.is_valid({"machinery_id": 10, "machinery_name": " "})
+    assert not update.is_valid({"machinery_id": 10, "machinery_code": "EQ-20"})
 
 
 def test_malformed_list_response_is_rejected() -> None:

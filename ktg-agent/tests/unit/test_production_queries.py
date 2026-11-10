@@ -4,15 +4,17 @@ from typing import cast
 
 import pytest
 
+from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.ktg.production_queries import (
     build_production_query_tools, production_query_factories,
     production_query_manifests, read_production_list,
 )
 from ktg_agent.tools.catalog import ToolCatalog
-from ktg_agent.tools.registry import ToolContext, ToolStatus
+from ktg_agent.tools.registry import ToolContext, ToolRegistry, ToolStatus
 from ktg_agent.tools.registry import ToolResult
 from ktg_agent.tools.permissions import PermissionLeaf
+from ktg_agent.tools.runner import ToolRunner
 
 
 def _client(payload: dict[str, object], calls: list[tuple[str, Mapping[str, object]]]) -> KTGClient:
@@ -66,6 +68,31 @@ def test_list_uses_server_total_and_marks_more_pages() -> None:
     assert result.details["truncated"] is True
     assert cast(list[dict[str, object]], result.details["rows"])[0]["quantityFeedback"] == "1.50"
     assert calls[0][1] == {"pageNum": 2, "pageSize": 1, "taskId": 2}
+
+
+@pytest.mark.parametrize(("arguments", "expected_filters"), [
+    ({}, None),
+    ({"status": "FINISHED"}, None),
+    ({"workorder_id": 1}, {"workorderId": 1}),
+    ({"task_id": 2}, {"taskId": 2}),
+    ({"workorder_id": 1, "task_id": 2}, {"workorderId": 1, "taskId": 2}),
+])
+def test_feedback_runner_requires_at_least_one_scope(
+    arguments: JsonObject, expected_filters: dict[str, object] | None,
+) -> None:
+    calls: list[tuple[str, Mapping[str, object]]] = []
+    client = _client({"code": 200, "total": 0, "rows": []}, calls)
+    runner = ToolRunner(ToolRegistry(build_production_query_tools()))
+    call = ToolCall("c", "ktg_pro_feedback_list", arguments)
+    result = asyncio.run(runner.run(call, ToolContext("r", call.id, ktg_client=client)))
+    if expected_filters is None:
+        assert result.error_code == "VALIDATION_ERROR"
+        assert result.details is not None and "path" in result.details
+        assert calls == []
+    else:
+        assert result.status is ToolStatus.SUCCEEDED
+        assert calls == [("http://localhost/mes/pro/feedback/list",
+                          {"pageNum": 1, "pageSize": 10, **expected_filters})]
 
 
 @pytest.mark.parametrize("args", [{"task_id": -1}, {"task_id": 1, "page_size": 21},

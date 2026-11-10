@@ -223,27 +223,32 @@ def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
         "additionalProperties": False,
     }
     edit_properties = _draft_candidate_properties()
+    edit_fields = list(edit_properties)
     edit_properties["target_workorder_code"] = {
         "type": "string",
         "minLength": 1,
         "maxLength": 64,
-        "description": "要编辑的现有工单编号，最大64字符，必须准确指定；工具先读取并校验目标为可编辑草稿。",
+        "description": "待编辑草稿当前的完整业务编号，最大64字符。若需更换编号，将新编号另传给 workorder_code。",
+    }
+    edit_schema: JsonObject = {
+        "type": "object", "properties": edit_properties,
+        "required": ["target_workorder_code"],
+        "anyOf": [{"required": [field]} for field in edit_fields],
+        "additionalProperties": False,
     }
     return (
         _preview_tool(
             name="ktg_preview_create_workorder_draft",
             label="添加生产工单预览",
             description=(
-                "添加生产工单：仅收集用户明确提供的网页字段并生成草稿预览，不在此工具写入；"
-                "实际保存须由用户在可信网页确认。新增必填工单名称、来源、数量、需求日期、编号模式及至少一种产品标识。"
+                "新建生产工单草稿预览。使用用户明确提供的字段，实际保存须由用户在可信网页确认。"
+                "新增必填工单名称、来源、数量、需求日期、编号模式及至少一种产品标识。"
                 "product_id仅可来自已知查询结果，product_code/product_name可直接用用户给出的值；"
                 "工具内部查询及分页并唯一解析，多个候选返回有限候选要求用户选择，无需先调用产品查询。"
                 "ORDER=客户订单，STORE=库存备货；订单号及客户字段在ORDER可选。数量0.01至99999999、有效最多两位小数；日期用用户明确给出的yyyy-MM-dd，不得猜测。"
                 "编号模式auto自动生成、manual手工提供编号；类型可选SELF自制、OUTSOURCE委外、PURCHASE外购，新增省略采用网页默认SELF并显示在预览。"
-                "响应返回完整预览或有限候选；编辑工具仅改明确提供字段，省略字段保留原值。"
+                "响应返回完整预览或有限候选。"
             ),
-            properties=create_properties,
-            required=("code_mode", "workorder_name", "order_source", "quantity", "request_date"),
             input_schema=create_schema,
             execute=lambda context, arguments: _preview_create(
                 store, context, arguments
@@ -253,11 +258,11 @@ def build_workorder_tools(store: PreviewStore) -> tuple[ToolDefinition, ...]:
             name="ktg_preview_edit_workorder_draft",
             label="预览编辑工单草稿",
             description=(
-                "预览编辑生产工单草稿：用于修改已存在的草稿字段；必须用target_workorder_code指定目标。仅修改明确提供的字段，省略字段保留原值；不接受新增编号模式。"
-                "读取目标并返回变更前后预览。非草稿、无权限或版本冲突时拒绝；此工具不写入，只有用户在可信网页确认后才执行保存。"
+                "修改已有生产工单草稿的预览。用 target_workorder_code 指定当前编号，并提供至少一个要修改的字段。"
+                "省略字段保留原值。读取目标并返回变更前后预览，实际保存须由用户在可信网页确认。"
+                "仅允许编辑草稿，执行保存前会检查权限和版本。"
             ),
-            properties=edit_properties,
-            required=("target_workorder_code",),
+            input_schema=edit_schema,
             execute=lambda context, arguments: _preview_edit(store, context, arguments),
         ),
         _write_tool(
@@ -328,22 +333,15 @@ def _preview_tool(
     name: str,
     label: str,
     description: str,
-    properties: JsonObject,
-    required: tuple[str, ...],
+    input_schema: JsonObject,
     execute: object,
-    input_schema: JsonObject | None = None,
 ) -> ToolDefinition:
     return ToolDefinition(
         name=name,
         version="1.0",
         description=description,
         label=label,
-        input_schema=input_schema or {
-            "type": "object",
-            "properties": properties,
-            "required": list(required),
-            "additionalProperties": False,
-        },
+        input_schema=input_schema,
         output_schema=None,
         # Catalog authorization covers every supported input path (ID or search).
         required_permissions=(

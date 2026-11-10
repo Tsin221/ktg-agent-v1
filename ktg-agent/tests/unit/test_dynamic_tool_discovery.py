@@ -8,12 +8,23 @@ from pathlib import Path
 from threading import Thread
 from unittest.mock import patch
 
+import httpx
+
 from ktg_agent.core.events import AgentEventType
 from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, ToolCall, ToolResultMessage
 from ktg_agent.core.loop import RunLimits
 from ktg_agent.ktg.client import KTGClient, KTGError
+from ktg_agent.ktg.dv_checkplan_writes import DvCheckPlanPreviewStore
+from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
+from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
+from ktg_agent.ktg.dv_repair_writes import DvRepairPreviewStore
+from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
+from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
+from ktg_agent.ktg.tm_tool_writes import TmToolPreviewStore
+from ktg_agent.ktg.tm_tooltype_writes import TmToolTypePreviewStore
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
+from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
 from ktg_agent.service import QueryService
 from ktg_agent.server import AgentHTTPServer
 from ktg_agent.sessions import SessionRepository
@@ -97,6 +108,81 @@ def test_fake_provider_receives_loaded_schema_only_on_next_request() -> None:
     asyncio.run(scenario())
 
 
+def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
+    name = "ktg_tm_tool_detail"
+    requests = []
+    mes_requests = []
+
+    def model_response(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        calls = [
+            ("search_tools", {"query": name}),
+            ("load_tools", {"tools": [{"name": name, "version": "1.0"}]}),
+            (name, {}),
+        ]
+        step = len(requests) - 1
+        delta: dict[str, object]
+        if step < len(calls):
+            tool_name, arguments = calls[step]
+            delta = {"tool_calls": [{
+                "index": 0, "id": f"call-{step}", "type": "function",
+                "function": {"name": tool_name, "arguments": json.dumps(arguments)},
+            }]}
+            finish_reason = "tool_calls"
+        else:
+            delta = {"content": "请提供 ID 或编码。"}
+            finish_reason = "stop"
+        frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"},
+            text=f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n",
+        )
+
+    async def mes_transport(url: str, *_args: object) -> object:
+        mes_requests.append(url)
+        assert url.endswith("/getInfo")
+        return {
+            "code": 200, "user": {"userId": 7, "userName": "alice"},
+            "permissions": ["mes:tm:tool:list", "mes:tm:tool:query"],
+        }
+
+    provider = OpenAICompatibleProvider(api_key="test-key", base_url="http://model.test/v1")
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("test-model", 128),
+        ktg_client_factory=lambda token: KTGClient(
+            base_url="http://mes.test", authorization=token, transport=mes_transport,
+        ),
+    )
+    client_factory = httpx.AsyncClient
+    with patch(
+        "ktg_agent.providers.openai_compatible.httpx.AsyncClient",
+        side_effect=lambda **kwargs: client_factory(
+            transport=httpx.MockTransport(model_response), **kwargs,
+        ),
+    ):
+        result = asyncio.run(service.run_session(
+            run_id="tm-tool-http", message="按编码查询工装夹具详情", history=(),
+            authorization="Bearer test", event_sink=lambda _event: None,
+        ))
+
+    assert len(requests) == 4
+    functions = [{tool["function"]["name"]: tool["function"] for tool in body["tools"]}
+                 for body in requests]
+    assert [set(step) for step in functions[:2]] == [{"search_tools", "load_tools"}] * 2
+    assert functions[2][name]["parameters"]["oneOf"] == [
+        {"required": ["tool_id"]}, {"required": ["tool_code"]},
+    ]
+    assert functions[2][name]["parameters"]["additionalProperties"] is False
+    assert any(event.type is AgentEventType.TOOL_EXECUTION_END
+               and event.payload.get("tool_call_id") == "call-2"
+               and event.payload.get("error_code") == "VALIDATION_ERROR" for event in result.events)
+    tool_message = next(message for message in requests[3]["messages"]
+                        if message.get("tool_call_id") == "call-2")
+    assert "必须且只能提供 tool_id 或 tool_code" in tool_message["content"]
+    assert mes_requests and all(url.endswith("/getInfo") for url in mes_requests)
+
+
 def test_natural_language_discovery_and_actionable_load_errors() -> None:
     async def scenario() -> None:
         definitions = build_query_tools()
@@ -135,6 +221,176 @@ def test_natural_language_discovery_and_actionable_load_errors() -> None:
         permissions = frozenset()
         empty = await discovery.execute(ToolCall("s", "search_tools", {"query": "anything"}))
         assert "ktg_query_stock" not in empty.content
+
+    asyncio.run(scenario())
+
+
+def test_tm_search_distinguishes_nearby_intents() -> None:
+    async def scenario() -> None:
+        service = QueryService(
+            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
+            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
+            tm_tool_store=TmToolPreviewStore(),
+            tm_tooltype_store=TmToolTypePreviewStore(),
+        )
+        permissions = frozenset({"*:*:*"})
+        switches = service._switches_provider()
+        catalog = service._catalog
+        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "tm-search"), switches)
+
+        async def access() -> tuple[frozenset[str], CatalogSwitches]:
+            return permissions, switches
+
+        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access, page_module="tm")
+        cases = {
+            "分页查询在库工装夹具台账": "ktg_tm_tool_list",
+            "按完整编码查一条工装夹具详情": "ktg_tm_tool_detail",
+            "查询有哪些工装夹具类型": "ktg_tm_tooltype_list",
+            "查询工装夹具类型详情": "ktg_tm_tooltype_detail",
+            "查询新增夹具可用的类型和台账状态选项": "ktg_tm_tool_options",
+            "查询工装类型的维护方式和一件一码选项": "ktg_tm_tooltype_options",
+            "为工装夹具新增生成预览": "ktg_preview_tm_tool_create",
+            "生成工装夹具类型新增预览": "ktg_preview_tm_tooltype_create",
+            "修改工装夹具品牌生成预览": "ktg_preview_tm_tool_update",
+            "修改工装夹具类型维护周期生成预览": "ktg_preview_tm_tooltype_update",
+            "删除一条在库工装夹具生成预览": "ktg_preview_tm_tool_delete",
+            "生成删除工装夹具类型的预览": "ktg_preview_tm_tooltype_delete",
+        }
+        mismatches = {}
+        for query, expected in cases.items():
+            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
+            assert result.details is not None and result.details["match_type"] == "matched"
+            items = cast(list[dict[str, object]], result.details["items"])
+            assert expected in {item["name"] for item in items}, query
+            if items[0]["name"] != expected:
+                mismatches[query] = (expected, items[0]["name"])
+            assert not any(item["name"] in {
+                f"ktg_tm_{kind}_{action}" for kind in ("tool", "tooltype")
+                for action in ("create", "update", "delete")
+            } for item in items)
+        assert not mismatches
+
+        fallback = await discovery.execute(ToolCall("s", "search_tools", {
+            "query": "火星气候", "module": "tm",
+        }))
+        assert fallback.details is not None
+        assert fallback.details["match_type"] == "available_alternatives"
+
+        permissions = frozenset({"mes:tm:tool:list"})
+        restricted = await discovery.execute(ToolCall("s", "search_tools", {
+            "query": "工装夹具详情", "module": "tm",
+        }))
+        assert restricted.details is not None
+        items = cast(list[dict[str, object]], restricted.details["items"])
+        assert {item["name"] for item in items} == {"ktg_tm_tool_list"}
+
+    asyncio.run(scenario())
+
+
+def test_device_search_distinguishes_records_options_and_previews() -> None:
+    async def scenario() -> None:
+        service = QueryService(
+            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
+            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
+            dv_repair_store=DvRepairPreviewStore(),
+            dv_checkplan_store=DvCheckPlanPreviewStore(),
+            dv_subject_store=DvSubjectPreviewStore(),
+            dv_machinery_store=DvMachineryPreviewStore(),
+            dv_machinerytype_store=DvMachineryTypePreviewStore(),
+        )
+        permissions = frozenset({"*:*:*"})
+        switches = service._switches_provider()
+        catalog = service._catalog
+        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "dv-search"), switches)
+
+        async def access() -> tuple[frozenset[str], CatalogSwitches]:
+            return permissions, switches
+
+        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access, page_module="dv")
+        cases = {
+            "维修单列表 维修结果筛选": "ktg_dv_repair_list",
+            "维修单详情 完工日期 验收": "ktg_dv_repair_detail",
+            "维修内容 故障现象 lineId": "ktg_dv_repair_lines",
+            "维修选项 字典值": "ktg_dv_repair_options",
+            "维修设备候选 关联设备": "ktg_dv_repair_machinery_candidates",
+            "维修项目候选 关联项目": "ktg_dv_repair_subject_candidates",
+            "预览删除维修单 内容行数": "ktg_preview_dv_repair_delete",
+            "预览删除维修内容 内容行ID": "ktg_preview_dv_repair_line_delete",
+            "分页筛选点检保养计划": "ktg_dv_checkplan_list",
+            "查询单条点检保养计划详情": "ktg_dv_checkplan_detail",
+            "查询点检计划已关联设备明细": "ktg_dv_checkplan_links",
+            "查询计划可选设备候选": "ktg_dv_checkplan_machinery_candidates",
+            "查询计划可关联项目候选": "ktg_dv_checkplan_subject_candidates",
+            "查询点检保养项目台账": "ktg_dv_subject_list",
+            "查询点检保养项目详情": "ktg_dv_subject_detail",
+            "查询计划周期类型选项": "ktg_dv_checkplan_options",
+            "分页筛选车间设备台账": "ktg_dv_machinery_list",
+            "按编码查询设备详情": "ktg_dv_machinery_detail",
+            "查询设备分类树": "ktg_dv_machinerytype_tree",
+            "查询设备分类详情与影响面": "ktg_dv_machinerytype_detail",
+            "查询启用车间候选": "ktg_md_machinery_workshop_options",
+            "生成新增设备预览": "ktg_preview_dv_machinery_create",
+            "生成新增设备分类预览": "ktg_preview_dv_machinerytype_create",
+        }
+        mismatches = {}
+        for query, expected in cases.items():
+            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
+            assert result.details is not None and result.details["match_type"] == "matched"
+            items = cast(list[dict[str, object]], result.details["items"])
+            for item in items:
+                assert catalog.manifest(cast(str, item["name"])).expose_to_model
+            if items[0]["name"] != expected:
+                mismatches[query] = (expected, items[0]["name"])
+        assert not mismatches
+
+    asyncio.run(scenario())
+
+
+def test_production_and_inventory_search_separates_nearby_intents(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service = QueryService(
+            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
+            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
+            inventory_store=InventoryStore(str(tmp_path / "inventory.sqlite3")),
+            inventory_actions=frozenset({RECEIPT, ISSUE}),
+            enable_workorder_progress=True,
+        )
+        permissions = frozenset({"*:*:*"})
+        switches = service._switches_provider()
+        catalog = service._catalog
+        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "pro-wm-search"), switches)
+
+        async def access() -> tuple[frozenset[str], CatalogSwitches]:
+            return permissions, switches
+
+        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access)
+        cases = {
+            "一共有多少产品": "ktg_count_products",
+            "分页查询产品资料明细": "ktg_search_items",
+            "按状态分页查询生产工单列表": "ktg_list_workorders",
+            "查询单张生产工单详情": "ktg_pro_workorder_get",
+            "查询工单生产进度": "ktg_pro_workorder_progress",
+            "生产任务列表 工序": "ktg_pro_task_list",
+            "生产任务详情 开始时间": "ktg_pro_task_get",
+            "报工列表 报工时间": "ktg_pro_feedback_list",
+            "报工详情 不合格数量": "ktg_pro_feedback_get",
+            "生成新增生产工单预览": "ktg_preview_create_workorder_draft",
+            "编辑工单草稿生成预览": "ktg_preview_edit_workorder_draft",
+            "查指定物料的分仓库存": "ktg_query_stock",
+            "预览物料入库单": "ktg_preview_item_receipt",
+            "预览生产领料单": "ktg_preview_production_issue",
+            "查询库存操作执行回执": "ktg_wm_operation_result",
+            "查看生产领料执行回执": "ktg_wm_operation_result",
+        }
+        mismatches = {}
+        for query, expected in cases.items():
+            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
+            assert result.details is not None and result.details["match_type"] == "matched"
+            items = cast(list[dict[str, object]], result.details["items"])
+            assert all(catalog.manifest(cast(str, item["name"])).expose_to_model for item in items)
+            if items[0]["name"] != expected:
+                mismatches[query] = (expected, items[0]["name"])
+        assert not mismatches
 
     asyncio.run(scenario())
 

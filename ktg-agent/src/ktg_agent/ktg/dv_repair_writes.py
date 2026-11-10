@@ -28,6 +28,14 @@ from ktg_agent.tools.registry import (ExecutionMode, RetryPolicy, ToolChannel, T
 _ACTIONS = ("create", "update", "delete", "line_create", "line_update", "line_delete")
 PREVIEW_NAMES = {action: f"ktg_preview_dv_repair_{action}" for action in _ACTIONS}
 APPLY_NAMES = {action: f"ktg_dv_repair_{action}" for action in _ACTIONS}
+_PREVIEW_DESCRIPTIONS = {
+    "create": "生成新增草稿维修单的预览。提供唯一维修单编号、名称、关联设备 ID 和报修日期。",
+    "update": "生成修改草稿维修单单头的预览。提供维修单 ID 和至少一个要改的单头字段，省略项保留原值。",
+    "delete": "生成删除草稿维修单及所属全部维修内容的预览，返回受影响的内容行数。",
+    "line_create": "生成在草稿维修单内新增维修内容行的预览。提供维修单 ID、项目 ID 和故障现象。",
+    "line_update": "生成修改草稿维修单内一条维修内容行的预览。提供维修单 ID、内容行 ID 和至少一个要改的字段，省略项保留原值。",
+    "line_delete": "生成从草稿维修单移除一条维修内容行的预览。提供维修单 ID 和所属内容行 ID。",
+}
 _PERMS = {
     "create": ("mes:dv:repair:add", "mes:dv:repair:list", "mes:dv:machinery:query"),
     "update": ("mes:dv:repair:edit", "mes:dv:repair:query", "mes:dv:repair:list", "mes:dv:machinery:query"),
@@ -182,7 +190,8 @@ def _definition(store: DvRepairPreviewStore, action: str, hidden: bool) -> ToolD
         return await (_apply(store, action, context, arguments) if hidden else _preview(store, action, context, arguments))
 
     return ToolDefinition(name=name, version="1.0", label=("确认" if hidden else "预览") + _label(action),
-        description=("仅网页可信确认通道可执行，模型不可见。" if hidden else "草稿维修单操作预览；实际写入需网页确认。"),
+        description=("仅网页可信确认通道可执行，模型不可见。" if hidden else
+                     _PREVIEW_DESCRIPTIONS[action] + "生成预览后在网页确认才会执行写入。"),
         input_schema=schema, output_schema={"type": "object", "properties": {key: {} for key in
             ("kind", "action", "preview_id", "before", "after", "warnings", "affected_counts", "outcome", "verified")},
             "additionalProperties": True}, required_permissions=_PERMS[action],
@@ -191,32 +200,49 @@ def _definition(store: DvRepairPreviewStore, action: str, hidden: bool) -> ToolD
 
 
 def _preview_schema(action: str) -> JsonObject:
-    positive: JsonValue = {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
-    def text(limit: int) -> JsonValue:
-        return {"type": "string", "minLength": 1, "maxLength": limit}
-    def optional_text(limit: int) -> JsonValue:
-        return {"type": "string", "minLength": 0, "maxLength": limit}
+    def record_id(description: str) -> JsonValue:
+        return {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                "description": description}
+
+    def text(limit: int, description: str, *, allow_empty: bool = False) -> JsonValue:
+        return {"type": "string", "minLength": 0 if allow_empty else 1, "maxLength": limit,
+                "description": description}
+
     required: tuple[str, ...]
+    props: dict[str, JsonValue] = {}
+    if action != "create":
+        props["repair_id"] = record_id("草稿维修单的系统 ID，取自维修单查询结果中的 repairId。")
+    if action in {"line_update", "line_delete"}:
+        props["line_id"] = record_id("所属维修内容行的系统 ID，取自维修内容查询结果中的 lineId。")
+    if action in {"create", "update"}:
+        props.update(
+            repair_code=text(64, "唯一的维修单业务编号。"),
+            repair_name=text(100, "维修单名称。"),
+            machinery_id=record_id("关联设备系统 ID，取自维修设备候选中的 machineryId。"),
+            require_date={"type": "string", "format": "date", "description": "报修日期，格式 YYYY-MM-DD。"},
+        )
+    if action in {"line_create", "line_update"}:
+        props.update(
+            subject_id=record_id("关联维修项目系统 ID，取自维修项目候选中的 subjectId。"),
+            malfunction=text(500, "故障现象。"),
+            malfunction_url=text(255, "故障图片链接。修改时传空字符串可清空。", allow_empty=True),
+            repair_des=text(500, "维修描述。修改时传空字符串可清空。", allow_empty=True),
+        )
+    if action in {"create", "update", "line_create", "line_update"}:
+        props["remark"] = text(250, "备注。修改时传空字符串可清空。", allow_empty=True)
+
     if action == "create":
-        props: dict[str, JsonValue] = {"repair_code": text(64), "repair_name": text(100),
-            "machinery_id": positive, "require_date": {"type": "string", "format": "date"}, "remark": optional_text(250)}
         required = ("repair_code", "repair_name", "machinery_id", "require_date")
-    elif action == "update":
-        props = {"repair_id": positive, "repair_code": text(64), "repair_name": text(100),
-            "machinery_id": positive, "require_date": {"type": "string", "format": "date"}, "remark": optional_text(250)}
-        required = ("repair_id",)
-    elif action == "delete": props, required = {"repair_id": positive}, ("repair_id",)
     elif action == "line_create":
-        props = {"repair_id": positive, "subject_id": positive, "malfunction": text(500),
-            "malfunction_url": optional_text(255), "repair_des": optional_text(500), "remark": optional_text(250)}
         required = ("repair_id", "subject_id", "malfunction")
-    elif action == "line_update":
-        props = {"repair_id": positive, "line_id": positive, "subject_id": positive,
-            "malfunction": text(500), "malfunction_url": optional_text(255),
-            "repair_des": optional_text(500), "remark": optional_text(250)}
+    elif action in {"line_update", "line_delete"}:
         required = ("repair_id", "line_id")
-    else: props, required = {"repair_id": positive, "line_id": positive}, ("repair_id", "line_id")
-    return _schema(props, required)
+    else:
+        required = ("repair_id",)
+    schema = _schema(props, required)
+    if action in {"update", "line_update"}:
+        schema["anyOf"] = [{"required": [key]} for key in props if key not in required]
+    return schema
 
 
 def _label(action: str) -> str:

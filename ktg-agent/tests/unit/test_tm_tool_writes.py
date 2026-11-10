@@ -13,7 +13,7 @@ from ktg_agent.core.messages import JsonObject, JsonValue, ToolCall
 from ktg_agent.server import AgentHTTPServer, Settings, create_service
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.service import SessionService
-from ktg_agent.tools import CatalogIdentity, ToolDefinition, ToolResult
+from ktg_agent.tools import CatalogIdentity, ToolDefinition, ToolRegistry, ToolResult, ToolRunner
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.tm_tool_writes import (
     PREVIEW_CREATE, PREVIEW_UPDATE, PREVIEW_DELETE, APPLY_CREATE, APPLY_UPDATE, APPLY_DELETE,
@@ -60,6 +60,43 @@ def create_args(**changes: JsonValue) -> JsonObject:return {"tool_code":"LUNA_TM
 def result_details(result: ToolResult) -> JsonObject:
     assert result.details is not None
     return result.details
+
+
+def test_create_preview_declares_required_type_source_and_maintenance_default() -> None:
+    schema = tools(TmToolPreviewStore())[PREVIEW_CREATE].model_schema().input_schema
+    properties = cast(JsonObject, schema["properties"])
+    type_id = cast(JsonObject, properties["tool_type_id"])
+    assert schema["required"] == ["tool_code", "tool_name", "tool_type_id", "quantity"]
+    assert "toolTypeId" in str(type_id["description"])
+    assert cast(JsonObject, properties["mainten_type"])["default"] == "REGULAR"
+    assert "yyyy-MM-dd" in str(cast(JsonObject, properties["next_mainten_date"])["description"])
+
+
+def test_create_preview_runner_rejects_missing_type_id_and_bad_maintenance() -> None:
+    mes = FakeMES()
+    runner = ToolRunner(ToolRegistry(tuple(tools(TmToolPreviewStore()).values())))
+    context = ToolContext(run_id="run", tool_call_id="call", identity={"userId": 5},
+                          ktg_client=mes.client())
+    missing_id = create_args()
+    del missing_id["tool_type_id"]
+    for arguments in (
+        missing_id,
+        create_args(tool_type_id="2"),
+        create_args(mainten_type="MONTHLY"),
+        create_args(next_mainten_period=12),
+        create_args(mainten_type="USAGE", next_mainten_date="2026-12-01"),
+        create_args(next_mainten_date="2026-02-30"),
+        create_args(quantity=2),
+    ):
+        result = asyncio.run(runner.run(ToolCall("call", PREVIEW_CREATE, arguments), context))
+        assert result.error_code == "VALIDATION_ERROR"
+        assert result.operation_id is None
+
+    allowed = asyncio.run(runner.run(ToolCall("call", PREVIEW_CREATE,
+        create_args(next_mainten_date="2026-12-01", next_mainten_period=None)), context))
+    assert allowed.status is ToolStatus.SUCCEEDED and allowed.operation_id
+    assert not mes.writes
+
 def test_create_preview_and_hidden_confirm_are_verified_and_idempotent(tmp_path: Path) -> None:
  mes=FakeMES();ts=tools(TmToolPreviewStore(path=tmp_path/'previews.sqlite'))
  preview=run(ts[PREVIEW_CREATE],mes,create_args());assert preview.status is ToolStatus.SUCCEEDED and not mes.writes

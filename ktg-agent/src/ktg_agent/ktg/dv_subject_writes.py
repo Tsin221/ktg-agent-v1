@@ -248,21 +248,39 @@ def _permissions(action: str) -> tuple[str, ...]:
 
 
 _PREVIEW_DESCRIPTIONS = {
-    "create": "新增点检保养项目预览，不写MES、不消耗自动编号。必须提供编码、类型、内容；名称可选。用户确认后才执行。",
-    "update": "按明确项目ID生成修改预览；已有计划保留快照，不随源项目同步。确认前再次核对旧快照与编码冲突，不自动换码。",
-    "delete": "只删除明确ID的一个项目。已有计划保留项目快照，删除源项目可能留下引用；请用户检查关联影响后在卡片中确认。",
+    "create": "生成点检保养项目台账新增预览，网页确认后才写入。必须提供业务编码、类型和内容；名称可选，编码由用户提供。",
+    "update": "生成点检保养项目台账修改预览，网页确认后才写入。按项目系统 ID 定位，只传要修改的字段。"
+              "已有计划保留关联快照，确认时会复核原值和编码冲突。",
+    "delete": "生成单条点检保养项目台账删除预览，网页确认后才写入。已有计划仍保留项目快照，删除源项目可能留下引用。",
 }
 
 
 def _preview_schema(action: str) -> dict[str, object]:
     properties: dict[str, JsonValue] = {}
     if action != "create":
-        properties["subject_id"] = {"type": "integer", "minimum": 1}
+        properties["subject_id"] = {"type": "integer", "minimum": 1,
+                                    "description": "项目台账记录的系统 ID，取自项目查询的 subjectId。"}
     if action != "delete":
+        field_descriptions = {
+            "subject_code": "项目台账的唯一业务编码。",
+            "subject_name": "项目名称，可传空字符串。",
+            "subject_content": "实际点检或保养的内容，传非空文本。",
+            "subject_standard": "项目合格标准，可传空字符串。",
+            "remark": "项目备注，可传空字符串。",
+        }
         for key, (_wire, limit) in FIELDS.items():
-            properties[key] = {"type": "string", "maxLength": limit}
-        properties["subject_type"] = {"type": "string", "enum": cast(JsonValue, sorted(TYPE_VALUES))}
-        properties["enable_flag"] = {"type": "string", "enum": cast(JsonValue, sorted(ENABLE_VALUES)), "default": "Y"}
+            field_schema: JsonObject = {"type": "string", "maxLength": limit}
+            if key in field_descriptions:
+                field_schema["description"] = field_descriptions[key]
+            properties[key] = field_schema
+        properties["subject_type"] = {"type": "string", "enum": cast(JsonValue, sorted(TYPE_VALUES)),
+                                      "description": "CHECK 为点检，MAINTEN 为保养。"}
+        enable_flag: JsonObject = {"type": "string", "enum": cast(JsonValue, sorted(ENABLE_VALUES)),
+                                   "description": "Y 为启用，N 为停用。省略时"
+                                                  + ("默认启用。" if action == "create" else "保留原状态。")}
+        if action == "create":
+            enable_flag["default"] = "Y"
+        properties["enable_flag"] = enable_flag
     required = ["subject_code", "subject_type", "subject_content"] if action == "create" else ["subject_id"]
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 

@@ -35,14 +35,15 @@ _REPAIR_PATH = "/mes/dv/repair/list"
 _TREE_DESCRIPTION = (
     "查询 MES 设备分类（设备类型）树。可按类型名称模糊、类型编码、是否启用、父分类筛选，"
     "返回带完整路径与层级的扁平节点。适用于“设备分类有哪些/某分类下面有什么/某分类的完整路径/"
-    "按启用状态统计”；不适用于“列出某分类下的设备”（请用 ktg_dv_machinerytype_detail）。"
+    "按启用状态统计”，也可定位设备台账预览所需的启用末级分类 ID（enableFlag=Y 且 childCount=0）。"
+    "查看某分类下的设备数量与样例请用 ktg_dv_machinerytype_detail。"
     "不传筛选条件时返回全部分类，等同页面“重置”；total 为过滤后总数，truncated=true 表示还有更多。"
 )
 _DETAIL_DESCRIPTION = (
     "查询单个设备分类的详情与影响面：完整路径、父分类、直接子分类、子树内设备数量与样例、"
     "维修单引用数量，以及是否允许改名或停用。适用于“这个分类属于哪个大类/下面有多少设备/"
-    "改名或停用有影响吗/为什么不能删除”。必须提供 ID、编码、名称三者之一；名称可能重名，"
-    "重名时会返回候选，请让用户按 ID 或路径确认，不要自行猜测。"
+    "改名或停用有影响吗/为什么不能删除”。至少提供 ID、编码或名称之一；同时提供时按 ID、编码、名称的顺序定位。"
+    "重名时会返回候选，请让用户按 ID 或路径确认。"
 )
 
 
@@ -51,11 +52,11 @@ def _tree_schema() -> JsonObject:
         "type": "object",
         "properties": {
             "machinery_type_name": {
-                "type": "string", "minLength": 1, "maxLength": 100,
+                "type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
                 "description": "类型名称模糊匹配，等同页面“类型名称”输入框；不传=不按名称过滤",
             },
             "machinery_type_code": {
-                "type": "string", "minLength": 1, "maxLength": 64,
+                "type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
                 "description": "类型编码精确或前缀匹配；不传=不按编码过滤",
             },
             "enable_flag": {
@@ -86,15 +87,15 @@ def _detail_schema() -> JsonObject:
         "properties": {
             "machinery_type_id": {
                 "type": "integer", "minimum": 1,
-                "description": "设备类型 ID（最精确，优先使用）",
+                "description": "设备分类系统 ID，取自分类树的 machineryTypeId。优先使用。",
             },
             "machinery_type_code": {
-                "type": "string", "minLength": 1, "maxLength": 64,
-                "description": "设备类型编码，如 M_TYPE_025",
+                "type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                "description": "完整设备类型编码，例如 M_TYPE_025，精确匹配。",
             },
             "machinery_type_name": {
-                "type": "string", "minLength": 1, "maxLength": 100,
-                "description": "设备类型名称；允许模糊，但可能命中多个",
+                "type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
+                "description": "设备类型名称，先查精确名称，再查包含关键词的名称。",
             },
         },
         "anyOf": [
@@ -131,9 +132,10 @@ def _tree_definition() -> ToolDefinition:
         )
         lines = [summary, "筛选：" + _filter_text(cast(JsonObject, details["filters"]))]
         for row in rows[:20]:
+            position = "末级分类" if row["childCount"] == 0 else f"有 {row['childCount']} 个子分类"
             lines.append(
                 f"- [{row['machineryTypeId']}] {row['path']}"
-                f"（{row['machineryTypeCode']}，{'启用' if row['enableFlag'] == 'Y' else '停用'}）"
+                f"（{row['machineryTypeCode']}，{'启用' if row['enableFlag'] == 'Y' else '停用'}，{position}）"
             )
         if details["truncated"]:
             lines.append(f"其余 {cast(int, details['total']) - len(rows)} 个未返回，请按名称/父分类缩小范围。")

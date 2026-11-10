@@ -19,6 +19,11 @@ from ktg_agent.tools.registry import (
 )
 
 NAME = "ktg_pro_workorder_progress"
+_LABEL = "查询工单生产进度（试验）"
+_DESCRIPTION = (
+    "查看单张工单的进度试验视图，汇总计划量、已记录产量、算术差与比例、生产任务和近期报工。"
+    "数据来自多次读取，业务进度和工序完成规则未确认；默认关闭。"
+)
 ORACLE_VERSION = "mes-progress-oracle-v1"
 PERMISSIONS = (
     "mes:pro:workorder:query", "mes:pro:protask:list", "mes:pro:feedback:list",
@@ -226,11 +231,13 @@ def build_workorder_progress_tool() -> ToolDefinition:
                    f"总数 {completeness['feedback_total']}。非同一数据库快照。")
         return ToolResult(content=summary, details=details)
     return ToolDefinition(
-        name=NAME, version="1.0", label="工单进度试验视图",
-        description="试验性工单事实与进度算术视图；工序完成规则未确认，默认关闭。",
+        name=NAME, version="1.0", label=_LABEL,
+        description=_DESCRIPTION,
         input_schema={"type": "object", "properties": {
-            "workorder_id": {"type": "integer", "minimum": 1},
-            "recent_feedback_limit": {"type": "integer", "minimum": 0, "maximum": 20, "default": 5},
+            "workorder_id": {"type": "integer", "minimum": 1,
+                             "description": "生产工单的系统 ID，取自工单列表结果中的 workorderId。"},
+            "recent_feedback_limit": {"type": "integer", "minimum": 0, "maximum": 20, "default": 5,
+                                      "description": "返回的近期报工条数上限。传 0 省略近期条目，仍统计全部报工记录。"},
         }, "required": ["workorder_id"], "additionalProperties": False},
         output_schema={"type": "object", "properties": {key: {} for key in (
             "kind", "workorder", "source_observations", "metrics", "processes",
@@ -251,8 +258,8 @@ def workorder_progress_factories() -> dict[str, ToolFactory]:
 def workorder_progress_manifests() -> tuple[ToolManifest, ...]:
     return (ToolManifest(
         name=NAME, version="1.0", module="pro", domain="workorder",
-        label="工单进度试验视图",
-        description="试验性工单事实与进度算术视图；工序完成规则未确认，默认关闭。",
+        label=_LABEL,
+        description=_DESCRIPTION,
         permission_policy=PermissionAll(tuple(PermissionLeaf(p) for p in PERMISSIONS)),
         effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,
         retry_policy=RetryPolicy.BOUNDED_READ, timeout_seconds=15,

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import cast
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.ktg.dv_machinerytype import (
@@ -107,6 +108,8 @@ def test_tree_no_filters_returns_all_with_paths() -> None:
     assert rows[1]["childCount"] == 1
     assert calls[0][0].endswith("/mes/dv/machinerytype/list")
     assert "共 4 个设备分类" in result.content
+    assert "[201] 设备分类/工艺压缩设备（M_TYPE_025，启用，有 1 个子分类）" in result.content
+    assert "[203] 设备分类/包装设备（M_TYPE_027，启用，末级分类）" in result.content
 
 
 @pytest.mark.parametrize("args,expected", [
@@ -160,10 +163,16 @@ def test_tree_rejects_bad_response(payload: dict[str, object]) -> None:
     assert result.error_code == "KTG_INVALID_RESPONSE"
 
 
-def test_detail_by_id_includes_children_devices_and_repair() -> None:
+@pytest.mark.parametrize("arguments", [
+    {"machinery_type_id": 201},
+    {"machinery_type_id": 201, "machinery_type_code": "M_TYPE_027"},
+])
+def test_detail_by_id_includes_children_devices_and_repair(arguments: dict[str, object]) -> None:
+    detail = next(tool for tool in build_dv_machinerytype_tools() if tool.name == DETAIL_NAME)
+    assert Draft202012Validator(detail.input_schema).is_valid(arguments)
     result, calls = _run(
         DETAIL_NAME,
-        {"machinery_type_id": 201},
+        arguments,
         [
             ("/mes/dv/machinerytype/list", {"code": 200, "data": NODES}),
             ("/mes/dv/machinery/list", {"code": 200, "total": 2,

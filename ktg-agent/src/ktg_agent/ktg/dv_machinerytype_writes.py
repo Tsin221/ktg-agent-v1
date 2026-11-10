@@ -44,7 +44,7 @@ APPLY_UPDATE = "ktg_dv_machinerytype_update"
 _CREATE_PATH = "/mes/dv/machinerytype"
 
 _CREATE_DESCRIPTION = (
-    "为“新增设备分类”生成预览，不会写入数据库。必须先通过 tree 找到已存在的父分类，"
+    "为“新增设备分类”生成预览，不会写入数据库。必须先通过设备分类树找到已存在的父分类，"
     "不支持新建根分类；名称必填（1-100 字），同级重名会被拒绝；编码由 MES 在最终确认时自动生成，"
     "预览中不会给出具体编码。生成后必须由用户在网页点击确认，模型不得声称已经新增。"
 )
@@ -294,10 +294,10 @@ def _preview_create_definition(store: DvMachineryTypePreviewStore) -> ToolDefini
             "properties": {
                 "parent_type_id": {
                     "type": "integer", "minimum": 1,
-                    "description": "父分类 ID，必须已存在；先用 tree 查到，不支持新建根分类",
+                    "description": "现有父分类的系统 ID，取自设备分类树的 machineryTypeId。",
                 },
                 "machinery_type_name": {
-                    "type": "string", "minLength": 1, "maxLength": 100,
+                    "type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
                     "description": "新分类名称，不能与同父分类下已有名称重复",
                 },
                 "enable_flag": {
@@ -327,10 +327,11 @@ def _preview_update_definition(store: DvMachineryTypePreviewStore) -> ToolDefini
             "type": "object",
             "properties": {
                 "machinery_type_id": {
-                    "type": "integer", "minimum": 1, "description": "要修改的分类 ID",
+                    "type": "integer", "minimum": 1,
+                    "description": "目标分类系统 ID，取自设备分类树的 machineryTypeId。",
                 },
                 "machinery_type_name": {
-                    "type": "string", "minLength": 1, "maxLength": 100,
+                    "type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
                     "description": "新名称；不传=不改",
                 },
                 "enable_flag": {

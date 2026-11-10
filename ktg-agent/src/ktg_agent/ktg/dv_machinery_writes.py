@@ -261,37 +261,57 @@ def _action_for_name(name: str) -> str:
 
 
 _PREVIEW_DESCRIPTIONS = {
-    "create": "为设备台账生成新增预览，不会写数据库。编码由调用者提供（预览不会消耗自动编码流水）；确认后才创建并由 MES 生成条码。分类必须是启用叶子分类，车间必须启用。",
-    "update": "为指定设备 ID 生成修改预览，不会写数据库。设备编码不可修改；关联分类/车间使用启用候选中的 ID，确认后才保存。",
-    "delete": "为单台设备 ID 生成删除预览，不会写数据库。确认后只删除这台设备。后端的维修/点检关联保护未得到验证，请先人工核实关联影响。",
+    "create": "生成新增设备台账记录的预览，由用户在网页确认后创建并由 MES 生成条码。"
+              "提供设备编码和名称，从设备分类树选启用末级分类，从启用车间候选选车间，传系统 ID。",
+    "update": "生成单台设备台账的修改预览，由用户在网页确认后保存。传设备系统 ID 及发生变化的字段；"
+              "设备编码固定。更换分类时选启用末级分类，更换车间时选启用车间。",
+    "delete": "生成单台设备台账记录的删除预览，传设备系统 ID。由用户在网页确认后只删除这台设备；"
+              "请在确认前人工核对维修和点检关联。",
 }
 
 
 def _preview_schema(action: str) -> dict[str, object]:
     if action == "create":
         properties: dict[str, dict[str, JsonValue]] = {
-            "machinery_code": {"type": "string", "minLength": 1, "maxLength": 64},
-            "machinery_name": {"type": "string", "minLength": 1, "maxLength": 255},
-            "machinery_type_id": {"type": "integer", "minimum": 1},
-            "workshop_id": {"type": "integer", "minimum": 1},
-            "machinery_brand": {"type": "string", "maxLength": 255},
-            "machinery_spec": {"type": "string", "maxLength": 255},
+            "machinery_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                               "description": "调用方提供的完整设备业务编码，需唯一。"},
+            "machinery_name": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": r"\S",
+                               "description": "设备台账名称。"},
+            "machinery_type_id": {"type": "integer", "minimum": 1,
+                                  "description": "设备分类树中启用的末级分类 machineryTypeId。"},
+            "workshop_id": {"type": "integer", "minimum": 1,
+                            "description": "启用车间候选返回的 workshopId。"},
+            "machinery_brand": {"type": "string", "maxLength": 255, "pattern": r"\S",
+                                "description": "设备品牌，未提供时省略。"},
+            "machinery_spec": {"type": "string", "maxLength": 255, "pattern": r"\S",
+                               "description": "设备规格，未提供时省略。"},
             "status": {"type": "string", "enum": cast(JsonValue, sorted(_STATUS)), "default": "STOP"},
             "remark": {"type": "string", "maxLength": 500},
         }
         required = ["machinery_code", "machinery_name", "machinery_type_id", "workshop_id"]
     elif action == "update":
-        properties = {"machinery_id": {"type": "integer", "minimum": 1}}
+        properties = {"machinery_id": {"type": "integer", "minimum": 1,
+                                      "description": "目标设备的系统 ID，取自设备台账的 machineryId。"}}
         properties.update({key: {"type": "string", "maxLength": limit}
                            for key, limit in _TEXT_LIMITS.items() if key != "machinery_code"})
         properties["machinery_name"]["minLength"] = 1
-        properties["machinery_type_id"] = {"type": "integer", "minimum": 1}
-        properties["workshop_id"] = {"type": "integer", "minimum": 1}
+        properties["machinery_name"]["pattern"] = r"\S"
+        properties["machinery_name"]["description"] = "新设备名称，省略保留原值。"
+        for key in ("machinery_brand", "machinery_spec", "remark"):
+            properties[key]["description"] = "省略保留原值；可传空字符串。"
+        properties["machinery_type_id"] = {"type": "integer", "minimum": 1,
+                                           "description": "设备分类树中启用的末级分类 machineryTypeId，省略保留原值。"}
+        properties["workshop_id"] = {"type": "integer", "minimum": 1,
+                                     "description": "启用车间候选返回的 workshopId，省略保留原值。"}
         properties["status"] = {"type": "string", "enum": cast(JsonValue, sorted(_STATUS))}
         required = ["machinery_id"]
     else:
-        properties = {"machinery_id": {"type": "integer", "minimum": 1}}
+        properties = {"machinery_id": {"type": "integer", "minimum": 1,
+                                      "description": "待删除设备的系统 ID，取自设备台账的 machineryId。"}}
         required = ["machinery_id"]
+    if action in {"create", "update"}:
+        default = "省略时默认为 STOP。" if action == "create" else "省略保留原状态。"
+        properties["status"]["description"] = "STOP 停机，WORKING 生产中，REPAIR 维修中。" + default
     return {"type": "object", "properties": cast(JsonValue, properties),
             "required": cast(JsonValue, required),
             "additionalProperties": False}

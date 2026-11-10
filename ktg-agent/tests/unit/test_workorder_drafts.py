@@ -160,6 +160,18 @@ def test_create_schema_requires_business_fields_and_manual_code() -> None:
         assert not list(Draft202012Validator(tool.input_schema).iter_errors(candidate)), quantity
 
 
+def test_edit_schema_requires_target_and_change_fields() -> None:
+    tool = next(tool for tool in build_workorder_tools(PreviewStore())
+                if tool.name == "ktg_preview_edit_workorder_draft")
+    validator = Draft202012Validator(tool.input_schema)
+    target = {"target_workorder_code": "WO-1"}
+    assert not validator.is_valid(target)
+    assert not validator.is_valid({"remark": ""})
+    assert not validator.is_valid({**target, "code_mode": "auto"})
+    assert validator.is_valid({**target, "remark": ""})
+    assert validator.is_valid({**target, "workorder_code": "WO-2", "remark": ""})
+
+
 def test_quantity_obeys_screen_range_and_database_precision_without_rounding() -> None:
     assert _quantity("0.01") == "0.01"
     assert _quantity("99999999") == "99999999"

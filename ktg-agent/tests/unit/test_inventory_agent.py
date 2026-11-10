@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ktg_agent.core.messages import ToolCall
+from ktg_agent.core.messages import JsonObject, ToolCall
 from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore, build_inventory_result_tool, build_inventory_tools, confirm_inventory, inventory_result
 from ktg_agent.tools import RetryPolicy, ToolContext, ToolEffect, ToolRegistry, ToolRunner
@@ -138,20 +138,27 @@ def test_expired_preview_cannot_be_confirmed_or_returned_as_prepared() -> None:
 
 async def _scenario(*, stale: bool, action: str) -> None:
     with TemporaryDirectory() as folder:
-        state = {"quantity": 5, "writes": 0}
+        state = {"quantity": 5, "writes": 0, "reads": 0}
+        resource = "itemrecpt" if action == RECEIPT else "issueheader"
+        code_key = "recptCode" if action == RECEIPT else "issueCode"
+        id_key = "recptId" if action == RECEIPT else "issueId"
+        document_code = "IR-12" if action == RECEIPT else "PI-12"
 
         async def read(url: str, _headers: Mapping[str, str],
-                       _params: Mapping[str, object], _timeout: float) -> object:
+                       params: Mapping[str, object], _timeout: float) -> object:
+            state["reads"] += 1
+            if url.endswith(f"/mes/wm/{resource}/list"):
+                assert params == {code_key: document_code, "pageNum": 1, "pageSize": 100}
+                return {"code": 200, "total": 1, "rows": [{id_key: 12, code_key: document_code}]}
             if url.endswith(f"/mes/wm/inventory-operations/documents/{action}/12"):
                 return {"code": 200, "data": {"operationStatus": "unknown"}}
-            resource = "itemrecpt" if action == RECEIPT else "issueheader"
             if url.endswith(f"/mes/wm/{resource}/12/execution-preview"):
                 lines = {"additions": [{"sourceDocLineId": 1, "itemCode": "A",
                                          "quantity": state["quantity"], "warehouseName": "Main"}]} if action == RECEIPT else {
                     "movements": [{"sourceDocLineId": 1, "itemCode": "A",
                                    "quantity": state["quantity"], "sourceWarehouseName": "Main",
                                    "target": {"warehouseName": "Line"}}]}
-                return {"code": 200, "data": {"documentId": 12, "documentCode": "IR-12",
+                return {"code": 200, "data": {"documentId": 12, "documentCode": document_code,
                         "documentStatus": "APPROVED", "documentVersion": 4,
                         **lines}}
             if "/mes/wm/inventory-operations/" in url:
@@ -172,16 +179,36 @@ async def _scenario(*, stale: bool, action: str) -> None:
         client = KTGClient(base_url="http://localhost", authorization="Bearer test",
                            transport=read, write_transport=write)
         store = InventoryStore(str(Path(folder) / "operations.sqlite3"))
-        registry = ToolRegistry(build_inventory_tools(store, frozenset({action})))
+        registry = ToolRegistry((*build_inventory_tools(store, frozenset({action})),
+                                 build_inventory_result_tool(store)))
         runner = ToolRunner(registry)
         identity = {"userId": 7, "userName": "alice"}
         context = ToolContext(run_id="run", tool_call_id="preview", identity=identity,
                               ktg_client=client)
-        preview = await runner.run(
-            ToolCall("preview", "ktg_preview_item_receipt" if action == RECEIPT else "ktg_preview_production_issue", {"document_id": 12}), context)
+        preview_name = "ktg_preview_item_receipt" if action == RECEIPT else "ktg_preview_production_issue"
+        invalid: tuple[JsonObject, ...] = (
+            {}, {"document_id": 12, "document_code": document_code}, {"document_id": "12"},
+            {"document_code": document_code, "quantity": 5}, {"documentId": 12},
+        )
+        for arguments in invalid:
+            result = await runner.run(ToolCall("preview", preview_name, arguments), context)
+            assert result.error_code == "VALIDATION_ERROR"
+        assert state["reads"] == 0
+        selector: JsonObject = {"document_id": 12} if action == RECEIPT else {"document_code": document_code}
+        preview = await runner.run(ToolCall("preview", preview_name, selector), context)
         assert preview.details is not None
         operation_id = preview.details["operation_id"]
         assert isinstance(operation_id, str)
+        assert operation_id in preview.content
+        pending = await runner.run(ToolCall("preview", "ktg_wm_operation_result", {"operation_id": operation_id}), context)
+        assert pending.error_code == "OPERATION_PENDING"
+        invalid_result = await runner.run(ToolCall("preview", "ktg_wm_operation_result", {"operation_id": "x" * 36}), context)
+        assert invalid_result.error_code == "VALIDATION_ERROR"
+        other_user = ToolContext(run_id="run", tool_call_id="result", identity={"userId": 8}, ktg_client=client)
+        unauthorized = await runner.run(
+            ToolCall("result", "ktg_wm_operation_result", {"operation_id": operation_id}), other_user)
+        assert unauthorized.error_code == "OPERATION_NOT_FOUND"
+        assert unauthorized.details is not None and "documentCode" not in unauthorized.details
         assert state["writes"] == 0
         if stale:
             state["quantity"] = 6

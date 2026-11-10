@@ -215,14 +215,25 @@ def _definition(store: TmToolTypePreviewStore, action: str, hidden: bool) -> Too
 def _preview_schema(action: str) -> dict[str, object]:
     properties: dict[str, JsonValue] = {}
     if action != "create":
-        properties["tool_type_id"] = {"type": "integer", "minimum": 1}
+        properties["tool_type_id"] = {
+            "type": "integer", "minimum": 1,
+            "description": "目标类型的系统 ID，取自类型查询结果的 toolTypeId。",
+        }
     if action != "delete":
-        properties.update({"tool_type_code": {"type": "string", "minLength": 1, "maxLength": 64},
-            "tool_type_name": {"type": "string", "minLength": 1, "maxLength": 100},
-            "code_flag": {"type": "string", "enum": ["Y", "N"]},
-            "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"]},
-            "mainten_period": {"type": "integer", "minimum": 1, "maximum": MAX_PERIOD},
-            "remark": {"type": "string", "maxLength": 250}})
+        properties.update({
+            "tool_type_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                               "description": "工装夹具类型的唯一业务编码。"},
+            "tool_type_name": {"type": "string", "minLength": 1, "maxLength": 100,
+                               "description": "工装夹具类型的唯一名称。"},
+            "code_flag": {"type": "string", "enum": ["Y", "N"],
+                          "description": "Y 表示一件一码，须有维护方式和周期。N 表示非独立编码，维护字段将置空。"},
+            "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"],
+                             "description": "类型维护方式。REGULAR 为按天定期维护，USAGE 为按使用次数维护。"},
+            "mainten_period": {"type": "integer", "minimum": 1, "maximum": MAX_PERIOD,
+                               "description": "类型维护周期。REGULAR 单位为天，USAGE 单位为次。"},
+            "remark": {"type": "string", "maxLength": 250,
+                       "description": "类型备注，传空字符串可清空。"},
+        })
     required = ["tool_type_code", "tool_type_name", "code_flag"] if action == "create" else ["tool_type_id"]
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
@@ -567,9 +578,12 @@ def _action_for_name(name: str) -> str:
 
 
 _PREVIEW_DESCRIPTIONS = {
-    "create": "新增单条工装夹具类型预览。必须提供明确唯一编码、名称和编码管理值；Y时需维护类型与1至2147483647整数周期，N时维护字段置空。确认前不写MES，不调用自动编号。",
-    "update": "按明确ID修改工装夹具类型。只采用用户提供的白名单字段，其余字段从可信MES快照合并；确认前再次校验快照和唯一性。",
-    "delete": "按明确ID删除单条工装夹具类型；预览和确认时均检查关联工装台账，有关联时拒绝删除。",
+    "create": "生成单条工装夹具类型新增预览，须经网页确认后才写入。须传唯一类型编码、唯一名称和编码管理值。"
+              "code_flag=Y 时必须传维护方式和周期，N 时省略维护字段。编码由用户提供。",
+    "update": "生成单条工装夹具类型修改预览，须经网页确认后才写入。按 tool_type_id 定位，只传需要改变的类型字段。"
+              "省略字段沿用现有值；合并后 code_flag=Y 时须有合法维护方式和周期，N 时自动清空维护字段。",
+    "delete": "生成单条工装夹具类型删除预览，须经网页确认后才写入。按 tool_type_id 定位；"
+              "预览和确认时均检查关联工装台账，有关联时拒绝删除。",
 }
 
 

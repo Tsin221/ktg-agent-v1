@@ -126,20 +126,28 @@ def build_dv_subject_tools() -> tuple[ToolDefinition, ...]:
                 return ToolResult(content=text[:4000], details=data)
             except KTGError as exc:
                 return _failure(str(exc), exc.code)
-        properties: dict[str, JsonValue] = {"subject_code": {"type": "string", "minLength": 1, "maxLength": 64}}
+        properties: dict[str, JsonValue] = {"subject_code": {
+            "type": "string", "minLength": 1, "maxLength": 64, "description": "项目的完整业务编码，精确匹配。"}}
         if detail:
-            properties["subject_id"] = {"type": "integer", "minimum": 1}
+            properties["subject_id"] = {"type": "integer", "minimum": 1,
+                                        "description": "项目台账记录的系统 ID，取自项目查询结果的 subjectId。"}
         else:
-            properties.update({"subject_name": {"type": "string", "maxLength": 100},
-                "subject_type": {"type": "string", "enum": cast(JsonValue, sorted(TYPE_VALUES))},
-                "enable_flag": {"type": "string", "enum": cast(JsonValue, sorted(ENABLE_VALUES))},
-                "page": {"type": "integer", "minimum": 1, "default": 1},
-                "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}})
+            properties.update({"subject_name": {"type": "string", "maxLength": 100, "description": "项目名称，模糊匹配。"},
+                "subject_type": {"type": "string", "enum": cast(JsonValue, sorted(TYPE_VALUES)),
+                                 "description": "项目类型。CHECK 为点检，MAINTEN 为保养。"},
+                "enable_flag": {"type": "string", "enum": cast(JsonValue, sorted(ENABLE_VALUES)),
+                                "description": "启用状态。Y 为启用，N 为停用。省略时不筛选状态。"},
+                "page": {"type": "integer", "minimum": 1, "default": 1, "description": "页码，从 1 开始。"},
+                "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                              "description": "每页条数，默认 20。"}})
+        schema = _schema(properties)
+        if detail:
+            schema["oneOf"] = [{"required": ["subject_id"]}, {"required": ["subject_code"]}]
         result.append(ToolDefinition(name=DETAIL_NAME if detail else LIST_NAME, version="1.0",
             label="查询点检保养项目详情" if detail else "查询点检保养项目",
-            description="按明确ID或精确编码读取项目；同编码多条时必须让用户选择ID。" if detail else
-                "分页查询点检保养项目；编码精确匹配、名称模糊匹配，类型CHECK/MAINTEN，启用Y/N。不涉及计划。",
-            input_schema=_schema(properties), output_schema=_output_schema(("kind", "subject", "queried_at") if detail else
+            description="读取一条点检保养项目台账记录。必须且只能提供 subject_id 或 subject_code；同编码多条时请用户选择 ID。" if detail else
+                "分页查询点检保养项目台账，可按编码、名称、类型、启用状态筛选。已有计划中的项目快照应查计划关联明细。",
+            input_schema=schema, output_schema=_output_schema(("kind", "subject", "queried_at") if detail else
                 ("kind", "rows", "total", "page", "page_size", "filters", "queried_at")),
             required_permissions=("mes:dv:dvsubject:query", "mes:dv:dvsubject:list") if detail else ("mes:dv:dvsubject:list",),
             effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL, retry_policy=RetryPolicy.BOUNDED_READ,

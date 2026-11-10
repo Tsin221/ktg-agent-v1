@@ -259,41 +259,53 @@ async def read_candidates(client: KTGClient, arguments: Mapping[str, object], ki
 
 
 _READ_CONFIG = (
-    ("ktg_dv_checkplan_list", "查询点检保养计划", "分页查找计划；编号和枚举精确，名称按MES规则模糊匹配。", "list", ("mes:dv:checkplan:list",)),
-    ("ktg_dv_checkplan_detail", "查询点检保养计划详情", "只能提供plan_id或plan_code；重码必须按ID选择。", "detail", ("mes:dv:checkplan:query", "mes:dv:checkplan:list")),
-    ("ktg_dv_checkplan_options", "查询计划选项", "读取当前计划类型、周期类型和状态字典及源码基线。", "options", ("mes:dv:checkplan:list",)),
-    ("ktg_dv_checkplan_links", "查询计划关联明细", "按计划和kind分页读取已保存的设备或项目快照。", "links", ("mes:dv:checkplan:query", "mes:dv:checkmachinery:list", "mes:dv:checksubject:list")),
-    ("ktg_dv_checkplan_machinery_candidates", "查询计划设备候选", "列出设备候选，不写入；关联需预览确认。", "machinery", ("mes:dv:checkplan:query", "mes:dv:machinery:list")),
-    ("ktg_dv_checkplan_subject_candidates", "查询计划项目候选", "只返回启用且与计划类型匹配的项目；按ID选择。", "subject", ("mes:dv:checkplan:query", "mes:dv:dvsubject:list")),
+    ("ktg_dv_checkplan_list", "查询点检保养计划", "分页筛选点检保养计划主记录。编号和枚举精确匹配，名称按 MES 规则模糊匹配。", "list", ("mes:dv:checkplan:list",)),
+    ("ktg_dv_checkplan_detail", "查询点检保养计划详情", "读取一条点检保养计划主记录。必须且只能传 plan_id 或完整编号 plan_code；编号重复时按 ID 选择。已关联设备或项目应查计划关联明细。", "detail", ("mes:dv:checkplan:query", "mes:dv:checkplan:list")),
+    ("ktg_dv_checkplan_options", "查询计划选项", "读取点检保养计划的类型、周期类型和状态字典。周期类型取当前字典中的 value；状态能力见 supported_plan_statuses。", "options", ("mes:dv:checkplan:list",)),
+    ("ktg_dv_checkplan_links", "查询点检计划关联明细", "分页读取指定点检保养计划已关联的设备或项目快照。移除关联使用这里返回的 recordId。", "links", ("mes:dv:checkplan:query", "mes:dv:checkmachinery:list", "mes:dv:checksubject:list")),
+    ("ktg_dv_checkplan_machinery_candidates", "查询计划设备候选", "为指定点检保养计划查找可选择的设备候选。结果提供 machineryId，关联预览会再次检查同类型计划冲突。", "machinery", ("mes:dv:checkplan:query", "mes:dv:machinery:list")),
+    ("ktg_dv_checkplan_subject_candidates", "查询计划项目候选", "为指定点检保养计划查找可选择的项目候选，仅返回已启用且与计划类型匹配的项目。关联预览使用结果中的 subjectId。", "subject", ("mes:dv:checkplan:query", "mes:dv:dvsubject:list")),
 )
 
 
 def build_dv_checkplan_tools() -> tuple[ToolDefinition, ...]:
     definitions = []
+    plan_id: JsonValue = {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                          "description": "目标计划的系统 ID，取自计划列表或详情的 planId。"}
+    paging: dict[str, JsonValue] = {
+        "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1,
+                 "description": "页码，从 1 开始。"},
+        "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                      "description": "每页条数，默认 20。"},
+    }
     for name, label, description, kind, perms in _READ_CONFIG:
         props: dict[str, JsonValue]
         if kind == "list":
-            props = {}
-            for key, (_wire, maximum) in PLAN_FILTERS.items():
-                props[key] = (cast(JsonValue, {"type": "string", "format": "date"}) if key.endswith("_date") else
-                              cast(JsonValue, {"type": "string", "minLength": 1, "maxLength": maximum or 64}))
-            props["plan_type"] = {"type": "string", "enum": cast(JsonValue, list(PLAN_TYPES))}
-            props["status"] = {"type": "string", "enum": cast(JsonValue, list(PLAN_STATUSES))}
-            props.update({"page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1}, "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}})
+            props = {
+                "plan_code": {"type": "string", "minLength": 1, "maxLength": 64, "description": "完整业务编号，精确匹配。"},
+                "plan_name": {"type": "string", "minLength": 1, "maxLength": 100, "description": "计划名称，模糊匹配。"},
+                "plan_type": {"type": "string", "enum": cast(JsonValue, list(PLAN_TYPES)), "description": "CHECK 为点检，MAINTEN 为保养。"},
+                "status": {"type": "string", "enum": cast(JsonValue, list(PLAN_STATUSES)), "description": "PREPARE 为草稿，FINISHED 为已启用。"},
+                "cycle_type": {"type": "string", "minLength": 1, "maxLength": 64, "description": "周期单位，取自计划选项 cycle_types 的 value。"},
+                "start_date": {"type": "string", "format": "date", "description": "开始日期筛选值，yyyy-MM-dd。"},
+                "end_date": {"type": "string", "format": "date", "description": "结束日期筛选值，yyyy-MM-dd。"},
+                **paging,
+            }
         elif kind == "detail":
-            id_schema: JsonValue = {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
-            code_schema: JsonValue = {"type": "string", "minLength": 1, "maxLength": 64}
-            props = {"plan_id": id_schema, "plan_code": code_schema}
+            props = {"plan_id": plan_id, "plan_code": {"type": "string", "minLength": 1, "maxLength": 64,
+                     "description": "完整计划业务编号，精确匹配。"}}
         elif kind == "options":
             props = {}
         elif kind == "links":
-            props = {"plan_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}, "kind": {"type": "string", "enum": cast(JsonValue, ["machinery", "subject"])},
-                     "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1}, "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}
+            props = {"plan_id": plan_id,
+                     "kind": {"type": "string", "enum": cast(JsonValue, ["machinery", "subject"]),
+                              "description": "关联类别。machinery 查已关联设备，subject 查已关联项目。"}, **paging}
         else:
-            props = {"plan_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
-                     ("machinery_code" if kind == "machinery" else "subject_code"): {"type": "string", "minLength": 1, "maxLength": 64},
-                     ("machinery_name" if kind == "machinery" else "subject_name"): {"type": "string", "minLength": 1, "maxLength": 255 if kind == "machinery" else 100},
-                     "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1}, "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}
+            target = "设备" if kind == "machinery" else "项目"
+            props = {"plan_id": plan_id,
+                     f"{kind}_code": {"type": "string", "minLength": 1, "maxLength": 64, "description": f"{target}的完整业务编码。"},
+                     f"{kind}_name": {"type": "string", "minLength": 1, "maxLength": 255 if kind == "machinery" else 100, "description": f"{target}名称筛选值。"},
+                     **paging}
 
         async def execute(context: ToolContext, arguments: Mapping[str, object], *, kind: str = kind) -> ToolResult:
             client = _client(context)

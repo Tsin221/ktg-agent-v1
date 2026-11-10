@@ -301,17 +301,29 @@ def build_tm_tool_tools() -> tuple[ToolDefinition, ...]:
     return (
         ToolDefinition(
             name=LIST_NAME, version="1.0", label="查询工装夹具台账",
-            description="分页查询工装夹具台账，编码/品牌/型号精确匹配，名称模糊匹配。",
+            description=(
+                "分页筛选工装夹具台账记录，查看本页夹具及匹配总数。编码、品牌和型号精确匹配，名称模糊匹配。"
+                "需要单条记录的下次保养日期时，查询工装夹具详情。"
+            ),
             input_schema=_schema({
-                "tool_code": {"type": "string", "minLength": 1, "maxLength": 64},
-                "tool_name": {"type": "string", "minLength": 1, "maxLength": 100},
-                "brand": {"type": "string", "minLength": 1, "maxLength": 100},
-                "spec": {"type": "string", "minLength": 1, "maxLength": 100},
-                "tool_type_id": {"type": "integer", "minimum": 1},
-                "status": {"type": "string", "enum": ["STORE", "ISSUE", "SCRAP", "REPARE"]},
-                "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"]},
-                "page": {"type": "integer", "minimum": 1, "default": 1},
-                "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "tool_code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"\S",
+                              "description": "夹具业务编码，按完整编码精确筛选。"},
+                "tool_name": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
+                              "description": "夹具名称关键字，模糊筛选。"},
+                "brand": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
+                          "description": "夹具品牌，精确筛选。"},
+                "spec": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"\S",
+                         "description": "夹具型号，精确筛选。"},
+                "tool_type_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+                                 "description": "类型系统 ID，使用类型查询或台账选项中的 toolTypeId。"},
+                "status": {"type": "string", "enum": ["STORE", "ISSUE", "SCRAP", "REPARE"],
+                           "description": "台账状态。STORE 在库，ISSUE 被领用，SCRAP 报废，REPARE 维修中。"},
+                "mainten_type": {"type": "string", "enum": ["REGULAR", "USAGE"],
+                                 "description": "台账维护方式。REGULAR 定期维护，USAGE 按使用次数维护。"},
+                "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1,
+                         "description": "页码，从 1 开始，省略时查第 1 页。"},
+                "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                              "description": "每页记录数，省略时为 20。"},
             }),
             output_schema=_output_schema(("kind", "rows", "total", "page", "page_size", "filters", "queried_at")),
             required_permissions=("mes:tm:tool:list",), effect=ToolEffect.READ,
@@ -320,19 +332,41 @@ def build_tm_tool_tools() -> tuple[ToolDefinition, ...]:
         ),
         ToolDefinition(
             name=DETAIL_NAME, version="1.0", label="查询工装夹具详情",
-            description="按明确ID或精确唯一业务编码读取工装夹具台账详情。",
-            input_schema=_schema({
-                "tool_id": {"type": "integer", "minimum": 1},
-                "tool_code": {"type": "string", "minLength": 1, "maxLength": 64},
-            }),
+            description=(
+                "读取一条工装夹具台账记录。必须且只能传 tool_id 或 tool_code 之一。"
+                "分页筛选用 ktg_tm_tool_list，查类型候选和字典选项用 ktg_tm_tool_options。"
+            ),
+            input_schema={
+                **_schema({
+                    "tool_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9223372036854775807,
+                        "description": "台账记录的系统 ID，取自台账查询结果中的 toolId。",
+                    },
+                    "tool_code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": r"\S",
+                        "description": "工装夹具完整且唯一的业务编码，按完整编码匹配，忽略大小写。",
+                    },
+                }),
+                "oneOf": [{"required": ["tool_id"]}, {"required": ["tool_code"]}],
+            },
             output_schema=_output_schema(("kind", "tool", "queried_at")),
             required_permissions=("mes:tm:tool:query", "mes:tm:tool:list"), effect=ToolEffect.READ,
             execution_mode=ExecutionMode.PARALLEL, retry_policy=RetryPolicy.BOUNDED_READ,
             timeout_seconds=20, execute=detail,
         ),
         ToolDefinition(
-            name=OPTIONS_NAME, version="1.0", label="查询工装夹具选项",
-            description="读取真实工装类型ID/名称/codeFlag、维护方式和状态选项。新增需要类型ID时可用本会话已查询选项，缺失、不完整、类型变化或用户明确重查时再读取；codeFlag=Y数量必须1。状态字典仅用于解释/查询，不代表支持修改状态；拒绝状态修改无需读取本工具。",
+            name=OPTIONS_NAME, version="1.0", label="查询工装夹具台账选项",
+            description=(
+                "读取工装夹具台账的基础选项，包括已有类型候选的系统 ID、名称和 codeFlag，以及维护方式和状态字典。"
+                "新增预览的 tool_type_id 取自候选的 toolTypeId；本会话的结果缺失、不完整、类型变化或用户要求重查时再读取。"
+                "codeFlag=Y 表示一件一码，数量必须为 1。状态字典用于解释和查询，拒绝状态修改时无需读取。"
+                "查询类型配置的维护周期规则时使用工装夹具类型选项。"
+            ),
             input_schema=_schema({}),
             output_schema=_output_schema(("kind", "options", "queried_at")),
             required_permissions=("mes:tm:tooltype:list",), effect=ToolEffect.READ,

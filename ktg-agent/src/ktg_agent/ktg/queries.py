@@ -22,8 +22,10 @@ from ktg_agent.tools import (
 
 def build_query_tools() -> tuple[ToolDefinition, ...]:
     common_properties: JsonObject = {
-        "page": {"type": "integer", "minimum": 1, "default": 1},
-        "page_size": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+        "page": {"type": "integer", "minimum": 1, "default": 1,
+                 "description": "页码，从第 1 页开始。"},
+        "page_size": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10,
+                      "description": "每页返回的记录数，默认 10 条，最多 20 条。"},
     }
     return (
         _tool(
@@ -36,10 +38,13 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
         _tool(
             name="ktg_search_items",
             label="查询产品",
-            description="按编码或名称查询产品/物料资料；不提供筛选条件时，按页列出当前用户可见的产品（不含物料）。",
+            description=("分页查询产品或物料资料和列表明细。可按编码或名称模糊筛选；"
+                         "省略筛选时只列当前用户可见的产品。产品总数用 ktg_count_products。"),
             properties={
-                "item_code": {"type": "string", "minLength": 1},
-                "item_name": {"type": "string", "minLength": 1},
+                "item_code": {"type": "string", "minLength": 1,
+                              "description": "产品或物料的业务编码，按包含该文本筛选。"},
+                "item_name": {"type": "string", "minLength": 1,
+                              "description": "产品或物料的业务名称，按包含该文本筛选。"},
                 **common_properties,
             },
             execute=_search_items,
@@ -47,10 +52,13 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
         _tool(
             name="ktg_query_stock",
             label="查询库存",
-            description="按物料编码查询当前用户有权查看的分仓库存。",
+            description=("查询指定物料在当前用户可见仓库中的库存明细，须传完整物料编码。"
+                         "省略仓库时查询该物料的各仓记录。库存单据执行回执用 ktg_wm_operation_result。"),
             properties={
-                "item_code": {"type": "string", "minLength": 1},
-                "warehouse_id": {"type": "integer", "minimum": 1},
+                "item_code": {"type": "string", "minLength": 1,
+                              "description": "完整物料业务编码，取自产品或物料查询结果的 itemCode，按精确编码筛选。"},
+                "warehouse_id": {"type": "integer", "minimum": 1,
+                                 "description": "仓库系统 ID，可取自库存结果的 warehouseId；省略时不限制仓库。"},
                 **common_properties,
             },
             execute=_query_stock,
@@ -58,16 +66,21 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
         ),
         _tool(
             name="ktg_list_workorders",
-            label="查询工单",
-            description="按工单编号、产品编码、工单类型或状态查询当前用户有权查看的生产工单。",
+            label="查询生产工单列表",
+            description=("分页筛选当前用户可见的生产工单列表。按工单编号、产品编码、类型或状态筛选。"
+                         "读取单张工单详情用 ktg_pro_workorder_get，查看生产进度用已启用的工单进度工具。"),
             properties={
-                "workorder_code": {"type": "string", "minLength": 1},
-                "product_code": {"type": "string", "minLength": 1},
+                "workorder_code": {"type": "string", "minLength": 1,
+                                   "description": "生产工单完整业务编号，精确匹配。"},
+                "product_code": {"type": "string", "minLength": 1,
+                                 "description": "工单对应的完整产品业务编码，精确匹配。"},
                 "workorder_type": {
                     "type": "string",
                     "enum": ["SELF", "OUTSOURCE", "PURCHASE"],
+                    "description": "工单类型。SELF 为自制，OUTSOURCE 为委外，PURCHASE 为外购。",
                 },
-                "status": {"type": "string", "minLength": 1},
+                "status": {"type": "string", "minLength": 1,
+                           "description": "MES 工单状态的机器值，按精确状态筛选。"},
                 **common_properties,
             },
             execute=_list_workorders,

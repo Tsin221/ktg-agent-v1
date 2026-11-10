@@ -21,7 +21,8 @@ from ktg_agent.ktg.dv_repair_writes import (APPLY_NAMES, PREVIEW_NAMES, _PERMS,
 from ktg_agent.ktg.workorders import PreviewError
 from ktg_agent.server import Settings, create_service
 from ktg_agent.tools.catalog import CatalogIdentity
-from ktg_agent.tools.registry import ToolChannel, ToolContext, ToolDefinition, ToolResult, ToolStatus
+from ktg_agent.tools.registry import ToolChannel, ToolContext, ToolDefinition, ToolRegistry, ToolResult, ToolStatus
+from ktg_agent.tools.runner import ToolRunner
 
 
 REPAIR = {"repairId": 8, "repairCode": "R-8", "repairName": "泵维修", "machineryId": 11,
@@ -164,6 +165,40 @@ def test_read_rejects_other_parent_lines() -> None:
     mes.get = wrong_list  # type: ignore[method-assign]
     with pytest.raises(KTGError, match="其他维修单"):
         asyncio.run(read_repair_lines(mes, {"repair_id": 8}))
+
+
+@pytest.mark.parametrize(("suffix", "arguments"), [
+    ("list", {"page": 1_000_001}),
+    ("detail", {}),
+    ("detail", {"repair_id": 8, "repair_code": "R-8"}),
+    ("lines", {"repair_code": "R-8"}),
+    ("options", {"status": "PREPARE"}),
+    ("machinery_candidates", {"machinery_id": 11}),
+    ("subject_candidates", {"subject_code": 12}),
+])
+def test_runner_rejects_invalid_repair_reads_before_mes(suffix: str, arguments: JsonObject) -> None:
+    mes = FakeMES()
+    runner = ToolRunner(ToolRegistry(build_dv_repair_tools()))
+    call = ToolCall("call", f"ktg_dv_repair_{suffix}", arguments)
+    result = asyncio.run(runner.run(call, _ctx(mes)))
+    assert result.error_code == "VALIDATION_ERROR"
+    assert result.details is not None and "path" in result.details
+    assert mes.calls == []
+
+
+@pytest.mark.parametrize(("action", "ids", "one_change", "second_change"), [
+    ("update", {"repair_id": 8}, {"remark": ""}, {"repair_name": "新名称"}),
+    ("line_update", {"repair_id": 8, "line_id": 5}, {"repair_des": ""}, {"malfunction": "振动"}),
+])
+def test_repair_update_schema_requires_at_least_one_change(
+    action: str, ids: JsonObject, one_change: JsonObject, second_change: JsonObject,
+) -> None:
+    tools = build_dv_repair_write_tools(DvRepairPreviewStore())
+    tool = next(tool for tool in tools if tool.name == PREVIEW_NAMES[action])
+    validator = jsonschema.Draft202012Validator(tool.input_schema)
+    assert not validator.is_valid(ids)
+    assert validator.is_valid(ids | one_change)
+    assert validator.is_valid(ids | one_change | second_change)
 
 
 def test_all_six_actions_and_wire_field_boundaries(tmp_path: Path) -> None:
