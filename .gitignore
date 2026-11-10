@@ -7,10 +7,16 @@
 /redis/
 /logs/
 /.runtime/
+/ktg-agent/.runtime/
 /upload/
 /.git-backups/
 /.dsh-source-reference/
 /DB.Browser.for.SQLite-*.zip
+
+# Local test and browser evidence
+/output/
+/ktg-agent/output/
+**/.playwright-cli/
 
 # Private keys
 *.pem
