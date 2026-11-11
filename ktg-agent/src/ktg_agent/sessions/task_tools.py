@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ktg_agent.core.messages import AssistantMessage, JsonObject, JsonValue, ToolCall, ToolResultMessage
+from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.ktg import KTGError
 from ktg_agent.sessions.repository import SessionRepository, TaskVersionConflict
 from ktg_agent.tools.registry import (
@@ -89,15 +90,19 @@ def _resume_tool_records(repository: SessionRepository, owner: str, run_id: str)
 
 
 def task_run_configuration(repository: SessionRepository, run_id: str,
-                           identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str]:
+                           identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str, TaskBudget]:
     owner = owner_from_identity(identity)
     run = repository.get_run(owner, run_id)
     if run is None or run.kind != "user":
         raise KeyError("user run not found")
     selected = run.request_summary.get("task_id")
+    budget = TaskBudget()
     prompt = TASK_PROMPT
     if isinstance(selected, str):
         task = repository.get_task(owner, run.session_id, selected)
+        versions = task["versions"]
+        if isinstance(versions, list) and versions and isinstance(versions[0], dict):
+            budget.set_task(selected, versions[0].get("steps"))
         origin, previous_runs = repository.task_resume_runs(owner, run.session_id, selected, run_id)
         records: list[JsonValue] = []
         remaining = 16000
@@ -145,6 +150,9 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
             except ValueError as exc:
                 return ToolResult(str(exc), status=ToolStatus.FAILED, error_code="VALIDATION_ERROR")
             result = {"task_id": snapshot["task_id"], "version": snapshot["version"]}
+            task_id = snapshot["task_id"]
+            assert isinstance(task_id, str)
+            budget.set_task(task_id, snapshot["steps"])
             return ToolResult(json.dumps(result, ensure_ascii=False), details=result)
 
         properties: JsonObject = {"steps": _STEPS_SCHEMA, **fields}
@@ -163,4 +171,4 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
             "task_id": {"type": "string", "minLength": 1},
             "expected_version": {"type": "integer", "minimum": 1},
         }),
-    ), prompt
+    ), prompt, budget

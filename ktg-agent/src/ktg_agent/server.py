@@ -491,7 +491,7 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
             on_agent_ready=register_agent)
 
     return SessionService(repository, client_factory,
-                          RunCoordinator(repository, execute, service.budget_snapshot,
+                          RunCoordinator(repository, execute, service.session_budget_snapshot,
                                          compaction_planner=service.plan_compaction,
                                          compaction_executor=compact,
                                          system_prompt_builder=service.build_system_prompt,

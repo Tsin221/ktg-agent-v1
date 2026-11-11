@@ -11,10 +11,12 @@ from unittest.mock import Mock
 import pytest
 
 from ktg_agent.core.events import AgentEvent, AgentEventType
+from ktg_agent.core.loop import RunLimits
 from ktg_agent.core.messages import (
     AssistantMessage, JsonObject, Message, StopReason, TextBlock, ToolCall, ToolResultMessage,
     message_to_dict,
 )
+from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.ktg.workorders import PreviewStore
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ResponseCompleted, ToolCallCompleted
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
@@ -129,7 +131,7 @@ def test_scope_and_selected_run_context(tmp_path: Path) -> None:
         assert isinstance(run_id, str)
         repo.update_run_status("id:1", run_id, "running")
         identity: JsonObject = {"userId": 1}
-        definitions, prompt = task_run_configuration(repo, run_id, identity)
+        definitions, prompt, _ = task_run_configuration(repo, run_id, identity)
         assert selected in prompt and other not in prompt and "stable" in prompt
         runner = ToolRunner(ToolRegistry(definitions))
         context = ToolContext(run_id, "call", identity=identity)
@@ -231,7 +233,7 @@ def test_continue_recovers_budget_limited_task(tmp_path: Path, continuation: str
         run = repo.get_run("id:1", run_id)
         assert run is not None and run.request_summary["task_id"] == task_id
         assert run.request_summary["message"] == continuation
-        _, prompt = task_run_configuration(repo, run_id, await get_identity())
+        _, prompt, _ = task_run_configuration(repo, run_id, await get_identity())
         assert "Check workorders and stock" in prompt
         assert "Confirmed workorder WO-1" in prompt
         assert "UI_ONLY" not in prompt
@@ -241,3 +243,61 @@ def test_continue_recovers_budget_limited_task(tmp_path: Path, continuation: str
         coordinator.schedule.assert_called_once()
 
     asyncio.run(resume())
+
+
+def test_step_budget_reallocates_unused_calls_after_saving_progress() -> None:
+    budget = TaskBudget()
+    budget.set_task("task", [step("first", status="in_progress"), step("second"), step("third")])
+    first_calls = tuple(ToolCall(str(i), "query", {}) for i in range(5))
+    assert budget.admit(first_calls, 6) == (first_calls[:4], {"4": "TASK_STEP_LIMIT"})
+    assert budget.admit((first_calls[4],), 6) == ((), {"4": "TASK_STEP_LIMIT"})
+    budget.set_task("task", [step("first", status="completed"), step("second", status="in_progress"),
+                             step("third", status="completed")])
+    next_calls = (ToolCall("5", "query", {}), ToolCall("6", "query", {}))
+    assert budget.admit(next_calls, 6) == (next_calls, {})
+
+
+@pytest.mark.parametrize("limits", [
+    RunLimits(max_model_turns=8, max_tool_calls=12),
+    RunLimits(max_model_turns=8, max_tool_calls=2),
+])
+def test_task_can_save_and_answer_after_work_budget_runs_out(tmp_path: Path, limits: RunLimits) -> None:
+    repo, session, previous = setup_run(tmp_path / "closeout.sqlite")
+    task_id = repo.save_task("id:1", session, previous, [step(status="in_progress")], title="Stock")["task_id"]
+    assert isinstance(task_id, str)
+    repo.update_run_status("id:1", previous, "failed")
+    run = repo.create_run("id:1", session, "resume", "digest", {"task_id": task_id})
+    repo.update_run_status("id:1", run.id, "running")
+
+    async def get_identity() -> JsonObject:
+        return {"userId": 1}
+
+    def tool_turn(*calls: ToolCall) -> ScriptedTurn:
+        return ScriptedTurn((ResponseCompleted(FinalResponse(AssistantMessage(calls), StopReason.TOOL_CALL)),))
+
+    work_turns = min(limits.max_model_turns, limits.max_tool_calls)
+    work_calls = tuple(ToolCall(f"work-{i}", "search_tools", {"query": "stock"}) for i in range(work_turns))
+    provider = FakeProvider((
+        *(tool_turn(call) for call in work_calls),
+        tool_turn(ToolCall("save", "update_task", {
+            "task_id": task_id, "expected_version": 1, "steps": [step(status="completed")],
+        }), ToolCall("blocked", "search_tools", {"query": "extra"})),
+        ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((TextBlock("Saved and summarized"),)), StopReason.COMPLETED,
+        )),)),
+    ))
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128), limits=limits,
+        ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
+        workorder_store=PreviewStore(),
+    )
+    result = asyncio.run(service.run_session(
+        run_id=run.id, message="继续", history=(), authorization="authorization",
+        event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
+    ))
+    assert result.stop_reason is StopReason.COMPLETED
+    assert [tool.name for tool in provider.requests[work_turns].tools] == ["update_task"]
+    assert provider.requests[work_turns + 1].tools == ()
+    assert repo.get_task("id:1", session, task_id)["current_version"] == 2
+    assert [event.payload["tool_call_id"] for event in result.events
+            if event.type is AgentEventType.TOOL_EXECUTION_START] == [*(call.id for call in work_calls), "save"]

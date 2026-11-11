@@ -81,6 +81,7 @@ from ktg_agent.tools.legacy_catalog import build_legacy_catalog
 from ktg_agent.tools.permissions import PermissionAny, PermissionAll, PermissionLeaf, PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.runner import CallAuthorization
 from ktg_agent.tools.registry import ToolChannel, ToolDefinition, ToolStatus
+from ktg_agent.core.task_budget import TASK_CLOSEOUT_TURNS, TASK_SAVE_LIMIT, TaskBudget
 
 
 type KTGClientFactory = Callable[[str], KTGClient]
@@ -326,6 +327,11 @@ class QueryService:
                 "max_output_tokens": self._model_config.max_output_tokens}
 
     @property
+    def session_budget_snapshot(self) -> JsonObject:
+        return {**self.budget_snapshot, "max_task_save_calls": TASK_SAVE_LIMIT,
+                "max_task_closeout_turns": TASK_CLOSEOUT_TURNS}
+
+    @property
     def summary_budget_snapshot(self) -> JsonObject:
         return {**self.budget_snapshot, "max_model_turns": 1, "max_tool_calls": 1,
                 "max_parallel_reads": 1, "max_output_tokens": self._summary_max_tokens}
@@ -457,7 +463,7 @@ class QueryService:
         page_context: JsonObject | None = None,
         authorization: str, event_sink: EventSink,
         on_agent_ready: Callable[[Agent], Callable[[], None]] | None = None,
-        task_configuration: Callable[[str, JsonObject], tuple[tuple[ToolDefinition, ...], str]] | None = None,
+        task_configuration: Callable[[str, JsonObject], tuple[tuple[ToolDefinition, ...], str, TaskBudget]] | None = None,
     ) -> AgentRunResult:
         """Run an authenticated turn with durable session history."""
         client = self._ktg_client_factory(authorization)
@@ -466,7 +472,9 @@ class QueryService:
                        if isinstance(client, KTGClient) else None)
         candidate = self._catalog.candidate_snapshot(
             CatalogIdentity(permissions, run_id), self._switches_provider())
-        session_tools, task_context = task_configuration(run_id, identity) if task_configuration else ((), "")
+        session_tools, task_context, task_budget = (
+            task_configuration(run_id, identity) if task_configuration else ((), "", None)
+        )
         discovery, registry, runner = self._run_discovery(
             candidate, client, identity, page_context, session_tools)
         loop = AgentLoop(
@@ -478,6 +486,7 @@ class QueryService:
             limits=self._limits,
             context_policy=self._context_policy,
             discovery=discovery,
+            task_budget=task_budget,
         )
         system_prompt = self.build_system_prompt(page_context) + task_context
         agent = Agent(loop)

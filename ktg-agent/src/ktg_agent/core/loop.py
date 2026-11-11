@@ -31,6 +31,7 @@ from ktg_agent.core.messages import (
     project_model_messages,
 )
 from ktg_agent.core.queues import InputQueue, QueuedInput
+from ktg_agent.core.task_budget import TASK_CLOSEOUT_TURNS, TaskBudget
 from ktg_agent.providers.base import (
     CancellationSignal,
     FinalResponse,
@@ -174,6 +175,7 @@ class AgentLoop:
         limits: RunLimits | None = None,
         context_policy: ContextPolicy | None = None,
         discovery: RunToolDiscovery | None = None,
+        task_budget: TaskBudget | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._provider = provider
@@ -182,6 +184,7 @@ class AgentLoop:
         self._model_config = model_config
         self._event_sink = event_sink
         self._limits = limits or RunLimits()
+        self._task_budget = task_budget
         self._context_policy = context_policy
         self._discovery = discovery
         self._clock = clock
@@ -228,6 +231,7 @@ class AgentLoop:
         agent_status = "failed"
         turn = 0
         tool_calls_started = 0
+        task_budget = self._task_budget
         usage_accumulator = _UsageAccumulator()
         try:
             while True:
@@ -245,10 +249,17 @@ class AgentLoop:
                 limit_reason = self._next_model_limit(
                     started_at=started_at,
                     completed_turns=turn,
-                    tool_calls=tool_calls_started,
+                    tool_calls=task_budget.work_calls if task_budget else tool_calls_started,
                     usage=usage_accumulator.snapshot(),
                     now=checked_at,
                 )
+                if task_budget and task_budget.task_id and limit_reason in {"max_model_turns", "max_tool_calls"}:
+                    usage_limit = self._usage_limit(usage_accumulator.snapshot())
+                    if usage_limit is not None:
+                        limit_reason = usage_limit
+                    elif task_budget.closeout_turns < TASK_CLOSEOUT_TURNS:
+                        task_budget.closeout_turns += 1
+                        limit_reason = None
                 if limit_reason == "MODEL_USAGE_UNAVAILABLE":
                     if close_inputs is not None:
                         close_inputs()
@@ -276,6 +287,7 @@ class AgentLoop:
                     cancellation=cancellation,
                     usage_accumulator=usage_accumulator,
                     started_at=started_at,
+                    closeout_turn=task_budget.closeout_turns if task_budget else 0,
                 )
 
                 if response.message is not None:
@@ -329,8 +341,11 @@ class AgentLoop:
                         >= self._limits.max_run_seconds
                     )
                     remaining = self._limits.max_tool_calls - tool_calls_started
-                    runnable_calls = () if time_exhausted else calls[:remaining]
-                    skipped_calls = calls[len(runnable_calls) :]
+                    if time_exhausted or task_budget is None:
+                        runnable_calls = () if time_exhausted else calls[:remaining]
+                        rejected = {call.id: "RUN_LIMIT_REACHED" for call in calls[len(runnable_calls):]}
+                    else:
+                        runnable_calls, rejected = task_budget.admit(calls, self._limits.max_tool_calls)
                     results, batch_started, batch_time_exhausted = (
                         await self._run_tool_batch(
                             publisher=publisher,
@@ -345,7 +360,11 @@ class AgentLoop:
                         )
                     )
                     tool_calls_started += batch_started
-                    for call, result in zip(runnable_calls, results, strict=True):
+                    results_by_id = dict(zip((call.id for call in runnable_calls), results, strict=True))
+                    for call in calls:
+                        rejection = rejected.get(call.id)
+                        result = (self._task_budget_tool_result(rejection) if rejection
+                                  else results_by_id[call.id])
                         await self._append_tool_message(
                             publisher=publisher,
                             history=history,
@@ -354,16 +373,6 @@ class AgentLoop:
                             call=call,
                             result=result,
                         )
-                    for call in skipped_calls:
-                        await self._append_tool_message(
-                            publisher=publisher,
-                            history=history,
-                            run_id=run_id,
-                            turn=turn,
-                            call=call,
-                            result=self._limited_tool_result(),
-                        )
-
                     await publisher.emit(
                         AgentEventType.TURN_END,
                         {
@@ -371,7 +380,8 @@ class AgentLoop:
                             "stop_reason": response.stop_reason.value,
                         },
                     )
-                    if skipped_calls or batch_time_exhausted:
+                    if (time_exhausted or batch_time_exhausted or
+                        ("RUN_LIMIT_REACHED" in rejected.values() and not (task_budget and task_budget.task_id))):
                         if close_inputs is not None:
                             close_inputs()
                         return await self._limited_result(
@@ -396,9 +406,9 @@ class AgentLoop:
                             tool_calls=tool_calls_started,
                             usage_accumulator=usage_accumulator,
                         )
-                    if input_queue is not None and self._next_model_limit(
+                    if input_queue is not None and not (task_budget and task_budget.closeout_turns) and self._next_model_limit(
                         started_at=started_at, completed_turns=turn,
-                        tool_calls=tool_calls_started,
+                        tool_calls=task_budget.work_calls if task_budget else tool_calls_started,
                         usage=usage_accumulator.snapshot(),
                     ) is None:
                         steering = input_queue.take_steering()
@@ -467,13 +477,14 @@ class AgentLoop:
                         turns=turn, tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator, message=response.message,
                     )
-                if input_queue is not None and not input_queue.is_empty and self._next_model_limit(
+                if (input_queue is not None and not (task_budget and task_budget.closeout_turns)
+                    and not input_queue.is_empty and self._next_model_limit(
                     started_at=started_at, completed_turns=turn,
-                    tool_calls=tool_calls_started,
+                    tool_calls=task_budget.work_calls if task_budget else tool_calls_started,
                     usage=usage_accumulator.snapshot(),
-                ) is not None:
+                ) is not None):
                     continue
-                if input_queue is not None:
+                if input_queue is not None and not (task_budget and task_budget.closeout_turns):
                     steering = input_queue.take_steering()
                     if steering:
                         history.extend(item.message for item in steering)
@@ -713,6 +724,17 @@ class AgentLoop:
             error_code="RUN_LIMIT_REACHED",
         )
 
+    def _task_budget_tool_result(self, reason: str) -> ToolResult:
+        if reason == "RUN_LIMIT_REACHED":
+            return self._limited_tool_result()
+        messages = {
+            "TASK_CLOSEOUT": "本轮正在收尾，此工具未启动。请使用已有结果。",
+            "TASK_SAVE_LIMIT": "常规清单保存额度已用完，工具未启动。最后一次保存留给收尾。",
+            "TASK_STEP_LIMIT": "当前步骤可用额度已用完，工具未启动。请保存进度，或转到下一项仍可执行的步骤。",
+        }
+        return ToolResult("Tool call was not executed: " + messages[reason],
+                          status=ToolStatus.FAILED, error_code=reason)
+
     @staticmethod
     def _not_executed_tool_result(reason: str) -> ToolResult:
         return ToolResult(
@@ -922,6 +944,7 @@ class AgentLoop:
         cancellation: CancellationSignal | None,
         usage_accumulator: _UsageAccumulator,
         started_at: float,
+        closeout_turn: int = 0,
     ) -> FinalResponse:
         from ktg_agent.context.tokens import estimate_tools_tokens
         from ktg_agent.context.window import ContextOverflowError, fit_window
@@ -929,16 +952,34 @@ class AgentLoop:
         projected = project_model_messages(history)
         schemas = (self._discovery.begin_request(f"{publisher.run_id}:{turn}").schemas
                    if self._discovery is not None else self._tool_registry.model_schemas())
+        if closeout_turn:
+            schemas = tuple(schema for schema in schemas
+                            if closeout_turn == 1 and schema.name == "update_task")
         if self._discovery is not None:
             # Activation belongs to this run, while conversation history may contain
             # successful loads from earlier runs. State the authoritative snapshot.
             active = "、".join(schema.name for schema in schemas)
-            projected = (*projected, SystemMessage((TextBlock(
+            instruction = (
                 "当前模型请求可调用工具仅为：" + active +
                 "。历史会话中加载过的工具不代表本轮已激活。缺少的工具先load_tools；"
                 "可一次加载当前任务需要的多个工具。只按当前提供的schema传递完整必填参数；"
                 "已经激活的工具不重复加载。详情已取得准确ID时不再额外查询列表。"
-            ),)))
+            )
+            if closeout_turn == 1:
+                instruction = (
+                    "本轮已进入收尾。只调用一次 update_task 保存当前任务的完整清单。"
+                    "只将实际完成的步骤标为完成，保留未完成事项。然后用已有结果回复。"
+                )
+            elif closeout_turn:
+                instruction = "本轮是最后一次答复。请直接汇总已有结果，明确说明仍未完成或未查到的事项。"
+            elif self._task_budget is not None and self._task_budget.task_id is not None:
+                step, quota = self._task_budget.step_quota(self._limits.max_tool_calls)
+                if step is not None:
+                    instruction += (
+                        f" 当前步骤 {step[1]} 还可调用业务工具 {quota} 次。"
+                        "同一步可按需分页。完成后保存状态并推进到下一步，未完成的步骤保留原状。"
+                    )
+            projected = (*projected, SystemMessage((TextBlock(instruction),)))
         if self._context_policy is not None:
             # Projection removes invisible messages and clears result details. Preserve
             # the original spill markers in the projected sequence's coordinates.
