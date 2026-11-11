@@ -33,26 +33,49 @@
         <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
       </div>
 
-      <section v-if="tasks.length || taskError" class="agent-panel__tasks" aria-label="会话任务">
-        <label for="agent-task-select">任务</label>
-        <select id="agent-task-select" :value="taskId" @change="selectTask($event.target.value)">
-          <option v-for="task in tasks" :key="task.task_id" :value="task.task_id">{{ task.title }}</option>
-        </select>
-        <button v-if="taskId" type="button" :disabled="composerBusy || canInput || !!pendingSubmission"
-                @click="continueTask">继续此任务</button>
-        <button v-if="taskError" type="button" @click="refreshTasks()">重试</button>
-        <p v-if="taskError" role="alert">{{ taskError }}</p>
-        <template v-if="taskDetail">
-          <label for="agent-task-version">清单版本</label>
-          <select id="agent-task-version" v-model.number="taskVersion">
-            <option :value="0">当前版本（第 {{ taskDetail.current_version }} 版）</option>
-            <option v-for="version in taskDetail.versions.slice(1)" :key="version.version" :value="version.version">
-              第 {{ version.version }} 版
-            </option>
-          </select>
-          <ol v-if="visibleTaskVersion">
-            <li v-for="step in visibleTaskVersion.steps" :key="step.step_id">
-              <strong>{{ taskStatusText[step.status] }}</strong> {{ step.description }}
+      <section v-if="tasks.length || taskError" class="agent-task-card" aria-labelledby="agent-task-heading">
+        <div class="agent-task-card__header">
+          <h3 id="agent-task-heading">任务清单</h3>
+          <button v-if="taskId" class="agent-task-card__continue" type="button"
+                  :disabled="composerBusy || canInput || !!pendingSubmission" @click="continueTask">
+            <i class="el-icon-video-play" aria-hidden="true" />
+            继续此任务
+          </button>
+        </div>
+        <div v-if="tasks.length" class="agent-task-card__controls">
+          <div class="agent-task-card__field">
+            <label for="agent-task-select">任务</label>
+            <select id="agent-task-select" :value="taskId" @change="selectTask($event.target.value)">
+              <option v-for="task in tasks" :key="task.task_id" :value="task.task_id">{{ task.title }}</option>
+            </select>
+          </div>
+          <div v-if="taskDetail" class="agent-task-card__field">
+            <label for="agent-task-version">清单版本</label>
+            <select id="agent-task-version" v-model.number="taskVersion">
+              <option :value="0">第 {{ taskDetail.current_version }} 版 · 当前</option>
+              <option v-for="version in taskDetail.versions.slice(1)" :key="version.version" :value="version.version">
+                第 {{ version.version }} 版
+              </option>
+            </select>
+          </div>
+        </div>
+        <div v-if="taskError" class="agent-task-card__error">
+          <p role="alert">{{ taskError }}</p>
+          <button type="button" @click="refreshTasks()">重试</button>
+        </div>
+        <template v-if="taskProgress">
+          <div class="agent-task-card__progress">
+            <progress :value="taskProgress.completed" :max="taskProgress.total" aria-label="任务步骤完成进度" />
+            <span>已完成 {{ taskProgress.completed }} / {{ taskProgress.total }} 步</span>
+          </div>
+          <ol class="agent-task-card__steps" role="list">
+            <li v-for="step in visibleTaskVersion.steps" :key="step.step_id"
+                class="agent-task-card__step" :class="'agent-task-card__step--' + step.status">
+              <span class="agent-task-card__marker" aria-hidden="true">
+                <i v-if="step.status === 'completed'" class="el-icon-check" />
+              </span>
+              <span class="agent-task-card__description">{{ step.description }}</span>
+              <span class="agent-task-card__status">{{ taskStatusText[step.status] }}</span>
             </li>
           </ol>
         </template>
@@ -357,6 +380,11 @@ export default {
       if (!this.taskDetail) return null
       return this.taskDetail.versions.find(item =>
         item.version === (this.taskVersion || this.taskDetail.current_version))
+    },
+    taskProgress() {
+      const steps = this.visibleTaskVersion && this.visibleTaskVersion.steps
+      if (!steps || !steps.length) return null
+      return { completed: steps.filter(step => step.status === 'completed').length, total: steps.length }
     },
     panelStyle() {
       if (this.viewport.width <= 600) return {}
@@ -1672,19 +1700,190 @@ export default {
   .agent-panel__resize { display: none; }
   .agent-panel { inset: 0; width: 100%; height: 100%; border: 0; border-radius: 0; }
 }
-.agent-panel__tasks {
-  border-bottom: 1px solid #e5e9f0;
-  padding: 8px 12px;
+.agent-task-card {
+  flex: 0 0 auto;
+  margin: 12px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #dfe4ed;
+  border-radius: 6px;
+  background: #fff;
 }
-.agent-panel__tasks select {
-  max-width: 58%;
-  margin: 0 8px;
+
+.agent-task-card__header,
+.agent-task-card__progress,
+.agent-task-card__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
-.agent-panel__tasks ol {
-  max-height: 120px;
-  margin: 8px 0 0;
-  padding-left: 24px;
+
+.agent-task-card__header h3 {
+  margin: 0;
+  color: #303133;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.agent-task-card button {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid #c6e2ff;
+  border-radius: 4px;
+  background: #ecf5ff;
+  color: #175a9c;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.agent-task-card button:hover:not(:disabled) {
+  border-color: #8cc5ff;
+  background: #d9ecff;
+}
+
+.agent-task-card button:disabled {
+  border-color: #dfe4ed;
+  background: #f5f7fa;
+  color: #606266;
+  cursor: not-allowed;
+}
+
+.agent-task-card__continue i { margin-right: 2px; }
+
+.agent-task-card__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-task-card__field {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.agent-task-card__field label,
+.agent-task-card__progress span {
+  color: #606266;
+  font-size: 12px;
+}
+
+.agent-task-card__field select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 6px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #303133;
+  font: inherit;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.agent-task-card__field select:focus-visible {
+  outline: 2px solid #337ecc;
+  outline-offset: 1px;
+}
+
+.agent-task-card__progress { margin: 10px 0 6px; }
+.agent-task-card__progress span { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.agent-task-card__progress progress {
+  flex: 1;
+  min-width: 0;
+  height: 5px;
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #e8edf5;
+  accent-color: #337ecc;
+}
+.agent-task-card__progress progress::-webkit-progress-bar { background: #e8edf5; }
+.agent-task-card__progress progress::-webkit-progress-value { background: #337ecc; }
+.agent-task-card__progress progress::-moz-progress-bar { background: #337ecc; }
+
+.agent-task-card__steps {
+  max-height: clamp(60px, 22vh, 140px);
+  margin: 0;
+  padding: 0;
   overflow: auto;
+  list-style: none;
 }
+
+.agent-task-card__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 5px 4px;
+  border-radius: 4px;
+  color: #303133;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-task-card__step:not(:last-child)::before {
+  position: absolute;
+  top: 20px;
+  bottom: -7px;
+  left: 11px;
+  width: 2px;
+  background: #dfe4ed;
+  content: '';
+}
+
+.agent-task-card__marker {
+  z-index: 1;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  place-items: center;
+  border: 1px solid #a8abb2;
+  border-radius: 50%;
+  background: #fff;
+  font-size: 10px;
+}
+
+.agent-task-card__description { overflow-wrap: anywhere; }
+.agent-task-card__status {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #f0f2f5;
+  color: #606266;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.agent-task-card__step--completed .agent-task-card__marker {
+  border-color: #218052;
+  background: #218052;
+  color: #fff;
+}
+.agent-task-card__step--completed .agent-task-card__status { background: #eaf6ef; color: #1c6944; }
+.agent-task-card__step--in_progress { background: #f0f7ff; }
+.agent-task-card__step--in_progress .agent-task-card__marker {
+  border: 4px solid #337ecc;
+  background: #fff;
+}
+.agent-task-card__step--in_progress .agent-task-card__status { background: #dcecff; color: #175a9c; }
+
+.agent-task-card__error {
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #fef0f0;
+  color: #a83434;
+  font-size: 12px;
+}
+.agent-task-card__error p { margin: 0; overflow-wrap: anywhere; }
+.agent-task-card__error button { border-color: transparent; background: transparent; color: inherit; }
 </style>
 
