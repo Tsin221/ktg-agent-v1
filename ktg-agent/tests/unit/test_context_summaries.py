@@ -33,7 +33,7 @@ def test_v4_migration_backfills_kind_and_keeps_summary_table_empty(tmp_path: Pat
     SessionRepository(path)
     SessionRepository(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert db.execute("SELECT kind,context_json FROM runs").fetchone() == ("compaction", None)
         assert db.execute("SELECT count(*) FROM context_summaries").fetchone()[0] == 0
         names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}

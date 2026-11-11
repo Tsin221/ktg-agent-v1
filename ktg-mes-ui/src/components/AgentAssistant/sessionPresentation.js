@@ -159,6 +159,7 @@ export function runStatusText(run) {
     max_run_seconds: '本轮运行时间已到',
     max_model_turns: '本轮模型调用次数已达上限',
     max_tool_calls: '本轮工具启动次数已达上限',
+    MODEL_OUTPUT_LIMIT: '模型达到单次输出上限，未能生成答复',
     MODEL_USAGE_UNAVAILABLE: '模型用量暂缺，已停止后续执行',
     USAGE_PERSISTENCE_FAILED: '用量记录失败，已停止后续执行',
     cancelled: '本轮已由用户取消'

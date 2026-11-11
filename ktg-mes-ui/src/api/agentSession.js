@@ -131,11 +131,11 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     save()
   }
 
-  async function createRun({ requestId, message, pageContext }) {
+  async function createRun({ requestId, message, pageContext, taskId }) {
     requireIdentity()
     if (!pointer || !requestId || !message) throw new Error('缺少会话、请求 ID 或消息。')
     const current = generation
-    const result = await api.createRun(pointer.sessionId, { requestId, message, pageContext })
+    const result = await api.createRun(pointer.sessionId, { requestId, message, pageContext, ...(taskId ? { taskId } : {}) })
     if (!checkIdentity() || current !== generation || !pointer) return null
     if (pointer.runId !== result.run_id) {
       pointer.runId = result.run_id

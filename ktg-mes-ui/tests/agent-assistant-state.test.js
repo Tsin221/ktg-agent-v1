@@ -18,6 +18,8 @@ let pointer = null
 let resolveWorkorder
 let resolveInventory
 let inputFailure = null
+let runFailure = null
+let taskVersions = [1]
 let statsReads = 0
 const statsSnapshot = { context: { configured: true, window_tokens: 8192,
   threshold_tokens: 6553, estimated_tokens: 100, estimate_kind: 'estimated',
@@ -31,6 +33,11 @@ const client = {
   setRun: runId => { pointer.runId = runId },
   createRun: async input => {
     sent.push({ ...input, sessionId: pointer.sessionId })
+    if (runFailure) {
+      const failure = runFailure
+      runFailure = null
+      throw failure
+    }
     if (failNextRun) {
       failNextRun = false
       throw new Error('network interrupted')
@@ -60,6 +67,16 @@ const api = {
   listAgentSessions: async () => ({ items: [{ session_id: 'session-1', title: '第一轮' }] }),
   getAgentSession: async () => ({ session_id: 'session-1', active_run_id: null }),
   getAgentSessionStats: async () => { statsReads++; return statsSnapshot },
+  listAgentTasks: async () => ({ items: [
+    { task_id: 'task-a', title: '任务甲' }, { task_id: 'task-b', title: '任务乙' }
+  ] }),
+  getAgentTask: async (_, taskId) => ({
+    task_id: taskId,
+    current_version: taskVersions[0],
+    versions: taskVersions.map(version => ({ version, steps: [
+      { step_id: 'stable', description: '核对结果', status: version === 1 ? 'pending' : 'completed' }
+    ] }))
+  }),
   listAgentMessages: async () => ({ items: [
     { message_id: 1, run_id: 'run-1', role: 'user', content: [{ type: 'text', text: '第一轮' }] },
     { message_id: 2, run_id: 'run-1', role: 'tool', details: { kind: 'stock', rows: [], total: 0 }, content: [] },
@@ -420,6 +437,36 @@ async function main() {
   assert.doesNotThrow(() => options.mounted.call(blockedView))
   options.beforeDestroy.call(blockedView)
   window.localStorage = originalStorage
+  // A bare continuation prompts for a choice, while the explicit action preserves
+  // the selected task ID across request retries and reads persisted versions.
+  view.inputAttempt = null
+  view.activeRun = null
+  view.loading = false
+  view.sessionLoading = false
+  view.pendingSubmission = null
+  await view.refreshTasks()
+  assert.strictEqual(view.taskId, 'task-a')
+  assert.strictEqual(view.taskDetail.current_version, 1)
+  runFailure = { response: { data: { error: { code: 'TASK_SELECTION_REQUIRED' } } } }
+  view.draft = '继续'
+  await view.send()
+  assert.strictEqual(view.pendingSubmission, null)
+  assert.match(view.panelError, /多个未完成任务/)
+  await view.selectTask('task-b')
+  failNextRun = true
+  await view.continueTask()
+  assert.strictEqual(view.pendingSubmission.taskId, 'task-b')
+  await view.retryPendingRun()
+  assert.strictEqual(sent.at(-1).taskId, 'task-b')
+  assert.strictEqual(sent.at(-1).requestId, sent.at(-2).requestId)
+  assert.strictEqual(sent.at(-1).message, '继续')
+  taskVersions = [2, 1]
+  handlers.onEvent({ type: 'tool_execution_end', run_id: view.activeRunId,
+    payload: { tool_name: 'update_task', status: 'succeeded', result: { task_id: 'task-b', version: 2 } } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.taskDetail.current_version, 2)
+  view.taskVersion = 1
+  assert.strictEqual(options.computed.visibleTaskVersion.call(view).steps[0].status, 'pending')
   console.log('agent assistant component state tests passed')
 }
 

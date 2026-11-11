@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import json
 import os
 import select
@@ -36,8 +37,10 @@ from ktg_agent.service import QueryService
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.repository import (ControlConflictError, ControlStateError,
-                                           EventHistoryExpiredError, RunBusyError, RunConflictError)
+                                           EventHistoryExpiredError, RunBusyError, RunConflictError,
+                                           TaskSelectionRequired)
 from ktg_agent.sessions.service import SessionService
+from ktg_agent.sessions.task_tools import task_run_configuration
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,7 @@ class Settings:
     enable_tm_tooltype_write: bool = False
     tm_tool_db_path: str = ""
     enable_tm_tool_write: bool = False
+    max_output_tokens: int = 1024
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -193,6 +197,7 @@ class Settings:
             max_total_tokens=max_total_tokens,
             max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 12) or 12,
             max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 8) or 8,
+            max_output_tokens=positive_integer("AGENT_MAX_OUTPUT_TOKENS", 1024) or 1024,
             context_window=context_window,
             context_reserve_tokens=context_reserve_tokens,
             context_threshold_ratio=context_threshold_ratio,
@@ -216,7 +221,7 @@ def create_session_repository(settings: Settings) -> SessionRepository:
 
 
 def create_service(settings: Settings) -> QueryService:
-    model_config = ModelConfig(model=settings.model_id, max_output_tokens=1024)
+    model_config = ModelConfig(model=settings.model_id, max_output_tokens=settings.max_output_tokens)
     context_policy = None
     if settings.context_window is not None:
         try:
@@ -476,6 +481,7 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
             page_context=page_context, authorization=authorization,
             event_sink=event_sink,
             on_agent_ready=register_agent,
+            task_configuration=partial(task_run_configuration, repository),
         )
 
     async def compact(run_id: str, prepared: PreparedCompaction, event_sink: EventSink,
@@ -629,7 +635,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             elif is_run_create:
                 response = asyncio.run(self.server.session_service.create_run(
                     authorization, run_segments[0], payload.get("request_id"),
-                    payload.get("message"), payload.get("page_context"),
+                    payload.get("message"), payload.get("page_context"), payload.get("task_id"),
                 ))
             elif is_compact:
                 if set(payload) != {"request_id"}:
@@ -741,7 +747,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return
-        except (RunBusyError, RunConflictError, ControlConflictError, ControlStateError) as exc:
+        except (RunBusyError, RunConflictError, ControlConflictError, ControlStateError, TaskSelectionRequired) as exc:
             self._write_error(HTTPStatus.CONFLICT, exc.code, str(exc))
             return
         except KeyError:
@@ -928,6 +934,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             elif len(segments) == 2 and segments[0] and segments[1] == "messages":
                 response = asyncio.run(self.server.session_service.messages(
                     authorization, segments[0], cursor=cursor, limit=limit))
+            elif len(segments) in (2, 3) and segments[0] and segments[1] == "tasks":
+                if params:
+                    raise ValueError("tasks 不接受查询参数。")
+                response = asyncio.run(self.server.session_service.tasks(
+                    authorization, segments[0], segments[2] if len(segments) == 3 else None))
             elif len(segments) == 2 and segments[0] and segments[1] == "stats":
                 if params:
                     raise ValueError("stats 不接受查询参数。")

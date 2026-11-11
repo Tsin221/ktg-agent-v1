@@ -143,6 +143,8 @@ def test_v1_database_migrates_replay_boundary(tmp_path: Path) -> None:
     path = tmp_path / "v1.sqlite3"
     SessionRepository(path)
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE task_versions")
+        db.execute("DROP TABLE tasks")
         db.execute("DROP TABLE model_requests")
         db.execute("DROP TABLE control_commands")
         db.execute("DROP TABLE context_summaries")
@@ -154,6 +156,6 @@ def test_v1_database_migrates_replay_boundary(tmp_path: Path) -> None:
         db.execute("PRAGMA user_version=1")
     SessionRepository(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert any(row[1] == "replay_floor_seq" for row in db.execute("PRAGMA table_info(runs)"))
         assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None

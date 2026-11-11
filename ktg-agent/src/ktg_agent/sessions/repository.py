@@ -18,7 +18,7 @@ from typing import Generic, TypeVar, cast
 from uuid import uuid4
 
 from ktg_agent.core.messages import (
-    JsonObject, Message, _json_object, _required_text, message_from_dict,
+    JsonObject, JsonValue, Message, _json_object, _required_text, message_from_dict,
     message_to_dict,
 )
 from ktg_agent.context.window import group_messages
@@ -29,7 +29,7 @@ TERMINAL = frozenset({
     "completed", "needs_input", "failed", "cancelled", "needs_reconciliation",
 })
 EVENT_RETENTION_DAYS = 30
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SUMMARY_ACTIVE = "active"
 SUMMARY_SUPERSEDED = "superseded"
 STATUSES = ACTIVE | TERMINAL
@@ -130,6 +130,16 @@ class ControlRecord:
     reason: str | None
     created_at: str
     updated_at: str
+
+
+class TaskVersionConflict(ValueError):
+    def __init__(self, latest: JsonObject) -> None:
+        super().__init__("任务清单已更新。")
+        self.latest = latest
+
+
+class TaskSelectionRequired(ValueError):
+    code = "TASK_SELECTION_REQUIRED"
 
 
 class RunConflictError(ValueError):
@@ -305,6 +315,31 @@ class SessionRepository:
                     PRAGMA user_version=5;
                     COMMIT;
                 """)
+                version = 5
+            if version == 5:
+                db.executescript("""BEGIN IMMEDIATE;
+                    CREATE TABLE tasks (
+                        task_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL REFERENCES sessions(id),
+                        title TEXT NOT NULL,
+                        current_version INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(task_id, current_version)
+                            REFERENCES task_versions(task_id, version) DEFERRABLE INITIALLY DEFERRED
+                    );
+                    CREATE INDEX tasks_by_session ON tasks(session_id, updated_at DESC, task_id);
+                    CREATE TABLE task_versions (
+                        task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                        version INTEGER NOT NULL,
+                        steps_json TEXT NOT NULL,
+                        run_id TEXT NOT NULL REFERENCES runs(id),
+                        saved_at TEXT NOT NULL,
+                        PRIMARY KEY(task_id, version)
+                    );
+                    PRAGMA user_version=6;
+                    COMMIT;
+                """)
                 return
             tables = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -364,6 +399,172 @@ class SessionRepository:
                 COMMIT;
             """)
         self._migrate()
+
+    @staticmethod
+    def _task(db: sqlite3.Connection, owner: str, session_id: str, task_id: str) -> sqlite3.Row:
+        row: sqlite3.Row | None = db.execute(
+            "SELECT t.* FROM tasks t JOIN sessions s ON s.id=t.session_id "
+            "WHERE t.task_id=? AND t.session_id=? AND s.owner_user_id=?",
+            (task_id, session_id, owner),
+        ).fetchone()
+        if row is None:
+            raise KeyError("task not found")
+        return row
+
+    @staticmethod
+    def _task_version(row: sqlite3.Row) -> JsonObject:
+        return {
+            "task_id": row["task_id"], "version": row["version"],
+            "steps": json.loads(row["steps_json"]), "run_id": row["run_id"],
+            "saved_at": row["saved_at"],
+        }
+
+    def list_tasks(self, owner: str, session_id: str) -> list[JsonValue]:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            if db.execute("SELECT 1 FROM sessions WHERE id=? AND owner_user_id=?",
+                          (session_id, owner)).fetchone() is None:
+                raise KeyError("session not found")
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM tasks WHERE session_id=? ORDER BY updated_at DESC,task_id",
+                (session_id,),
+            )]
+
+    def get_task(self, owner: str, session_id: str, task_id: str, *,
+                 history: bool = False) -> JsonObject:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            task = self._task(db, owner, session_id, task_id)
+            versions = db.execute(
+                "SELECT * FROM task_versions WHERE task_id=? AND (version=? OR ?) "
+                "ORDER BY version DESC", (task_id, task["current_version"], history),
+            )
+            return {**dict(task), "versions": [self._task_version(row) for row in versions]}
+
+    def unfinished_tasks(self, owner: str, session_id: str) -> list[str]:
+        with self._connect() as db:
+            return [row["task_id"] for row in db.execute(
+                "SELECT t.task_id FROM tasks t JOIN sessions s ON s.id=t.session_id "
+                "JOIN task_versions v ON v.task_id=t.task_id AND v.version=t.current_version "
+                "WHERE s.id=? AND s.owner_user_id=? AND EXISTS ("
+                "SELECT 1 FROM json_each(v.steps_json) WHERE json_extract(value,'$.status')!='completed') "
+                "LIMIT 2", (session_id, owner),
+            )]
+
+    def task_resume_runs(self, owner: str, session_id: str, task_id: str,
+                         before_run_id: str) -> tuple[RunRecord | None, tuple[RunRecord, ...]]:
+        with self._connect() as db:
+            self._task(db, owner, session_id, task_id)
+            boundary = db.execute(
+                "SELECT position FROM runs WHERE id=? AND session_id=? AND owner_user_id=?",
+                (before_run_id, session_id, owner),
+            ).fetchone()
+            if boundary is None:
+                raise KeyError("run not found")
+            before_position = boundary["position"]
+            rows = db.execute(
+                """SELECT r.* FROM runs r
+                   WHERE r.owner_user_id=? AND r.session_id=? AND r.position<?
+                   AND r.kind='user' AND r.status NOT IN ('queued','running','cancelling')
+                   AND (json_extract(r.request_summary_json, '$.task_id')=? OR (
+                       json_extract(r.request_summary_json, '$.task_id') IS NULL
+                       AND EXISTS (SELECT 1 FROM task_versions v WHERE v.run_id=r.id AND v.task_id=?)
+                       AND NOT EXISTS (SELECT 1 FROM task_versions v WHERE v.run_id=r.id AND v.task_id!=?)
+                   ))
+                   ORDER BY r.position DESC LIMIT 8""",
+                (owner, session_id, before_position, task_id, task_id, task_id),
+            ).fetchall()
+            origin = db.execute(
+                """SELECT r.* FROM task_versions v JOIN runs r ON r.id=v.run_id
+                   WHERE v.task_id=? AND v.version=1 AND r.owner_user_id=? AND r.session_id=?
+                   AND r.position<?""",
+                (task_id, owner, session_id, before_position),
+            ).fetchone()
+            return (_run(origin) if origin else None, tuple(_run(row) for row in rows))
+
+    def task_resume_messages(self, owner: str, run_id: str) -> tuple[Message, ...]:
+        with self._connect() as db:
+            messages = tuple(_message(row).message for row in db.execute(
+                """SELECT m.* FROM messages m JOIN runs r ON r.id=m.run_id
+                   WHERE r.owner_user_id=? AND r.id=? AND m.role IN ('assistant','tool')
+                   ORDER BY m.id""", (owner, run_id),
+            ))
+            if messages:
+                return messages
+            # A provider exception can settle a run before its transcript is saved.
+            recovered: list[Message] = []
+            for row in db.execute(
+                """SELECT e.payload_json FROM events e JOIN runs r ON r.id=e.run_id
+                   WHERE r.owner_user_id=? AND r.id=? AND e.type='message_end'
+                   ORDER BY e.seq""", (owner, run_id),
+            ):
+                message = _read_json(row["payload_json"]).get("message")
+                if isinstance(message, dict) and message.get("role") in ("assistant", "tool"):
+                    recovered.append(message_from_dict(message))
+            return tuple(recovered)
+
+    def task_resume_tool_events(self, owner: str, run_id: str) -> tuple[EventRecord, ...]:
+        with self._connect() as db:
+            return tuple(_event(row) for row in db.execute(
+                """SELECT e.* FROM events e JOIN runs r ON r.id=e.run_id
+                   WHERE r.owner_user_id=? AND r.id=?
+                   AND e.type IN ('tool_execution_start','tool_execution_end')
+                   ORDER BY e.seq""", (owner, run_id),
+            ))
+
+    def save_task(self, owner: str, session_id: str, run_id: str, steps: object, *,
+                  task_id: str | None = None, expected_version: int | None = None,
+                  title: str | None = None) -> JsonObject:
+        if not isinstance(steps, list):
+            raise ValueError("steps 必须为数组。")
+        cleaned: list[JsonValue] = []
+        seen: set[str] = set()
+        for step in steps:
+            if not isinstance(step, dict) or set(step) != {"step_id", "description", "status"}:
+                raise ValueError("步骤必须包含 step_id、description 和 status。")
+            step_id = _safe_text(_required_text(step["step_id"], "step_id").strip(), "step_id")
+            description = _safe_text(_required_text(step["description"], "description").strip(), "description")
+            status = step["status"]
+            if step_id in seen or status not in ("pending", "in_progress", "completed"):
+                raise ValueError("步骤 ID 重复或状态无效。")
+            seen.add(step_id)
+            cleaned.append({"step_id": step_id, "description": description, "status": status})
+        steps_json = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT request_summary_json FROM runs WHERE id=? AND session_id=? "
+                "AND owner_user_id=? AND kind='user' AND status='running'",
+                (run_id, session_id, owner),
+            ).fetchone()
+            if run is None:
+                raise KeyError("active run not found")
+            selected = _read_json(run["request_summary_json"]).get("task_id")
+            if selected is not None and selected != task_id:
+                raise ValueError("本轮只能更新所选任务。")
+            now = _now()
+            if task_id is None:
+                task_id, version = str(uuid4()), 1
+                clean_title = _safe_text(_required_text(title, "title").strip(), "title")
+                db.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?)",
+                           (task_id, session_id, clean_title, version, now, now))
+            else:
+                task = self._task(db, owner, session_id, task_id)
+                if type(expected_version) is not int or expected_version < 1:
+                    raise ValueError("expected_version 必须为正整数。")
+                if task["current_version"] != expected_version:
+                    latest = db.execute(
+                        "SELECT * FROM task_versions WHERE task_id=? AND version=?",
+                        (task_id, task["current_version"]),
+                    ).fetchone()
+                    raise TaskVersionConflict(self._task_version(latest))
+                version = expected_version + 1
+            db.execute("INSERT INTO task_versions VALUES(?,?,?,?,?)",
+                       (task_id, version, steps_json, run_id, now))
+            db.execute("UPDATE tasks SET current_version=?,updated_at=? WHERE task_id=?",
+                       (version, now, task_id))
+            return {"task_id": task_id, "version": version, "steps": cleaned,
+                    "run_id": run_id, "saved_at": now}
 
     def create_session(self, owner_user_id: str, *, title: str | None = None) -> SessionRecord:
         owner_user_id = _required_text(owner_user_id, "owner user id")

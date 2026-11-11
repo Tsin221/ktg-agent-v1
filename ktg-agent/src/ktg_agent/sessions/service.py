@@ -18,9 +18,10 @@ from ktg_agent.ktg import KTGClient, KTGError
 from ktg_agent.providers.base import ToolSchema
 from ktg_agent.sessions.coordinator import RunCoordinator
 from ktg_agent.sessions.repository import (
-    EVENT_RETENTION_DAYS, Page, RunConflictError, SessionRecord, SessionRepository,
+    EVENT_RETENTION_DAYS, Page, RunConflictError, SessionRecord, SessionRepository, TaskSelectionRequired,
 )
 from ktg_agent.tools.discovery import MODULES
+from ktg_agent.sessions.task_tools import owner_from_identity
 
 _PRIVATE_FIELD = re.compile(
     r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -64,10 +65,7 @@ class SessionService:
 
     async def _owner(self, authorization: str) -> str:
         identity = await self._client_factory(authorization).get_current_user()
-        user_id = identity.get("userId")
-        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
-            raise KTGError("AUTH_INVALID", "KTG 未返回有效用户身份。", status=401)
-        return f"id:{user_id}"
+        return owner_from_identity(identity)
 
     @staticmethod
     def _session(record: SessionRecord) -> JsonObject:
@@ -142,9 +140,16 @@ class SessionService:
                             "created_at": item.created_at, **message_to_dict(item.message)}
                            for item in page.items], "next_cursor": page.next_cursor}
 
+    async def tasks(self, authorization: str, session_id: str,
+                    task_id: str | None = None) -> JsonObject:
+        owner = await self._owner(authorization)
+        if task_id is None:
+            return {"items": self._repository.list_tasks(owner, session_id)}
+        return self._repository.get_task(owner, session_id, task_id, history=True)
+
     async def create_run(self, authorization: str, session_id: str,
                          request_id: object, message: object,
-                         page_context: object = None) -> JsonObject:
+                         page_context: object = None, task_id: object = None) -> JsonObject:
         if self._coordinator is None:
             raise RuntimeError("run coordinator is not configured")
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
@@ -154,6 +159,10 @@ class SessionService:
         clean_context = self._page_context(page_context)
         clean_message = message.strip()
         canonical: JsonObject = {"message": clean_message, "page_context": clean_context}
+        if task_id is not None:
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise ValueError("task_id 必须是非空文本。")
+            canonical["task_id"] = task_id
         encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False)
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -168,6 +177,16 @@ class SessionService:
             if existing.request_hash != digest:
                 raise RunConflictError("request_id 已用于不同请求。")
             return {"run_id": existing.id, "status": existing.status}
+        if isinstance(task_id, str):
+            self._repository.get_task(owner, session_id, task_id)
+        elif re.split(r"[，,。.!！?？：:\n]", clean_message, maxsplit=1)[0].strip().lower() in {
+            "继续", "继续任务", "继续此任务", "continue",
+        }:
+            unfinished = self._repository.unfinished_tasks(owner, session_id)
+            if len(unfinished) > 1:
+                raise TaskSelectionRequired("请在任务列表中选择要继续的任务。")
+            if unfinished:
+                canonical["task_id"] = unfinished[0]
         history = self._repository.completed_history(owner, session_id)
         self._coordinator.compact_before_run(
             owner, session_id, history, clean_context, authorization,

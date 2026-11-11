@@ -126,7 +126,10 @@ class ToolRunner:
         ):
             return self._error("Confirmation is invalid.", "CONFIRMATION_INVALID", context)
 
-        if self._catalog is not None and self._authorization_provider is not None:
+        if tool.effect is ToolEffect.SESSION_WRITE:
+            if context.channel is not ToolChannel.MODEL or context.identity is None:
+                return self._error("Tool is not available.", "TOOL_NOT_FOUND", context)
+        elif self._catalog is not None and self._authorization_provider is not None:
             if context.identity is None:
                 return self._error("Permission service is unavailable.", "PERMISSION_UNAVAILABLE", context)
             try:

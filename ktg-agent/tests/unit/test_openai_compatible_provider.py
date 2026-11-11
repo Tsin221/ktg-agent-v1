@@ -83,6 +83,24 @@ def test_interleaved_tool_arguments_are_only_released_after_done() -> None:
     asyncio.run(scenario())
 
 
+def test_reasoning_only_response_at_length_limit_reports_output_limit() -> None:
+    async def scenario() -> None:
+        provider = provider_for([
+            frame(choice({"reasoning_content": "internal"})),
+            frame(choice({}, "length")),
+            frame({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 32}}),
+            b"data: [DONE]\n\n",
+        ])
+        events = []
+        with pytest.raises(ProviderError) as error:
+            async for event in provider.stream(request()):
+                events.append(event)
+        assert error.value.code == "MODEL_OUTPUT_LIMIT"
+        assert events == [RequestStarted(), UsageReported(Usage(5, 32))]
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("chunks", [
     [frame(choice({"tool_calls": [{"index": 0, "id": "id", "function": {"name": "x", "arguments": "{\"a\":"}}]})), frame(choice({}, "tool_calls"))],
     [frame(choice({"tool_calls": [{"index": 0, "function": {"name": "x", "arguments": "{}"}}]})), frame(choice({}, "tool_calls")), b"data: [DONE]\n\n"],

@@ -293,6 +293,8 @@ def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: 
     session = repo.create_session("alice")
     run = repo.create_run("alice", session.id, "run", "hash", {})
     with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE task_versions")
+        db.execute("DROP TABLE tasks")
         db.execute("DROP TABLE model_requests")
         db.execute("DROP TABLE control_commands")
         db.execute("DROP TABLE context_summaries")
@@ -307,7 +309,7 @@ def test_v2_database_adds_control_table_without_changing_existing_run(tmp_path: 
     assert restored.usage == {"source": "legacy_unknown", "complete": False}
     assert restored.budget is None
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert db.execute("SELECT name FROM sqlite_master WHERE name='control_commands'").fetchone() is not None
 
 

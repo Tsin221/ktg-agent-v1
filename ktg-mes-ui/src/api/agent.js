@@ -33,9 +33,17 @@ export const listAgentMessages = (sessionId, params) => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/messages', method: 'get', params
 })
 
-export const createAgentRun = (sessionId, { requestId, message, pageContext }) => request({
+export const listAgentTasks = sessionId => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/tasks', method: 'get'
+})
+
+export const getAgentTask = (sessionId, taskId) => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/tasks/' + id(taskId), method: 'get'
+})
+
+export const createAgentRun = (sessionId, { requestId, message, pageContext, taskId }) => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/runs', method: 'post',
-  data: { request_id: requestId, message, page_context: pageContext || null },
+  data: { request_id: requestId, message, page_context: pageContext || null, ...(taskId ? { task_id: taskId } : {}) },
   headers: { repeatSubmit: false }
 })
 

@@ -91,6 +91,7 @@ class RunToolDiscovery:
         registry: ToolRegistry, current_access: CurrentAccess, *,
         max_active_tools: int = 8, max_schema_tokens: int = 6000,
         page_module: str | None = None,
+        session_tools: tuple[ToolDefinition, ...] = (),
     ) -> None:
         if max_active_tools <= 0 or max_schema_tokens <= 0:
             raise ValueError("activation budgets must be positive")
@@ -103,11 +104,12 @@ class RunToolDiscovery:
         self.page_module = page_module
         self._active: set[str] = set()
         self._snapshots: dict[str, ActiveToolSet] = {}
-        for definition in directory_definitions():
+        self._session_names = tuple(tool.name for tool in session_tools)
+        for definition in (*directory_definitions(), *session_tools):
             registry.register(definition)
 
     def begin_request(self, request_id: str) -> ActiveToolSet:
-        names = frozenset(("search_tools", "load_tools", *self._active))
+        names = frozenset(("search_tools", "load_tools", *self._session_names, *self._active))
         schemas = tuple(self.registry.get(name).model_schema() for name in sorted(names))
         snapshot = ActiveToolSet(request_id, names, schemas)
         self._snapshots[request_id] = snapshot

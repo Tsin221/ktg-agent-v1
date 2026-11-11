@@ -33,6 +33,31 @@
         <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
       </div>
 
+      <section v-if="tasks.length || taskError" class="agent-panel__tasks" aria-label="会话任务">
+        <label for="agent-task-select">任务</label>
+        <select id="agent-task-select" :value="taskId" @change="selectTask($event.target.value)">
+          <option v-for="task in tasks" :key="task.task_id" :value="task.task_id">{{ task.title }}</option>
+        </select>
+        <button v-if="taskId" type="button" :disabled="composerBusy || canInput || !!pendingSubmission"
+                @click="continueTask">继续此任务</button>
+        <button v-if="taskError" type="button" @click="refreshTasks()">重试</button>
+        <p v-if="taskError" role="alert">{{ taskError }}</p>
+        <template v-if="taskDetail">
+          <label for="agent-task-version">清单版本</label>
+          <select id="agent-task-version" v-model.number="taskVersion">
+            <option :value="0">当前版本（第 {{ taskDetail.current_version }} 版）</option>
+            <option v-for="version in taskDetail.versions.slice(1)" :key="version.version" :value="version.version">
+              第 {{ version.version }} 版
+            </option>
+          </select>
+          <ol v-if="visibleTaskVersion">
+            <li v-for="step in visibleTaskVersion.steps" :key="step.step_id">
+              <strong>{{ taskStatusText[step.status] }}</strong> {{ step.description }}
+            </li>
+          </ol>
+        </template>
+      </section>
+
       <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
         <label for="agent-session-title">{{ titleMode === 'create' ? '新会话名称（可留空）' : '会话名称' }}</label>
         <input id="agent-session-title" ref="titleInput" v-model="titleDraft" :disabled="titleSaving" placeholder="最多200个字符" @keydown.esc.prevent="cancelTitle">
@@ -219,7 +244,7 @@
 
 <script>
 import { agentSession, createAgentSession, renameAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
-  getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
+  listAgentTasks, getAgentTask, getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
   confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
   confirmTmToolType, confirmTmTool } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
@@ -279,6 +304,14 @@ export default {
       draft: '',
       sessions: [],
       sessionId: '',
+      tasks: [],
+      taskId: '',
+      taskDetail: null,
+      taskVersion: 0,
+      taskError: '',
+      taskRefresh: 0,
+      taskDetailRefresh: 0,
+      taskStatusText: { pending: '待开始', in_progress: '进行中', completed: '已完成' },
       activeRunId: '',
       activeRun: null,
       sessionStats: null,
@@ -320,6 +353,11 @@ export default {
     }
   },
   computed: {
+    visibleTaskVersion() {
+      if (!this.taskDetail) return null
+      return this.taskDetail.versions.find(item =>
+        item.version === (this.taskVersion || this.taskDetail.current_version))
+    },
     panelStyle() {
       if (this.viewport.width <= 600) return {}
       const size = clampPanelSize(this.panelSize, this.viewport)
@@ -520,6 +558,7 @@ export default {
       agentSession.close()
       this.sessions = []
       this.sessionId = ''
+      this.resetTasks()
       this.activeRunId = ''
       this.activeRun = null
       this.pendingQuestion = ''
@@ -574,6 +613,7 @@ export default {
       }
     },
     async loadSession(sessionId, epoch = ++this.epoch) {
+      if (sessionId !== this.sessionId) this.resetTasks()
       this.cancelTitle()
       this.expandedOptions = {}
       agentSession.close()
@@ -600,6 +640,7 @@ export default {
         else this.sessions = this.sessions.map(item => item.session_id === sessionId ? { ...item, ...session } : item)
         if (!agentSession.getState() || agentSession.getState().sessionId !== sessionId) agentSession.setSession(sessionId)
         this.sessionId = sessionId
+        this.refreshTasks(epoch)
         this.restoreLocalState()
         await this.refreshStats(epoch)
         const items = await allMessages(sessionId)
@@ -638,6 +679,55 @@ export default {
       } catch (error) {
         if (epoch === this.epoch && sessionId === this.sessionId) this.sessionStats = null
       }
+    },
+    resetTasks() {
+      this.tasks = []
+      this.taskId = ''
+      this.taskDetail = null
+      this.taskVersion = 0
+      this.taskError = ''
+    },
+    async refreshTasks(epoch = this.epoch) {
+      const sessionId = this.sessionId
+      if (!sessionId) return
+      const refresh = ++this.taskRefresh
+      try {
+        const { items } = await listAgentTasks(sessionId)
+        if (epoch !== this.epoch || refresh !== this.taskRefresh) return
+        this.tasks = items
+        this.taskError = ''
+        const task = items.find(item => item.task_id === this.taskId) || items[0]
+        if (task) await this.selectTask(task.task_id)
+        else this.resetTasks()
+      } catch (error) {
+        if (epoch === this.epoch && refresh === this.taskRefresh) {
+          this.taskError = this.errorText(error, '任务列表读取失败。')
+        }
+      }
+    },
+    async selectTask(taskId) {
+      const epoch = this.epoch
+      const refresh = ++this.taskDetailRefresh
+      if (this.taskId !== taskId) {
+        this.taskDetail = null
+        this.taskVersion = 0
+      }
+      this.taskId = taskId
+      try {
+        const detail = await getAgentTask(this.sessionId, taskId)
+        if (epoch !== this.epoch || refresh !== this.taskDetailRefresh) return
+        this.taskDetail = detail
+        this.taskError = ''
+      } catch (error) {
+        if (epoch === this.epoch && refresh === this.taskDetailRefresh) {
+          this.taskError = this.errorText(error, '任务清单读取失败。')
+        }
+      }
+    },
+    continueTask() {
+      if (!this.taskId || this.canInput || this.composerBusy || this.pendingSubmission) return
+      if (!this.draft.trim()) this.draft = '继续此任务'
+      return this.send(this.taskId)
     },
     selectSession(sessionId) {
       if (sessionId && sessionId !== this.sessionId) this.loadSession(sessionId)
@@ -682,6 +772,12 @@ export default {
             if (event.type === 'agent_start' && this.activeRun.status === 'queued') {
               this.activeRun = { ...this.activeRun, status: 'running' }
             }
+            if (event.type === 'tool_execution_end' && event.payload.status === 'succeeded' &&
+                ['create_task', 'update_task'].includes(event.payload.tool_name)) {
+              const taskId = event.payload.result && event.payload.result.task_id
+              if (event.payload.tool_name === 'create_task' && taskId) this.selectTask(taskId)
+              this.refreshTasks(epoch)
+            }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
             if (['model_request_started', 'model_usage_reported', 'model_request_settled'].includes(event.type)) {
               const runId = this.activeRunId
@@ -702,6 +798,7 @@ export default {
             this.runInputs = snapshot.inputs
             this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
             if (isTerminalRun(snapshot.run.status)) {
+              this.refreshTasks(epoch)
               this.pendingQuestion = ''
               if (snapshot.run.status === 'completed' || snapshot.run.status === 'needs_input') {
                 this.progress = { messages: [], tools: {}}
@@ -888,7 +985,7 @@ export default {
       this.saveLocalState()
       this.send()
     },
-    async send() {
+    async send(taskId) {
       const text = this.draft.trim()
       if (this.pendingSubmission) return this.retryPendingRun()
       if (this.canInput) return this.sendInput()
@@ -926,7 +1023,8 @@ export default {
         const submission = this.pendingSubmission && this.pendingSubmission.message === text &&
           this.pendingSubmission.sessionId === this.sessionId
           ? this.pendingSubmission
-          : { sessionId: this.sessionId, requestId: requestId(), message: text, pageContext: pageContext(this.$route) }
+          : { sessionId: this.sessionId, requestId: requestId(), message: text, pageContext: pageContext(this.$route),
+            ...(typeof taskId === 'string' ? { taskId } : {}) }
         this.pendingSubmission = submission
         this.saveLocalState()
         const run = await agentSession.createRun(submission)
@@ -942,6 +1040,12 @@ export default {
           this.draft = text
           this.pendingQuestion = ''
           const code = error && error.response && error.response.data && error.response.data.error && error.response.data.error.code
+          if (code === 'TASK_SELECTION_REQUIRED') {
+            this.pendingSubmission = null
+            this.saveLocalState()
+            this.panelError = '此会话有多个未完成任务。请在任务列表中选择任务，然后点击「继续此任务」。'
+            this.refreshTasks(epoch)
+          }
           if (code === 'RUN_BUSY') {
             this.pendingSubmission = null
             this.saveLocalState()
@@ -1567,6 +1671,20 @@ export default {
   .agent-launcher { right: 16px; bottom: 16px; }
   .agent-panel__resize { display: none; }
   .agent-panel { inset: 0; width: 100%; height: 100%; border: 0; border-radius: 0; }
+}
+.agent-panel__tasks {
+  border-bottom: 1px solid #e5e9f0;
+  padding: 8px 12px;
+}
+.agent-panel__tasks select {
+  max-width: 58%;
+  margin: 0 8px;
+}
+.agent-panel__tasks ol {
+  max-height: 120px;
+  margin: 8px 0 0;
+  padding-left: 24px;
+  overflow: auto;
 }
 </style>
 

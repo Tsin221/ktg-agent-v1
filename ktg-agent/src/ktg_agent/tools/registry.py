@@ -29,6 +29,7 @@ class DuplicateToolError(ToolDefinitionError):
 class ToolEffect(StrEnum):
     READ = "read"
     WRITE = "write"
+    SESSION_WRITE = "session_write"
 
 
 class ExecutionMode(StrEnum):

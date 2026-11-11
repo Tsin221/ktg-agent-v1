@@ -237,6 +237,8 @@ class OpenAICompatibleProvider:
         elif calls and finish_reason != "length":
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned tool deltas without tool_calls finish reason.")
         if not blocks:
+            if finish_reason == "length":
+                raise ProviderError("MODEL_OUTPUT_LIMIT", "模型达到单次输出上限，未生成可显示的答复。")
             raise ProviderError("MODEL_INVALID_RESPONSE", "Model returned no content.")
         reason = {"stop": StopReason.COMPLETED, "tool_calls": StopReason.TOOL_CALL, "length": StopReason.LENGTH}[finish_reason]
         yield ResponseCompleted(FinalResponse(AssistantMessage(tuple(blocks)), reason, usage))

@@ -80,7 +80,7 @@ from ktg_agent.tools.discovery import RunToolDiscovery, directory_definitions
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
 from ktg_agent.tools.permissions import PermissionAny, PermissionAll, PermissionLeaf, PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.runner import CallAuthorization
-from ktg_agent.tools.registry import ToolChannel, ToolStatus
+from ktg_agent.tools.registry import ToolChannel, ToolDefinition, ToolStatus
 
 
 type KTGClientFactory = Callable[[str], KTGClient]
@@ -281,6 +281,7 @@ class QueryService:
     def _run_discovery(
         self, candidate: CandidateSnapshot, client: KTGClient, identity: object,
         page_context: JsonObject | None = None,
+        session_tools: tuple[ToolDefinition, ...] = (),
     ) -> tuple[RunToolDiscovery, ToolRegistry, ToolRunner]:
         registry = ToolRegistry()
 
@@ -293,6 +294,7 @@ class QueryService:
             max_active_tools=self._max_active_tools,
             max_schema_tokens=self._max_schema_tokens,
             page_module=page_module if isinstance(page_module, str) else None,
+            session_tools=session_tools,
         )
         return discovery, registry, self._tool_runner(candidate, discovery, registry)
 
@@ -455,6 +457,7 @@ class QueryService:
         page_context: JsonObject | None = None,
         authorization: str, event_sink: EventSink,
         on_agent_ready: Callable[[Agent], Callable[[], None]] | None = None,
+        task_configuration: Callable[[str, JsonObject], tuple[tuple[ToolDefinition, ...], str]] | None = None,
     ) -> AgentRunResult:
         """Run an authenticated turn with durable session history."""
         client = self._ktg_client_factory(authorization)
@@ -463,7 +466,9 @@ class QueryService:
                        if isinstance(client, KTGClient) else None)
         candidate = self._catalog.candidate_snapshot(
             CatalogIdentity(permissions, run_id), self._switches_provider())
-        discovery, registry, runner = self._run_discovery(candidate, client, identity, page_context)
+        session_tools, task_context = task_configuration(run_id, identity) if task_configuration else ((), "")
+        discovery, registry, runner = self._run_discovery(
+            candidate, client, identity, page_context, session_tools)
         loop = AgentLoop(
             provider=self._provider,
             tool_registry=registry,
@@ -474,7 +479,7 @@ class QueryService:
             context_policy=self._context_policy,
             discovery=discovery,
         )
-        system_prompt = self.build_system_prompt(page_context)
+        system_prompt = self.build_system_prompt(page_context) + task_context
         agent = Agent(loop)
         on_inputs_closed = on_agent_ready(agent) if on_agent_ready is not None else None
         return await agent.prompt(
