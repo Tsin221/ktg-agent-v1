@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from ktg_agent.core.events import AgentEvent
 from ktg_agent.core.messages import AssistantMessage, JsonObject, JsonValue, Message, ToolCall, ToolResultMessage
@@ -24,7 +24,12 @@ TASK_PROMPT = """
 """
 
 TASK_EVIDENCE_PROMPT = """
-证据中的 null 是缺失值，数量 0 是已查到的零库存。空页、缺少记录、partial 或 unknown 均不能推断为零。
+库存证据的 rows 按 columns 顺序给出每条记录，shared 为各行共有的字段，省略的空列按 null 理解。
+库存汇总时，先用 filters 匹配物料和仓库范围。page_verified 为 true 的页可直接复用；covered_rows 是已查记录的起止序号（含两端）。
+同一筛选条件下沿用已查页的 page_size，只补查 1 至 page_count 内缺失或无法核实的页，尤其是续办时。不要改页大小重查已覆盖范围。
+同一页只计一次；不同筛选条件、总数或页大小的记录不能直接拼接。发现记录重叠或分页数据不一致时，先核对再汇总。
+全部所需页核实后才给完整汇总，否则说明已查范围和缺页。按仓库及单位加总 quantityOnhand，保留数量为 0 的记录。
+证据中的 null 是缺失值。no_records 表示该筛选条件下无库存记录；空页或未查全不能推断为零。
 awaiting_confirmation 表示仍待网页确认，outcome_unknown 或 confirmation_status_unknown 表示需查询回执或业务状态。
 not_started 表示调用未启动。
 旧记录的步骤归属可能未知。仅在业务编号和用户当前要求匹配时复用，必要时按权限补查。
@@ -53,13 +58,63 @@ def owner_from_identity(identity: JsonObject) -> str:
 
 
 _EVIDENCE_TOOLS = {"ktg_pro_workorder_get", "ktg_list_workorders", "ktg_query_stock"}
+_EVIDENCE_LIMIT = 3500
+_STOCK_SUMMARY_FIELDS = (
+    "materialStockId", "itemCode", "warehouseId", "warehouseCode", "warehouseName",
+    "quantityOnhand", "unitOfMeasure",
+)
+_STOCK_DETAIL_FIELDS = ("itemName", "specification", "locationName", "areaName", "batchCode")
 _PREVIEWS = {
     "ktg_preview_create_workorder_draft", "ktg_preview_edit_workorder_draft",
     "ktg_preview_item_receipt", "ktg_preview_production_issue",
 }
 
 
-def _read_evidence(name: str, details: JsonObject) -> JsonObject | None:
+def _stock_evidence(details: JsonObject, arguments: JsonObject, rows: list[JsonObject]) -> JsonObject:
+    item_code, warehouse_id = arguments.get("item_code"), arguments.get("warehouse_id")
+    item_code = item_code.strip() if isinstance(item_code, str) else None
+    total, page, size = details.get("total"), details.get("page"), details.get("page_size")
+    verified = False
+    page_count: int | None = None
+    covered_rows: JsonValue = None
+    if (type(total) is int and total >= 0 and type(page) is int and page >= 1
+            and type(size) is int and size >= 1 and item_code and not details.get("truncated")
+            and all(row.get("itemCode") in (None, item_code)
+                    and (warehouse_id is None or row.get("warehouseId") == warehouse_id) for row in rows)):
+        offset = (page - 1) * size
+        page_count = (total + size - 1) // size
+        verified = len(rows) == max(0, min(size, total - offset))
+        if verified and rows:
+            covered_rows = [offset + 1, offset + len(rows)]
+
+    complete = verified and page == 1 and len(rows) == total
+    evidence: JsonObject = {
+        "filters": {"item_code": item_code, "warehouse_id": warehouse_id},
+        "total": total, "page": page, "page_size": size, "page_count": page_count,
+        "page_verified": verified, "covered_rows": covered_rows,
+        "coverage": "complete" if complete else "partial",
+        "no_records": complete and not rows, "queried_at": details.get("queried_at"),
+    }
+    fields = (*_STOCK_SUMMARY_FIELDS, *_STOCK_DETAIL_FIELDS)
+    for columns in (fields, _STOCK_SUMMARY_FIELDS):
+        shared = {key: rows[0][key] for key in columns if rows and rows[0].get(key) is not None
+                  and all(row.get(key) == rows[0][key] for row in rows)}
+        varying = [key for key in columns if key not in shared and any(row.get(key) is not None for row in rows)]
+        evidence.update({"shared": shared, "columns": list(varying),
+                         "rows": [[row.get(key) for key in varying] for row in rows],
+                         "details_omitted": columns == _STOCK_SUMMARY_FIELDS})
+        if len(json.dumps(evidence, ensure_ascii=False)) <= _EVIDENCE_LIMIT:
+            break
+    return evidence
+
+
+def _read_evidence(name: str, details: JsonObject, arguments: JsonObject) -> JsonObject | None:
+    rows = details.get("rows")
+    if name == "ktg_query_stock" and isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+        # Spilling shortens the text only. The original structured rows can still be verified.
+        return _stock_evidence(details, arguments, cast(list[JsonObject], rows))
+    if name == "ktg_query_stock":
+        return None
     if "spill" in details:
         return None
     if name == "ktg_pro_workorder_get":
@@ -72,11 +127,8 @@ def _read_evidence(name: str, details: JsonObject) -> JsonObject | None:
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         return None
     fields = (
-        ("workorderId", "workorderCode", "workorderName", "workorderType", "productCode",
-         "productName", "status", "quantity", "quantityProduced", "unitOfMeasure", "requestDate", "version")
-        if name == "ktg_list_workorders" else
-        ("materialStockId", "itemCode", "itemName", "specification", "warehouseId", "warehouseCode", "warehouseName",
-         "quantityOnhand", "unitOfMeasure", "locationName", "areaName", "batchCode")
+        "workorderId", "workorderCode", "workorderName", "workorderType", "productCode",
+        "productName", "status", "quantity", "quantityProduced", "unitOfMeasure", "requestDate", "version",
     )
     total, page = details.get("total"), details.get("page")
     complete = type(total) is int and total == len(rows) and page == 1 and not details.get("truncated")
@@ -136,9 +188,9 @@ def _tool_records(
             status = "awaiting_confirmation"
         if effect == "write" and status == "outcome_unknown" and not operation_id:
             operation_id = call.arguments.get("operation_id") or call.arguments.get("preview_id")
-        evidence = (_read_evidence(call.name, details)
+        evidence = (_read_evidence(call.name, details, call.arguments)
                     if status == "succeeded" and call.name in _EVIDENCE_TOOLS else None)
-        if evidence is not None and len(json.dumps(evidence, ensure_ascii=False)) > 3500:
+        if evidence is not None and len(json.dumps(evidence, ensure_ascii=False)) > _EVIDENCE_LIMIT:
             evidence = None
         record: JsonObject = {
             "run_id": run_id, "tool_call_id": call_id,
@@ -155,8 +207,8 @@ def _tool_records(
         if evidence is not None:
             record["evidence"] = evidence
         else:
-            record.update({"result": content[:3500], "coverage": "unknown",
-                           "result_truncated": len(content) > 3500 or "spill" in details})
+            record.update({"result": content[:_EVIDENCE_LIMIT], "coverage": "unknown",
+                           "result_truncated": len(content) > _EVIDENCE_LIMIT or "spill" in details})
         records.append(record)
     return records
 
@@ -237,7 +289,7 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
                 rank = 1
             elif "evidence" in record and record["task_id"] == task_id and isinstance(step_id, str) and step_id in completed:
                 rank = 2
-            elif record["run_id"] != run_id:
+            elif record["run_id"] != run_id or (record["tool"] == "ktg_query_stock" and "evidence" in record):
                 rank = 3 if record["tool"] in _EVIDENCE_TOOLS else 4
             else:
                 continue

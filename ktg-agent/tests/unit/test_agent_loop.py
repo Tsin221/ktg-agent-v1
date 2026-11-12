@@ -304,6 +304,33 @@ def test_task_steer_before_batch_requires_another_work_turn(max_model_turns: int
         assert provider.requests[1].messages[-1] == steer
         assert "仅修正工具参数" in replan_instructions(provider, 1)
         assert "update_task" in replan_instructions(provider, 1)
+        assert "缩小范围时，将后续查询和最终答复限制在用户最新明确要求的对象及字段" in replan_instructions(provider, 1)
+    assert "最终答复只汇报这些对象或字段" in replan_instructions(provider, 1)
+
+
+def test_consumed_task_steer_remains_in_final_request_after_tools() -> None:
+    earlier = ToolCall("earlier", "test.lookup", {"value": 7})
+    scoped = ToolCall("scoped", "test.lookup", {"value": 8})
+    provider = FakeProvider((
+        ScriptedTurn((ResponseCompleted(response(earlier, stop_reason=StopReason.TOOL_CALL)),)),
+        ScriptedTurn((ResponseCompleted(response(scoped, stop_reason=StopReason.TOOL_CALL)),)),
+        ScriptedTurn((ResponseCompleted(response(TextBlock("Status and task list"))),)),
+    ))
+    queue = InputQueue()
+    latest = "只汇报 MO202610230001 的状态和任务列表"
+    queue.enqueue(InputMode.STEER, UserMessage((TextBlock(latest),)), "steer")
+    tool = RecordingTool()
+    budget = TaskBudget(task_id="task", steps=(("step", "in_progress"),))
+    result = asyncio.run(make_loop(provider, tool, task_budget=budget).run(
+        run_id="run-1", messages=(UserMessage((TextBlock("Report all order details"),)),), input_queue=queue,
+    ))
+    assert tool.values == [8]
+    assert result.stop_reason is StopReason.COMPLETED
+    assert latest in replan_instructions(provider, 1)
+    final = replan_instructions(provider, 2)
+    assert latest in final
+    assert "用调整后点名的字段作为最终答复条目" in final
+    assert "需要调整清单时" not in final
 
 
 def replan_instructions(provider: FakeProvider, index: int) -> str:

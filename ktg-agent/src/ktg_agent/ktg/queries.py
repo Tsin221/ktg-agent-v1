@@ -229,6 +229,8 @@ async def _query(
         "page_size": page_size,
         "queried_at": datetime.now(UTC).isoformat(),
     }
+    if kind == "stock" and (type(payload.get("total")) is not int or len(raw_rows) != len(projected)):
+        details["truncated"] = True
     return ToolResult(
         content=(
             f"{kind} 查询返回 {len(projected)} 条，本次分页总数为 {total}。"

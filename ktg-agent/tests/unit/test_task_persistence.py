@@ -28,7 +28,7 @@ from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator
 from ktg_agent.sessions.repository import SessionRepository, TaskSelectionRequired, TaskVersionConflict
 from ktg_agent.sessions.service import SessionService
-from ktg_agent.sessions.task_tools import task_run_configuration
+from ktg_agent.sessions.task_tools import _read_evidence, task_run_configuration
 from ktg_agent.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolStatus
 from ktg_agent.tools.runner import ToolRunner
 
@@ -341,9 +341,11 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
         (ToolCall("early", "ktg_pro_workorder_get", {"workorder_id": 17}),
          {"data": {"workorderId": 17, "productCode": "PRODUCT-EARLY"}, "queried_at": "now"},
          "PRODUCT-EARLY", "first"),
-        (ToolCall("stock", "ktg_query_stock", {"item_code": "PRODUCT-OTHER"}),
-         {"rows": [{"warehouseName": "ZERO-WH", "quantityOnhand": 0, "unitOfMeasure": None}],
-          "page": 1, "total": 2}, "ZERO-WH", "next"),
+        (ToolCall("stock", "ktg_query_stock", {"item_code": "PRODUCT-OTHER", "page_size": 20}),
+         {"rows": [{"materialStockId": i, "itemCode": "PRODUCT-OTHER", "itemName": "物料" * 30,
+                    "specification": "规格" * 25, "warehouseName": "ZERO-WH", "quantityOnhand": 0,
+                    "unitOfMeasure": None, "batchCode": f"batch-{i}"} for i in range(20)],
+          "page": 1, "page_size": 20, "total": 49}, "ZERO-WH " * 1000, "next"),
         (ToolCall("unrelated", "unrelated_read", {}), None, "unrelated " * 3500, None),
     ]
     for seq, (call, details, content, step_id) in enumerate(records, start=1):
@@ -358,7 +360,7 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
     repo.save_task("id:1", session, original, [
         step("first", status="completed"), step("next", status="in_progress"),
     ], task_id=task_id, expected_version=1)
-    repo.update_run_status("id:1", original, "completed")
+    repo.update_run_status("id:1", original, "cancelled")
     run = repo.create_run("id:1", session, "resume", "digest", {"task_id": task_id})
     repo.update_run_status("id:1", run.id, "running")
 
@@ -384,14 +386,43 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
     assert system.count('"current_step_id": "next"') == 1
     assert system.count('"version": 2') == 1
     assert system.index('"tool_call_id": "stock"') < system.index('"tool_call_id": "early"')
-    assert '"quantityOnhand": 0' in system and '"unitOfMeasure": null' in system
+    assert '"quantityOnhand": 0' in system
+    assert '"page_verified": true' in system and '"covered_rows": [1, 20]' in system
+    assert '"page_count": 3' in system and '"page_size": 20' in system
+    assert '"details_omitted": false' in system
     assert '"coverage": "partial"' in system
     assert UserMessage((TextBlock("Resume current workorder"),)) in messages
     assert not any(isinstance(m, ToolResultMessage) and m.tool_call_id == "unrelated" for m in messages)
     for message in messages:
         if isinstance(message, ToolResultMessage):
-            assert message.content[0].text not in {"PRODUCT-EARLY", "ZERO-WH"}
+            assert message.content[0].text not in {"PRODUCT-EARLY", "ZERO-WH " * 1000}
     assert result.messages[1:1 + len(history)] == tuple(history)
+
+
+@pytest.mark.parametrize(("page", "total", "row_count", "truncated", "verified", "covered", "empty"), [
+    (1, 0, 0, False, True, None, True),
+    (3, 49, 9, False, True, [41, 49], False),
+    (3, 49, 0, False, False, None, False),
+    (1, 0, 0, True, False, None, False),
+    (2, 1, 0, False, True, None, False),
+])
+def test_stock_page_evidence_distinguishes_empty_and_missing_pages(
+    page: int, total: int, row_count: int, truncated: bool, verified: bool,
+    covered: list[int] | None, empty: bool,
+) -> None:
+    evidence = _read_evidence("ktg_query_stock", {
+        "page": page, "page_size": 20, "total": total, "truncated": truncated,
+        "spill": {"omitted_chars": 100},
+        "rows": [{"itemCode": "PRODUCT", "warehouseId": 17, "quantityOnhand": 0}] * row_count,
+    }, {"item_code": " PRODUCT ", "warehouse_id": 17})
+    assert evidence is not None
+    assert evidence["filters"] == {"item_code": "PRODUCT", "warehouse_id": 17}
+    assert evidence["page_verified"] is verified
+    assert evidence["covered_rows"] == covered
+    assert evidence["no_records"] is empty
+    assert evidence["coverage"] == ("complete" if empty else "partial")
+    if row_count:
+        assert evidence["shared"] == {"itemCode": "PRODUCT", "warehouseId": 17, "quantityOnhand": 0}
 
 
 def test_task_workorder_to_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
