@@ -25,71 +25,94 @@
 
       <div class="agent-panel__sessions">
         <label for="agent-session-select">会话</label>
-        <select id="agent-session-select" :value="sessionId" :disabled="sessionLoading" @change="selectSession($event.target.value)">
-          <option value="">选择会话</option>
+        <select id="agent-session-select" :value="sessionId" :disabled="sessionLoading || !sessions.length"
+                @change="selectSession($event.target.value)">
+          <option v-if="!sessionId" value="" disabled hidden>{{ sessions.length ? '未选中会话' : '暂无会话' }}</option>
           <option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.title || '未命名会话' }}</option>
         </select>
         <button type="button" :disabled="sessionLoading || titleSaving" @click="editTitle('create')">新会话</button>
         <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
       </div>
 
-      <section v-if="tasks.length || taskError" class="agent-task-card" aria-labelledby="agent-task-heading">
+      <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
+        <div class="agent-title-form__header">
+          <label for="agent-session-title">{{ titleMode === 'create' ? '新建会话' : '重命名会话' }}</label>
+          <button type="button" class="agent-title-form__close" aria-label="取消" title="取消"
+                  :disabled="titleSaving" @click="cancelTitle">
+            <i class="el-icon-close" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="agent-title-form__fields">
+          <input id="agent-session-title" ref="titleInput" v-model="titleDraft" :disabled="titleSaving"
+                 :placeholder="titleMode === 'create' ? '会话名称（可选）' : '输入会话名称'"
+                 :aria-invalid="titleError ? 'true' : null" :aria-describedby="titleError ? 'agent-session-title-error' : null"
+                 maxlength="200" @keydown.esc.prevent="cancelTitle">
+          <button type="submit" class="agent-title-form__submit" :disabled="titleSaving">
+            {{ titleSaving ? '保存中…' : (titleMode === 'create' ? '创建' : '保存') }}
+          </button>
+        </div>
+        <p v-if="titleError" id="agent-session-title-error" role="alert">{{ titleError }}</p>
+      </form>
+
+      <section v-if="titleMode !== 'create' && (tasks.length || taskError)" class="agent-task-card" aria-labelledby="agent-task-heading">
         <div class="agent-task-card__header">
-          <h3 id="agent-task-heading">任务清单</h3>
+          <h3 id="agent-task-heading">
+            <button type="button" class="agent-task-card__toggle" :aria-expanded="taskPanelOpen ? 'true' : 'false'"
+                    aria-controls="agent-task-details" @click="taskPanelOpen = !taskPanelOpen">
+              <i :class="taskPanelOpen ? 'el-icon-arrow-down' : 'el-icon-arrow-right'" aria-hidden="true" />
+              任务清单
+              <span v-if="taskError" class="agent-task-card__summary">读取失败</span>
+              <span v-else-if="currentTaskProgress" class="agent-task-card__summary">
+                {{ currentTaskProgress.completed }} / {{ currentTaskProgress.total }} 步已完成
+              </span>
+            </button>
+          </h3>
           <button v-if="taskId" class="agent-task-card__continue" type="button"
                   :disabled="composerBusy || canInput || !!pendingSubmission" @click="continueTask">
             <i class="el-icon-video-play" aria-hidden="true" />
             继续此任务
           </button>
         </div>
-        <div v-if="tasks.length" class="agent-task-card__controls">
-          <div class="agent-task-card__field">
-            <label for="agent-task-select">任务</label>
-            <select id="agent-task-select" :value="taskId" @change="selectTask($event.target.value)">
-              <option v-for="task in tasks" :key="task.task_id" :value="task.task_id">{{ task.title }}</option>
-            </select>
+        <div v-show="taskPanelOpen" id="agent-task-details">
+          <div v-if="tasks.length" class="agent-task-card__controls">
+            <div class="agent-task-card__field">
+              <label for="agent-task-select">任务</label>
+              <select id="agent-task-select" :value="taskId" @change="selectTask($event.target.value)">
+                <option v-for="task in tasks" :key="task.task_id" :value="task.task_id">{{ task.title }}</option>
+              </select>
+            </div>
+            <div v-if="taskDetail" class="agent-task-card__field">
+              <label for="agent-task-version">清单版本</label>
+              <select id="agent-task-version" v-model.number="taskVersion">
+                <option :value="0">第 {{ taskDetail.current_version }} 版 · 当前</option>
+                <option v-for="version in taskDetail.versions.slice(1)" :key="version.version" :value="version.version">
+                  第 {{ version.version }} 版
+                </option>
+              </select>
+            </div>
           </div>
-          <div v-if="taskDetail" class="agent-task-card__field">
-            <label for="agent-task-version">清单版本</label>
-            <select id="agent-task-version" v-model.number="taskVersion">
-              <option :value="0">第 {{ taskDetail.current_version }} 版 · 当前</option>
-              <option v-for="version in taskDetail.versions.slice(1)" :key="version.version" :value="version.version">
-                第 {{ version.version }} 版
-              </option>
-            </select>
+          <div v-if="taskError" class="agent-task-card__error">
+            <p role="alert">{{ taskError }}</p>
+            <button type="button" @click="refreshTasks()">重试</button>
           </div>
+          <template v-if="taskProgress">
+            <div class="agent-task-card__progress">
+              <progress :value="taskProgress.completed" :max="taskProgress.total" aria-label="任务步骤完成进度" />
+              <span>已完成 {{ taskProgress.completed }} / {{ taskProgress.total }} 步</span>
+            </div>
+            <ol class="agent-task-card__steps" role="list">
+              <li v-for="step in visibleTaskVersion.steps" :key="step.step_id"
+                  class="agent-task-card__step" :class="'agent-task-card__step--' + step.status">
+                <span class="agent-task-card__marker" aria-hidden="true">
+                  <i v-if="step.status === 'completed'" class="el-icon-check" />
+                </span>
+                <span class="agent-task-card__description">{{ step.description }}</span>
+                <span class="agent-task-card__status">{{ taskStatusText[step.status] }}</span>
+              </li>
+            </ol>
+          </template>
         </div>
-        <div v-if="taskError" class="agent-task-card__error">
-          <p role="alert">{{ taskError }}</p>
-          <button type="button" @click="refreshTasks()">重试</button>
-        </div>
-        <template v-if="taskProgress">
-          <div class="agent-task-card__progress">
-            <progress :value="taskProgress.completed" :max="taskProgress.total" aria-label="任务步骤完成进度" />
-            <span>已完成 {{ taskProgress.completed }} / {{ taskProgress.total }} 步</span>
-          </div>
-          <ol class="agent-task-card__steps" role="list">
-            <li v-for="step in visibleTaskVersion.steps" :key="step.step_id"
-                class="agent-task-card__step" :class="'agent-task-card__step--' + step.status">
-              <span class="agent-task-card__marker" aria-hidden="true">
-                <i v-if="step.status === 'completed'" class="el-icon-check" />
-              </span>
-              <span class="agent-task-card__description">{{ step.description }}</span>
-              <span class="agent-task-card__status">{{ taskStatusText[step.status] }}</span>
-            </li>
-          </ol>
-        </template>
       </section>
-
-      <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
-        <label for="agent-session-title">{{ titleMode === 'create' ? '新会话名称（可留空）' : '会话名称' }}</label>
-        <input id="agent-session-title" ref="titleInput" v-model="titleDraft" :disabled="titleSaving" placeholder="最多200个字符" @keydown.esc.prevent="cancelTitle">
-        <div>
-          <button type="submit" :disabled="titleSaving">{{ titleSaving ? '保存中…' : '保存' }}</button>
-          <button type="button" :disabled="titleSaving" @click="cancelTitle">取消</button>
-        </div>
-        <p v-if="titleError" role="alert">{{ titleError }}</p>
-      </form>
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <div class="agent-message agent-message--assistant">
@@ -332,6 +355,7 @@ export default {
       taskDetail: null,
       taskVersion: 0,
       taskError: '',
+      taskPanelOpen: false,
       taskRefresh: 0,
       taskDetailRefresh: 0,
       taskStatusText: { pending: '待开始', in_progress: '进行中', completed: '已完成' },
@@ -383,6 +407,12 @@ export default {
     },
     taskProgress() {
       const steps = this.visibleTaskVersion && this.visibleTaskVersion.steps
+      if (!steps || !steps.length) return null
+      return { completed: steps.filter(step => step.status === 'completed').length, total: steps.length }
+    },
+    currentTaskProgress() {
+      const version = this.taskDetail && this.taskDetail.versions[0]
+      const steps = version && version.steps
       if (!steps || !steps.length) return null
       return { completed: steps.filter(step => step.status === 'completed').length, total: steps.length }
     },
@@ -714,6 +744,7 @@ export default {
       this.taskDetail = null
       this.taskVersion = 0
       this.taskError = ''
+      this.taskPanelOpen = false
     },
     async refreshTasks(epoch = this.epoch) {
       const sessionId = this.sessionId
@@ -1569,10 +1600,76 @@ export default {
 }
 
 .agent-panel__resize { position: absolute; top: 0; left: 0; width: 24px; height: 24px; border: 0; background: transparent; color: #606266; cursor: nwse-resize; touch-action: none; }
-.agent-panel__title-form { flex-shrink: 0; padding: 8px 12px; background: #fff; display: flex; flex-wrap: wrap; gap: 6px; }
-.agent-panel__title-form label { width: 100%; font-size: 12px; }
-.agent-panel__title-form input { min-width: 0; flex: 1; border: 1px solid #dcdfe6; border-radius: 4px; padding: 6px; }
-.agent-panel__title-form p { width: 100%; margin: 0; color: #f56c6c; font-size: 12px; }
+.agent-panel__title-form {
+  flex-shrink: 0;
+  display: grid;
+  gap: 8px;
+  margin: 10px 12px 0;
+  padding: 10px 12px 12px;
+  border: 1px solid #dfe6ef;
+  border-radius: 10px;
+  background: #fff;
+}
+.agent-title-form__header,
+.agent-title-form__fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-title-form__header { justify-content: space-between; }
+.agent-title-form__header label { color: #303946; font-size: 13px; font-weight: 600; }
+.agent-title-form__close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #606b7a;
+  cursor: pointer;
+}
+.agent-title-form__close:hover:not(:disabled) { background: #edf2f8; }
+.agent-title-form__fields input {
+  box-sizing: border-box;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #d5deea;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #303946;
+  font: inherit;
+  font-size: 13px;
+}
+.agent-title-form__fields input::placeholder { color: #657388; }
+.agent-title-form__fields input:focus {
+  border-color: #337ecc;
+  outline: 2px solid #dcecff;
+  outline-offset: 1px;
+  background: #fff;
+}
+.agent-title-form__fields input[aria-invalid="true"] { border-color: #bc4545; }
+.agent-title-form__submit {
+  flex-shrink: 0;
+  min-width: 62px;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #2368ad;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.agent-title-form__submit:hover:not(:disabled) { background: #195792; }
+.agent-title-form__submit:disabled,
+.agent-title-form__close:disabled { opacity: 0.6; cursor: not-allowed; }
+.agent-panel__title-form p { margin: 0; color: #a22d2d; font-size: 12px; }
 .agent-panel__header {
   flex-shrink: 0;
   display: flex;
@@ -1702,8 +1799,8 @@ export default {
 }
 .agent-task-card {
   flex: 0 0 auto;
-  margin: 12px 12px 0;
-  padding: 10px 12px;
+  margin: 8px 12px 0;
+  padding: 5px 8px;
   border: 1px solid #dfe4ed;
   border-radius: 6px;
   background: #fff;
@@ -1719,6 +1816,7 @@ export default {
 }
 
 .agent-task-card__header h3 {
+  min-width: 0;
   margin: 0;
   color: #303133;
   font-size: 14px;
@@ -1749,6 +1847,23 @@ export default {
   color: #606266;
   cursor: not-allowed;
 }
+
+.agent-task-card button.agent-task-card__toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 4px;
+  border-color: transparent;
+  background: transparent;
+  color: #303133;
+  white-space: nowrap;
+}
+.agent-task-card button.agent-task-card__toggle:hover {
+  background: #f0f5fb;
+}
+.agent-task-card__summary { color: #606266; font-weight: 400; }
+.agent-task-card #agent-task-details { padding: 0 4px 5px; }
 
 .agent-task-card__continue i { margin-right: 2px; }
 
