@@ -65,6 +65,10 @@ class InputQueue:
         return pending
 
     @property
+    def has_steering(self) -> bool:
+        return bool(self._steering)
+
+    @property
     def is_empty(self) -> bool:
         return not self._steering and not self._follow_ups
 

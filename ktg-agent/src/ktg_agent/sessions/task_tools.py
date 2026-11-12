@@ -102,7 +102,7 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
         task = repository.get_task(owner, run.session_id, selected)
         versions = task["versions"]
         if isinstance(versions, list) and versions and isinstance(versions[0], dict):
-            budget.set_task(selected, versions[0].get("steps"))
+            budget.set_task(selected, versions[0].get("steps"), version=versions[0].get("version"))
         origin, previous_runs = repository.task_resume_runs(owner, run.session_id, selected, run_id)
         records: list[JsonValue] = []
         remaining = 16000
@@ -141,6 +141,8 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
                     expected_version=arguments.get("expected_version"),
                 )
             except TaskVersionConflict as exc:
+                if exc.latest.get("task_id") == budget.task_id and budget.task_id is not None:
+                    budget.set_task(budget.task_id, exc.latest.get("steps"), version=exc.latest.get("version"))
                 return ToolResult(
                     "任务版本冲突。请基于最新快照重新判断：" + json.dumps(exc.latest, ensure_ascii=False),
                     details=exc.latest, status=ToolStatus.FAILED, error_code="TASK_VERSION_CONFLICT",
@@ -152,7 +154,7 @@ def task_run_configuration(repository: SessionRepository, run_id: str,
             result = {"task_id": snapshot["task_id"], "version": snapshot["version"]}
             task_id = snapshot["task_id"]
             assert isinstance(task_id, str)
-            budget.set_task(task_id, snapshot["steps"])
+            budget.set_task(task_id, snapshot["steps"], version=snapshot["version"])
             return ToolResult(json.dumps(result, ensure_ascii=False), details=result)
 
         properties: JsonObject = {"steps": _STEPS_SCHEMA, **fields}

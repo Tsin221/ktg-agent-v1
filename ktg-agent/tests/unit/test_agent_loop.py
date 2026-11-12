@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from ktg_agent.core.events import AgentEvent, AgentEventType, ToolProgressPublisher
-from ktg_agent.core.loop import AgentLoop, AgentRunResult
+from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
 from ktg_agent.core.queues import InputQueue, InputMode
+from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.core.messages import (
     AssistantMessage,
     JsonObject,
@@ -109,6 +110,9 @@ def response(
 def make_loop(
     provider: FakeProvider,
     tool: RecordingTool | None = None,
+    *,
+    task_budget: TaskBudget | None = None,
+    limits: RunLimits | None = None,
 ) -> AgentLoop:
     registry = ToolRegistry(() if tool is None else (tool_definition(tool),))
     return AgentLoop(
@@ -116,6 +120,8 @@ def make_loop(
         tool_registry=registry,
         tool_runner=ToolRunner(registry),
         model_config=ModelConfig(model="fake-model", max_output_tokens=128),
+        task_budget=task_budget,
+        limits=limits,
     )
 
 
@@ -256,6 +262,95 @@ def test_steering_message_is_recorded_in_actual_order() -> None:
     ))
     assert isinstance(result.new_messages[2], ToolResultMessage)
     assert result.new_messages[3:] == (steer, final.message)
+
+
+@pytest.mark.parametrize("max_model_turns", [1, 2])
+def test_task_steer_before_batch_requires_another_work_turn(max_model_turns: int) -> None:
+    call = ToolCall("call-1", "test.lookup", {"value": 7})
+    final = response(TextBlock("done"))
+    provider = FakeProvider((
+        ScriptedTurn((ResponseCompleted(response(call, stop_reason=StopReason.TOOL_CALL)),)),
+        ScriptedTurn((ResponseCompleted(final),)),
+    ))
+    queue = InputQueue()
+    consumed: list[str] = []
+    queue.on_consumed = consumed.append
+    steer = UserMessage((TextBlock("change scope"),))
+    queue.enqueue(InputMode.STEER, steer, "steer")
+    budget = TaskBudget(task_id="task", steps=(("step", "in_progress"),))
+    tool = RecordingTool()
+    result = asyncio.run(make_loop(
+        provider, tool, task_budget=budget, limits=RunLimits(max_model_turns=max_model_turns),
+    ).run(run_id="run-1", messages=(UserMessage((TextBlock("start"),)),), input_queue=queue))
+
+    tool_result = result.new_messages[2]
+    assert isinstance(tool_result, ToolResultMessage)
+    assert tool_result.tool_call_id == call.id
+    if max_model_turns == 1:
+        assert tool.values == [7]
+        assert consumed == []
+        assert queue.has_steering
+        assert steer not in provider.requests[1].messages
+    else:
+        assert tool.values == []
+        assert budget.work_calls == 0
+        assert consumed == ["steer"]
+        assert tool_result.is_error
+        assert result.new_messages[3:] == (steer, final.message)
+        assert provider.requests[1].messages[-1] == steer
+        assert "仅修正工具参数" in replan_instructions(provider, 1)
+        assert "update_task" in replan_instructions(provider, 1)
+
+
+def replan_instructions(provider: FakeProvider, index: int) -> str:
+    return " ".join(
+        block.text for message in provider.requests[index].messages
+        if isinstance(message, SystemMessage) for block in message.content
+    )
+
+
+def test_task_step_exhaustion_prompts_replan_once_with_shared_budget_remaining() -> None:
+    calls = [ToolCall(f"call-{i}", "test.lookup", {"value": i}) for i in range(3)]
+    provider = FakeProvider((
+        *(ScriptedTurn((ResponseCompleted(response(call, stop_reason=StopReason.TOOL_CALL)),)) for call in calls),
+        ScriptedTurn((ResponseCompleted(response(TextBlock("done"))),)),
+    ))
+    budget = TaskBudget()
+    budget.set_task("task", [
+        {"step_id": "previous", "status": "completed", "description": "Completed work"},
+        {"step_id": "first", "status": "in_progress", "description": "Current work"},
+        {"step_id": "next", "status": "pending", "description": "Remaining work"},
+    ], version=3)
+    tool = RecordingTool()
+    run(make_loop(provider, tool, task_budget=budget, limits=RunLimits(max_tool_calls=2)))
+    assert tool.values == [0]
+    assert budget.work_calls == 1
+    assert "update_task" not in replan_instructions(provider, 1)
+    instructions = replan_instructions(provider, 2)
+    assert "勿用新步骤 ID" in instructions
+    assert '"version": 3' in instructions
+    assert '"current_step_id": "first"' in instructions
+    assert '"step_work_calls_remaining": 0' in instructions
+    assert '"total_work_calls_remaining": 1' in instructions
+    assert '"step_id": "previous", "status": "completed", "description": "Completed work"' in instructions
+    assert "update_task" not in replan_instructions(provider, 3)
+
+
+def test_task_repeated_final_tool_failure_prompts_replan_once() -> None:
+    calls = [ToolCall(f"call-{i}", "test.lookup", {"value": value}) for i, value in enumerate((7, 8, 7, 7))]
+    provider = FakeProvider((
+        *(ScriptedTurn((ResponseCompleted(response(call, stop_reason=StopReason.TOOL_CALL)),)) for call in calls),
+        ScriptedTurn((ResponseCompleted(response(TextBlock("done"))),)),
+    ))
+    budget = TaskBudget(task_id="task", steps=(("step", "in_progress"),))
+    tool = RecordingTool(error=TimeoutError())
+    run(make_loop(provider, tool, task_budget=budget))
+    assert tool.values == [7, 8, 7, 7]
+    assert "update_task" not in replan_instructions(provider, 1)
+    assert "update_task" not in replan_instructions(provider, 2)
+    assert "已重复失败" in replan_instructions(provider, 3)
+    assert "勿盲目重试" in replan_instructions(provider, 3)
+    assert "update_task" not in replan_instructions(provider, 4)
 
 
 def test_zero_usage_and_unknown_usage_have_distinct_run_results() -> None:

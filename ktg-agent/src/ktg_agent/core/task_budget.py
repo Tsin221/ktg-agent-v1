@@ -18,16 +18,21 @@ class TaskBudget:
     saves: int = 0
     closeout_turns: int = 0
     step_calls: dict[tuple[str, str], int] = field(default_factory=dict)
+    version: int | None = None
+    saved_steps: tuple[tuple[str, str, str], ...] = ()
 
-    def set_task(self, task_id: str, steps: JsonValue) -> None:
+    def set_task(self, task_id: str, steps: JsonValue, *, version: JsonValue = None) -> None:
         self.task_id = task_id
-        normalized: list[tuple[str, str]] = []
+        self.version = version if type(version) is int else None
+        normalized: list[tuple[str, str, str]] = []
         for step in steps if isinstance(steps, list) else ():
             if isinstance(step, dict):
                 step_id, status = step.get("step_id"), step.get("status")
                 if isinstance(step_id, str) and isinstance(status, str):
-                    normalized.append((step_id, status))
-        self.steps = tuple(normalized)
+                    description = step.get("description")
+                    normalized.append((step_id, status, description if isinstance(description, str) else ""))
+        self.saved_steps = tuple(normalized)
+        self.steps = tuple((step_id, status) for step_id, status, _ in self.saved_steps)
 
     def step_quota(self, work_limit: int) -> tuple[tuple[str, str] | None, int]:
         remaining = max(0, work_limit - self.work_calls)
