@@ -14,7 +14,7 @@ from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from typing import cast
 
-from ktg_agent.core.messages import AssistantMessage, JsonObject, StopReason, TextBlock, UserMessage
+from ktg_agent.core.messages import AssistantMessage, JsonObject, StopReason, SystemMessage, TextBlock, UserMessage
 from ktg_agent.core.events import EventSink
 from ktg_agent.core.loop import AgentRunResult
 from ktg_agent.core.messages import Message
@@ -273,9 +273,9 @@ def test_run_http_atomic_admission_and_owner_isolation(tmp_path: Path) -> None:
     assert saved is not None and saved.status == "completed" and saved.stop_reason == "completed"
     assert saved.result_summary is not None and saved.result_summary["answer"] == "完成"
     contextual_request = next(request for request in provider.requests
-                              if request.messages[-1].content[0] == TextBlock("查库存"))
+                              if UserMessage((TextBlock("查库存"),)) in request.messages)
     other_request = next(request for request in provider.requests
-                         if request.messages[-1].content[0] == TextBlock("other session"))
+                         if UserMessage((TextBlock("other session"),)) in request.messages)
     first_block = contextual_request.messages[0].content[0]
     assert isinstance(first_block, TextBlock)
     first_prompt = first_block.text
@@ -393,10 +393,14 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
         third = submit_and_wait(server, sid, 3)
         assert third != orphan.id
         assert len(third_provider.requests) == 1
-        assert [item.content[0].text for item in third_provider.requests[0].messages
-                if isinstance(item.content[0], TextBlock)][-5:] == [
-                    "question 1", "answer 1", "question 2", "answer 2", "question 3",
-                ]
+        assert tuple(message for message in third_provider.requests[0].messages
+                     if not isinstance(message, SystemMessage)) == (
+            UserMessage((TextBlock("question 1"),)),
+            AssistantMessage((TextBlock("answer 1"),)),
+            UserMessage((TextBlock("question 2"),)),
+            AssistantMessage((TextBlock("answer 2"),)),
+            UserMessage((TextBlock("question 3"),)),
+        )
         assert request(server, "POST", f"/agent-api/v1/sessions/{sid}/runs",
                        body={"request_id": "interrupted", "message": "different"})[0] == 409
 

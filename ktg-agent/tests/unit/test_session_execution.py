@@ -15,7 +15,7 @@ from ktg_agent.core.events import AgentEvent, AgentEventType, EventSink
 from ktg_agent.core.agent import Agent
 from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
 from ktg_agent.core.messages import (
-    AssistantMessage, JsonObject, Message, StopReason, TextBlock, ToolCall, ToolResultMessage,
+    AssistantMessage, JsonObject, Message, StopReason, SystemMessage, TextBlock, ToolCall, ToolResultMessage,
     UserMessage,
 )
 from ktg_agent.ktg import KTGClient
@@ -122,10 +122,12 @@ def test_two_turns_are_isolated_and_reopenable(tmp_path: Path) -> None:
         coordinator = RunCoordinator(repo, query_executor(provider), {"max_total_tokens": 20})
     coordinator.close()
 
-    assert [item.content[0].text for item in provider.requests[1].messages
-            if isinstance(item.content[0], TextBlock)][-3:] == [
-                "first question", "first answer", "second question",
-            ]
+    assert tuple(message for message in provider.requests[1].messages
+                 if not isinstance(message, SystemMessage)) == (
+        UserMessage((TextBlock("first question"),)),
+        AssistantMessage((TextBlock("first answer"),)),
+        UserMessage((TextBlock("second question"),)),
+    )
     assert all("first question" not in str(item) for item in provider.requests[2].messages)
     reopened = SessionRepository(path)
     assert [item.message.role.value for item in reopened.list_messages("id:7", first_session.id).items] == [
@@ -361,7 +363,8 @@ def test_coordinator_delivers_input_from_different_thread_and_loop(tmp_path: Pat
 
     assert repo.get_run("id:7", run.id).status == "completed"  # type: ignore[union-attr]
     assert len(provider.requests) == 2
-    assert provider.requests[1].messages[-1] == UserMessage((TextBlock("second"),))
+    assert next(message for message in reversed(provider.requests[1].messages)
+                if isinstance(message, UserMessage)) == UserMessage((TextBlock("second"),))
     assert repo.list_inputs("id:7", run.id).items[0].status == "consumed"
     assert [item.type for item in repo.list_events("id:7", run.id).items][-1] == "run_settled"
     assert coordinator.phase(run.id) is None

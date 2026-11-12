@@ -302,8 +302,6 @@ def test_write_definitions_are_registered_only_when_enabled(tmp_path: Path) -> N
     disabled = create_service(Settings(**common))
     candidates = disabled._catalog.candidate_snapshot(
         CatalogIdentity(frozenset({"*:*:*"}), "run"), disabled._switches_provider())
-    assert len(disabled._catalog._manifests) == 41
-    assert len(candidates.candidates) == 36
     assert "ktg_dv_checkplan_list" in candidates.candidates
 
     enabled = create_service(Settings(
@@ -313,9 +311,7 @@ def test_write_definitions_are_registered_only_when_enabled(tmp_path: Path) -> N
     ))
     enabled_candidates = enabled._catalog.candidate_snapshot(
         CatalogIdentity(frozenset({"*:*:*"}), "run"), enabled._switches_provider())
-    assert len(enabled._catalog._manifests) == 45
-    assert len(enabled_candidates.candidates) == 38
-    assert PREVIEW_CREATE in enabled_candidates.candidates
-    assert PREVIEW_UPDATE in enabled_candidates.candidates
-    assert APPLY_CREATE not in enabled_candidates.candidates
-    assert APPLY_UPDATE not in enabled_candidates.candidates
+    write_tools = {PREVIEW_CREATE, PREVIEW_UPDATE, APPLY_CREATE, APPLY_UPDATE}
+    assert write_tools.isdisjoint(disabled._catalog._manifests)
+    assert set(enabled._catalog._manifests) == set(disabled._catalog._manifests) | write_tools
+    assert set(enabled_candidates.candidates) == set(candidates.candidates) | {PREVIEW_CREATE, PREVIEW_UPDATE}

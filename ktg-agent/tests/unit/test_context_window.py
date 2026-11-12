@@ -234,6 +234,14 @@ def test_coordinator_persists_assembly_before_turn_and_settles_last(tmp_path: Pa
     seq = {event.type: event.seq for event in events}
     assert seq["context_assembled"] < seq["turn_start"] < seq["model_request_started"]
     assert events[-1].type == "run_settled"
+    assert len(provider.requests) == 1
+    messages = provider.requests[0].messages
+    assert messages[-1] == UserMessage((TextBlock("question"),))
+    assert any(
+        "当前模型请求可调用工具仅为：" in block.text
+        for message in messages if isinstance(message, SystemMessage)
+        for block in message.content
+    )
     assembled = next(event.payload for event in events if event.type == "context_assembled")
     assert set(assembled) == {
         "estimated_tokens", "threshold_tokens", "summary_id",

@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 
-from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, UserMessage
+from ktg_agent.core.messages import AssistantMessage, StopReason, SystemMessage, TextBlock, UserMessage
 from ktg_agent.ktg import KTGClient
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ModelEvent, ProviderRequest, RequestStarted, ResponseCompleted, Usage
 from ktg_agent.service import QueryService
@@ -167,8 +167,12 @@ def test_input_http_concurrent_retry_pagination_and_history(tmp_path: Path) -> N
         coordinator.close()
         assert repo.get_run("id:7", run.id).status == "completed"  # type: ignore[union-attr]
         assert len(provider.requests) == 3
-        assert provider.requests[1].messages[-1] == UserMessage((TextBlock("new direction"),))
-        assert provider.requests[2].messages[-2:] == (
+        second_turn = tuple(message for message in provider.requests[1].messages
+                            if not isinstance(message, SystemMessage))
+        third_turn = tuple(message for message in provider.requests[2].messages
+                           if not isinstance(message, SystemMessage))
+        assert second_turn[-1] == UserMessage((TextBlock("new direction"),))
+        assert third_turn[-2:] == (
             UserMessage((TextBlock("second"),)), UserMessage((TextBlock("third"),)),
         )
         assert [item.status for item in repo.list_inputs("id:7", run.id).items] == [

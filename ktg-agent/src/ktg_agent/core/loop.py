@@ -955,6 +955,7 @@ class AgentLoop:
         if closeout_turn:
             schemas = tuple(schema for schema in schemas
                             if closeout_turn == 1 and schema.name == "update_task")
+        instruction_index: int | None = None
         if self._discovery is not None:
             # Activation belongs to this run, while conversation history may contain
             # successful loads from earlier runs. State the authoritative snapshot.
@@ -979,7 +980,14 @@ class AgentLoop:
                         f" 当前步骤 {step[1]} 还可调用业务工具 {quota} 次。"
                         "同一步可按需分页。完成后保存状态并推进到下一步，未完成的步骤保留原状。"
                     )
-            projected = (*projected, SystemMessage((TextBlock(instruction),)))
+            instruction_index = next(
+                (index for index, message in enumerate(projected) if not isinstance(message, SystemMessage)),
+                len(projected),
+            )
+            projected = (
+                *projected[:instruction_index], SystemMessage((TextBlock(instruction),)),
+                *projected[instruction_index:],
+            )
         if self._context_policy is not None:
             # Projection removes invisible messages and clears result details. Preserve
             # the original spill markers in the projected sequence's coordinates.
@@ -994,8 +1002,8 @@ class AgentLoop:
                 and isinstance(message.details, dict) and "spill" in message.details
                 for message in visible
             )
-            if self._discovery is not None:
-                spill_flags = (*spill_flags, False)
+            if instruction_index is not None:
+                spill_flags = (*spill_flags[:instruction_index], False, *spill_flags[instruction_index:])
             try:
                 plan = fit_window(
                     projected, self._context_policy,
