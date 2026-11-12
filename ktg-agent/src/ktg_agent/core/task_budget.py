@@ -1,8 +1,10 @@
 """Run-local budget for persisted task steps."""
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from ktg_agent.core.messages import JsonValue, ToolCall
+from ktg_agent.core.messages import JsonObject, JsonValue, Message, ToolCall
+from ktg_agent.core.events import AgentEvent
 
 TASK_SAVE_LIMIT = 6
 TASK_CLOSEOUT_TURNS = 2
@@ -20,6 +22,12 @@ class TaskBudget:
     step_calls: dict[tuple[str, str], int] = field(default_factory=dict)
     version: int | None = None
     saved_steps: tuple[tuple[str, str, str], ...] = ()
+
+    evidence: Callable[[str, Sequence[Message], Sequence[AgentEvent], str | None,
+                        frozenset[str]], tuple[list[JsonObject], list[JsonObject]]] | None = None
+    evidence_prompt: str = ""
+    operation_status: Callable[[str, str], str] | None = None
+    resume_request: JsonObject | None = None
 
     def set_task(self, task_id: str, steps: JsonValue, *, version: JsonValue = None) -> None:
         self.task_id = task_id

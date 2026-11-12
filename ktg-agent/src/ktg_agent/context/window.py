@@ -132,6 +132,10 @@ def group_messages(sequence: Sequence[Message]) -> tuple[MessageGroup, ...]:
 def fit_window(
     sequence: Sequence[Message], policy: ContextPolicy, *, tool_schema_tokens: int,
     spill_flags: Sequence[bool] | None = None,
+    required_indices: frozenset[int] = frozenset(),
+    optional_system_indices: frozenset[int] = frozenset(),
+    preferred_tool_ids: frozenset[str] = frozenset(),
+    prioritize_required: bool = False,
 ) -> WindowPlan:
     if spill_flags is not None and len(spill_flags) != len(sequence):
         raise ValueError("spill_flags must match sequence length")
@@ -140,15 +144,57 @@ def fit_window(
     tail = tuple(group for group in groups if not group.is_system)
     threshold = threshold_tokens(policy)
     available = policy.window_tokens - policy.reserve_tokens - tool_schema_tokens
+    if prioritize_required:
+        available += tool_schema_tokens
     before = tool_schema_tokens + sum(group.estimated_tokens for group in groups)
     largest = max((group.estimated_tokens for group in groups), default=0)
-    if available <= 0:
+    if available <= 0 or (prioritize_required and tool_schema_tokens >= available):
         raise ContextOverflowError(before, available, largest)
 
     # Trim when either the soft threshold or the hard available budget is exceeded.
     # A request can fit the threshold yet not the window once reserve/tool schemas
     # are accounted for, so the hard budget must also trigger trimming.
-    if before <= threshold and before <= available:
+    if prioritize_required and (before > threshold or before > available):
+        required = tuple(group for group in groups if (
+            (group.is_system and group.start_index not in optional_system_indices)
+            or group.start_index in required_indices
+        ))
+        used = tool_schema_tokens + sum(group.estimated_tokens for group in required)
+        if used > available:
+            raise ContextOverflowError(used, available, max((group.estimated_tokens for group in required), default=0))
+        selected_indices = {group.start_index for group in required}
+        # Keep the latest exchange when it fits, including unclassified tool
+        # batches whose results are still needed on the next model turn.
+        latest = next((group for group in reversed(tail) if group.start_index not in selected_indices), None)
+        if latest is not None and used + latest.estimated_tokens <= available:
+            selected_indices.add(latest.start_index)
+            used += latest.estimated_tokens
+        # Optional historical evidence is already ordered by priority.
+        for group in systems:
+            if group.start_index in optional_system_indices and used + group.estimated_tokens <= available:
+                selected_indices.add(group.start_index)
+                used += group.estimated_tokens
+        for group in reversed(tail):
+            if (group.start_index not in selected_indices and used + group.estimated_tokens <= available
+                    and any(isinstance(message, ToolResultMessage) and message.tool_call_id in preferred_tool_ids
+                            for message in group.messages)):
+                selected_indices.add(group.start_index)
+                used += group.estimated_tokens
+        budget = max(1, floor(policy.window_tokens * policy.retain_ratio))
+        recent_used = (latest.estimated_tokens if latest is not None
+                       and latest.start_index in selected_indices else 0)
+        for group in reversed(tail):
+            if group.start_index in selected_indices:
+                continue
+            cost = group.estimated_tokens
+            if used + cost <= available and (recent_used == 0 or recent_used + cost <= budget):
+                selected_indices.add(group.start_index)
+                used += cost
+                recent_used += cost
+        retained = tuple(group for group in groups if group.start_index in selected_indices)
+        kept_start = next((group.start_index for group in retained if not group.is_system), len(sequence))
+        trimmed_count = len(groups) - len(retained)
+    elif before <= threshold and before <= available:
         retained = groups
         kept_start = 0
         trimmed_count = 0

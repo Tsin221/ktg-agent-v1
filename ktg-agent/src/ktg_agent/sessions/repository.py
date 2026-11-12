@@ -482,6 +482,15 @@ class SessionRepository:
             ).fetchone()
             return (_run(origin) if origin else None, tuple(_run(row) for row in rows))
 
+    def task_resume_inputs(self, owner: str, run_id: str) -> tuple[JsonObject, ...]:
+        with self._connect() as db:
+            return tuple(_read_json(row["request_json"]) for row in db.execute(
+                """SELECT request_json FROM control_commands
+                   WHERE owner_user_id=? AND run_id=? AND status='consumed'
+                   AND kind IN ('steer','follow_up') ORDER BY position""",
+                (owner, run_id),
+            ))
+
     def task_resume_messages(self, owner: str, run_id: str) -> tuple[Message, ...]:
         with self._connect() as db:
             messages = tuple(_message(row).message for row in db.execute(

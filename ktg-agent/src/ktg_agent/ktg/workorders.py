@@ -75,7 +75,11 @@ class PreviewStore:
             )""")
             # An interrupted confirmation is safe to resume because every attempt
             # reuses preview_id as MES operationId and first reads its receipt.
-            db.execute("UPDATE workorder_previews SET state='pending' WHERE state='executing'")
+            interrupted = ToolResult("Write outcome unknown.", status=ToolStatus.UNKNOWN, error_code="RESULT_UNKNOWN")
+            db.execute(
+                "UPDATE workorder_previews SET state='pending',result_json=? WHERE state='executing'",
+                (self._result_json(interrupted),),
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -185,6 +189,21 @@ class PreviewStore:
         with self._lock, self._connect() as db:
             db.execute("UPDATE workorder_previews SET state=?, result_json=? WHERE preview_id=?",
                        (state, self._result_json(result), preview_id))
+
+    def confirmation_status(self, preview_id: str, user_key: str) -> str:
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT state, result_json, expires_at FROM workorder_previews WHERE preview_id=? AND user_key=?",
+                (preview_id, user_key),
+            ).fetchone()
+        if row is None:
+            return "confirmation_status_unknown"
+        result = self._result(row["result_json"])
+        if result is not None:
+            return "outcome_unknown" if result.status is ToolStatus.UNKNOWN else result.status.value
+        if row["state"] == "executing":
+            return "outcome_unknown"
+        return "expired" if row["expires_at"] <= time() else "awaiting_confirmation"
 
     def action_for(self, *, preview_id: str, user_key: str) -> str:
         with self._lock, self._connect() as db:

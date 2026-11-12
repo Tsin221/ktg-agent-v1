@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from time import time
+from typing import cast
 from uuid import uuid4
 
 from ktg_agent.core.events import EventPublisher, EventSink
@@ -13,7 +15,6 @@ from ktg_agent.context.spill import SpillAfterHook, SpillSettings
 from ktg_agent.context.window import ContextPolicy
 from ktg_agent.context.compaction import PreparedCompaction, prepare_compaction
 from ktg_agent.context.tokens import estimate_tools_tokens
-from collections.abc import Callable
 from ktg_agent.core.messages import (
     JsonObject,
     JsonValue,
@@ -475,6 +476,22 @@ class QueryService:
         session_tools, task_context, task_budget = (
             task_configuration(run_id, identity) if task_configuration else ((), "", None)
         )
+        if task_budget is not None:
+            user_key = self._identity_key(identity)
+
+            def operation_status(tool: str, operation_id: str) -> str:
+                if tool in {"ktg_preview_create_workorder_draft", "ktg_preview_edit_workorder_draft"}:
+                    return self._preview_store.confirmation_status(operation_id, user_key)
+                row = self._inventory_store.get(operation_id, user_key) if self._inventory_store else None
+                if row is None:
+                    return "confirmation_status_unknown"
+                if row["state"] == "prepared":
+                    return "expired" if cast(float, row["expires_at"]) <= time() else "awaiting_confirmation"
+                cached = row.get("result_json")
+                outcome = json.loads(cached).get("outcome") if isinstance(cached, str) else None
+                return str(outcome) if outcome in ("succeeded", "failed") else "outcome_unknown"
+
+            task_budget.operation_status = operation_status
         discovery, registry, runner = self._run_discovery(
             candidate, client, identity, page_context, session_tools)
         loop = AgentLoop(

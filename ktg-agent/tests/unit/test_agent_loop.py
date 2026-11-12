@@ -359,7 +359,8 @@ def test_task_step_exhaustion_checkpoints_once_before_dispatch(tmp_path: Path) -
     assert "update_task" not in replan_instructions(provider, 1)
     instructions = replan_instructions(provider, 2)
     assert "勿用新步骤 ID" in instructions
-    assert '"version": 3' in instructions
+    assert instructions.count('"version": 3') == 1
+    assert replan_instructions(provider, 0).count('"version": 3') == 1
     assert '"current_step_id": "first"' in instructions
     assert '"step_work_calls_remaining": 0' in instructions
     assert '"total_work_calls_remaining": 1' in instructions
