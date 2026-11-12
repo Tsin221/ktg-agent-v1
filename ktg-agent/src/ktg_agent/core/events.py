@@ -29,6 +29,7 @@ class AgentEventType(StrEnum):
     COMPACTION_SUMMARY = "compaction_summary"
     COMPACTION_FAILED = "compaction_failed"
     CONTEXT_OVERFLOW = "context_overflow"
+    TASK_REPLAN_CHECKPOINT = "task_replan_checkpoint"
 
 
 def _integer(payload: JsonObject, key: str, *, positive: bool = False) -> None:

@@ -61,6 +61,21 @@ _REPLAN_GUIDANCE = (
     "按真实进度标记状态。使用剩余额度，遵守工具权限和写入确认规则。"
     "结果不确定的写入先核对实际状态，不能核对时向用户说明阻塞并请求必要信息，勿盲目重试。"
 )
+_REPLAN_REASON_TEXT = {
+    "steer": (
+        "用户在执行中补充了指示。先判断是否改变目标、范围或步骤；"
+        "仅修正工具参数时可直接继续原步骤。"
+    ),
+    "step_quota": (
+        "当前步骤的业务调用额度已用完。保留未完成进度，调整可执行的剩余步骤，"
+        "或说明阻塞。勿用新步骤 ID 重试同一项工作。"
+    ),
+    "unknown_outcome": "业务工具结果不确定，需先核对实际状态。",
+    "repeated_tool_failure": (
+        "当前步骤中的同一业务工具调用已重复失败。根据工具反馈更换可行办法，"
+        "或保留未完成进度并向用户说明阻塞。"
+    ),
+}
 
 
 class AgentLoopError(RuntimeError):
@@ -241,6 +256,7 @@ class AgentLoop:
         task_budget = self._task_budget
         usage_accumulator = _UsageAccumulator()
         replan_reasons: list[str] = []
+        replan_task: tuple[str, str | None, int | None] | None = None
         step_limit_notified: set[tuple[str, str]] = set()
         previous_errors: dict[tuple[tuple[str, str], str, str], str | None] = {}
         failure_notified: set[tuple[tuple[tuple[str, str], str, str], str]] = set()
@@ -295,10 +311,10 @@ class AgentLoop:
                     if steering:
                         history.extend(item.message for item in steering)
                         input_queue.mark_consumed(steering)
-                        replan_reasons.append(
-                            "用户在执行中补充了指示。先判断是否改变目标、范围或步骤；"
-                            "仅修正工具参数时可直接继续原步骤。"
-                        )
+                        replan_reasons.append("steer")
+                        if replan_task is None:
+                            step, _ = task_budget.step_quota(self._limits.max_tool_calls)
+                            replan_task = (task_budget.task_id, step[1] if step else None, task_budget.version)
                 turn += 1
                 response = await self._run_model_turn(
                     publisher=publisher,
@@ -308,9 +324,11 @@ class AgentLoop:
                     usage_accumulator=usage_accumulator,
                     started_at=started_at,
                     closeout_turn=task_budget.closeout_turns if task_budget else 0,
-                    replan_reasons=tuple(replan_reasons),
+                    replan_reasons=tuple(dict.fromkeys(replan_reasons)),
+                    replan_task=replan_task,
                 )
                 replan_reasons.clear()
+                replan_task = None
 
                 if response.message is not None:
                     history.append(response.message)
@@ -364,6 +382,7 @@ class AgentLoop:
                     )
                     remaining = self._limits.max_tool_calls - tool_calls_started
                     step = task_budget.step_quota(self._limits.max_tool_calls)[0] if task_budget else None
+                    step_version = task_budget.version if task_budget else None
                     steer_before_batch = (
                         not time_exhausted
                         and input_queue is not None and input_queue.has_steering
@@ -401,10 +420,7 @@ class AgentLoop:
                     if task_budget and step is not None and not task_budget.closeout_turns:
                         if "TASK_STEP_LIMIT" in rejected.values() and step not in step_limit_notified:
                             step_limit_notified.add(step)
-                            replan_reasons.append(
-                                "当前步骤的业务调用额度已用完。保留未完成进度，调整可执行的剩余步骤，"
-                                "或说明阻塞。勿用新步骤 ID 重试同一项工作。"
-                            )
+                            replan_reasons.append("step_quota")
                         errors_in_batch: dict[tuple[tuple[str, str], str, str], str | None] = {}
                         for call, result in zip(runnable_calls, results, strict=True):
                             if call.name in TASK_TOOLS or call.name in DIRECTORY_TOOLS:
@@ -422,12 +438,13 @@ class AgentLoop:
                             ):
                                 failure_notified.add(failure)
                                 replan_reasons.append(
-                                    "业务工具结果不确定，需先核对实际状态。"
+                                    "unknown_outcome"
                                     if result.status is ToolStatus.UNKNOWN else
-                                    "当前步骤中的同一业务工具调用已重复失败。根据工具反馈更换可行办法，"
-                                    "或保留未完成进度并向用户说明阻塞。"
+                                    "repeated_tool_failure"
                                 )
                         previous_errors.update(errors_in_batch)
+                        if replan_reasons:
+                            replan_task = (*step, step_version)
                     for call in calls:
                         rejection = rejected.get(call.id)
                         result = (self._task_budget_tool_result(rejection) if rejection
@@ -1016,6 +1033,7 @@ class AgentLoop:
         started_at: float,
         closeout_turn: int = 0,
         replan_reasons: tuple[str, ...] = (),
+        replan_task: tuple[str, str | None, int | None] | None = None,
     ) -> FinalResponse:
         from ktg_agent.context.tokens import estimate_tools_tokens
         from ktg_agent.context.window import ContextOverflowError, fit_window
@@ -1053,7 +1071,8 @@ class AgentLoop:
                         "同一步可按需分页。完成后保存状态并推进到下一步，未完成的步骤保留原状。"
                     )
         if replan_reasons and not closeout_turn:
-            instruction += "\n" + " ".join(dict.fromkeys(replan_reasons)) + _REPLAN_GUIDANCE
+            reasons_text = " ".join(_REPLAN_REASON_TEXT[reason] for reason in replan_reasons)
+            instruction += "\n" + reasons_text + _REPLAN_GUIDANCE
             if self._task_budget is not None:
                 budget = self._task_budget
                 step, quota = budget.step_quota(self._limits.max_tool_calls)
@@ -1160,6 +1179,19 @@ class AgentLoop:
 
         try:
             remaining_run_seconds = self._limits.max_run_seconds - (self._clock() - started_at)
+            if remaining_run_seconds > 0 and replan_task is not None and not closeout_turn:
+                task_id, step_id, version = replan_task
+                if self._task_budget is not None and self._task_budget.task_id == task_id:
+                    version = self._task_budget.version
+                await publisher.emit(AgentEventType.TASK_REPLAN_CHECKPOINT, {
+                    "task_id": task_id,
+                    "version": version,
+                    "step_id": step_id,
+                    "reasons": list(replan_reasons),
+                    "turn": turn,
+                    "call_id": call_id,
+                })
+                remaining_run_seconds = self._limits.max_run_seconds - (self._clock() - started_at)
             if remaining_run_seconds <= 0:
                 response = FinalResponse(None, StopReason.LIMIT)
                 await settle_request(StopReason.LIMIT.value)

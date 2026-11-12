@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ktg_agent.core.events import AgentEvent, AgentEventType, ToolProgressPublisher
+from ktg_agent.core.events import AgentEvent, AgentEventType, EventPublisher, ToolProgressPublisher
 from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
 from ktg_agent.core.queues import InputQueue, InputMode
 from ktg_agent.core.task_budget import TaskBudget
@@ -23,7 +24,9 @@ from ktg_agent.core.messages import (
 from ktg_agent.providers.base import (
     FinalResponse,
     ModelConfig,
+    ModelEvent,
     ProviderError,
+    ProviderRequest,
     RequestStarted,
     ResponseCompleted,
     TextDelta,
@@ -32,6 +35,7 @@ from ktg_agent.providers.base import (
     UsageReported,
 )
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
+from ktg_agent.sessions import SessionRepository
 from ktg_agent.tools import (
     ExecutionMode,
     ToolContext,
@@ -309,9 +313,27 @@ def replan_instructions(provider: FakeProvider, index: int) -> str:
     )
 
 
-def test_task_step_exhaustion_prompts_replan_once_with_shared_budget_remaining() -> None:
+def test_task_step_exhaustion_checkpoints_once_before_dispatch(tmp_path: Path) -> None:
+    repo = SessionRepository(tmp_path / "session.sqlite3")
+    session = repo.create_session("alice")
+    session_run = repo.create_run("alice", session.id, "one", "one", {})
+    expected = {
+        "task_id": "task", "version": 3, "step_id": "first",
+        "reasons": ["step_quota"], "turn": 3,
+        "call_id": f"{session_run.id}:model:3",
+    }
+
+    def checkpoints() -> list[JsonObject]:
+        return [event.payload for event in repo.list_events("alice", session_run.id).items
+                if event.type == "task_replan_checkpoint"]
+
+    class CheckingProvider(FakeProvider):
+        def stream(self, request: ProviderRequest) -> AsyncIterator[ModelEvent]:
+            assert checkpoints() == ([expected] if len(self.requests) >= 2 else [])
+            return super().stream(request)
+
     calls = [ToolCall(f"call-{i}", "test.lookup", {"value": i}) for i in range(3)]
-    provider = FakeProvider((
+    provider = CheckingProvider((
         *(ScriptedTurn((ResponseCompleted(response(call, stop_reason=StopReason.TOOL_CALL)),)) for call in calls),
         ScriptedTurn((ResponseCompleted(response(TextBlock("done"))),)),
     ))
@@ -322,7 +344,16 @@ def test_task_step_exhaustion_prompts_replan_once_with_shared_budget_remaining()
         {"step_id": "next", "status": "pending", "description": "Remaining work"},
     ], version=3)
     tool = RecordingTool()
-    run(make_loop(provider, tool, task_budget=budget, limits=RunLimits(max_tool_calls=2)))
+    loop = make_loop(provider, tool, task_budget=budget, limits=RunLimits(max_tool_calls=2))
+
+    def persist(event: AgentEvent) -> None:
+        repo.append_event("alice", session_run.id, event.seq, event.type.value, event.payload)
+
+    asyncio.run(loop.run(
+        run_id=session_run.id, messages=(UserMessage((TextBlock("start"),)),),
+        publisher=EventPublisher(session_run.id, persist),
+    ))
+    assert checkpoints() == [expected]
     assert tool.values == [0]
     assert budget.work_calls == 1
     assert "update_task" not in replan_instructions(provider, 1)
@@ -344,8 +375,10 @@ def test_task_repeated_final_tool_failure_prompts_replan_once() -> None:
     ))
     budget = TaskBudget(task_id="task", steps=(("step", "in_progress"),))
     tool = RecordingTool(error=TimeoutError())
-    run(make_loop(provider, tool, task_budget=budget))
+    result = run(make_loop(provider, tool, task_budget=budget))
     assert tool.values == [7, 8, 7, 7]
+    assert [event.payload["reasons"] for event in result.events
+            if event.type is AgentEventType.TASK_REPLAN_CHECKPOINT] == [["repeated_tool_failure"]]
     assert "update_task" not in replan_instructions(provider, 1)
     assert "update_task" not in replan_instructions(provider, 2)
     assert "已重复失败" in replan_instructions(provider, 3)
