@@ -197,9 +197,13 @@ export function visibleInputs(inputs, messages, runId) {
 }
 
 export function inputStatusText(input) {
-  if (input.status === 'queued') return '已排队，等待本轮处理'
+  if (input.status === 'queued') return input.mode === 'follow_up'
+    ? '已排队，等待当前工作收尾'
+    : '已排队，等待下一步'
   if (input.status === 'consumed') return '已进入本轮上下文'
-  if (input.status === 'not_consumed') return '本轮未消费，可主动作为新问题发送'
+  if (input.status === 'not_consumed') return input.reason === 'limit'
+    ? '本轮执行额度已用完，可作为新问题发送'
+    : '本轮未消费，可主动作为新问题发送'
   if (input.status === 'rejected') return '本轮拒绝输入，可主动作为新问题发送'
   if (input.status === 'conflict') return '请求 ID 与已提交内容冲突'
   return '回执未确认，请查询或用同一请求重试'

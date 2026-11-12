@@ -261,7 +261,10 @@ def test_step_budget_reallocates_unused_calls_after_saving_progress() -> None:
     RunLimits(max_model_turns=8, max_tool_calls=12),
     RunLimits(max_model_turns=8, max_tool_calls=2),
 ])
-def test_task_can_save_and_answer_after_work_budget_runs_out(tmp_path: Path, limits: RunLimits) -> None:
+@pytest.mark.parametrize("finished", [True, False])
+def test_task_can_save_and_answer_after_work_budget_runs_out(
+    tmp_path: Path, limits: RunLimits, finished: bool,
+) -> None:
     repo, session, previous = setup_run(tmp_path / "closeout.sqlite")
     task_id = repo.save_task("id:1", session, previous, [step(status="in_progress")], title="Stock")["task_id"]
     assert isinstance(task_id, str)
@@ -280,7 +283,8 @@ def test_task_can_save_and_answer_after_work_budget_runs_out(tmp_path: Path, lim
     provider = FakeProvider((
         *(tool_turn(call) for call in work_calls),
         tool_turn(ToolCall("save", "update_task", {
-            "task_id": task_id, "expected_version": 1, "steps": [step(status="completed")],
+            "task_id": task_id, "expected_version": 1,
+            "steps": [step(status="completed" if finished else "in_progress")],
         }), ToolCall("blocked", "search_tools", {"query": "extra"})),
         ScriptedTurn((ResponseCompleted(FinalResponse(
             AssistantMessage((TextBlock("Saved and summarized"),)), StopReason.COMPLETED,
@@ -295,7 +299,10 @@ def test_task_can_save_and_answer_after_work_budget_runs_out(tmp_path: Path, lim
         run_id=run.id, message="继续", history=(), authorization="authorization",
         event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
     ))
-    assert result.stop_reason is StopReason.COMPLETED
+    assert result.stop_reason is (StopReason.COMPLETED if finished else StopReason.LIMIT)
+    expected_limit = "max_tool_calls" if work_turns < limits.max_model_turns else "max_model_turns"
+    assert result.limit_reason == (None if finished else expected_limit)
+    assert result.final_message == AssistantMessage((TextBlock("Saved and summarized"),))
     assert [tool.name for tool in provider.requests[work_turns].tools] == ["update_task"]
     assert provider.requests[work_turns + 1].tools == ()
     assert repo.get_task("id:1", session, task_id)["current_version"] == 2

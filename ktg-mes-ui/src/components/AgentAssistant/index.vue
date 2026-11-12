@@ -188,6 +188,9 @@
             </div>
           </div>
         </div>
+        <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
+          <div class="agent-message">{{ pendingQuestion }}</div>
+        </div>
         <div v-for="input in displayedInputs" :key="input.request_id" class="agent-entry agent-entry--user">
           <div class="agent-message">{{ input.message }}</div>
           <div class="agent-input-status">
@@ -195,9 +198,6 @@
             <button v-if="['not_consumed', 'rejected'].includes(input.status)" type="button" :disabled="composerBusy || canInput" @click="resendInput(input)">作为新问题发送</button>
             <button v-if="input.status === 'unconfirmed'" type="button" @click="retryInput">用同一请求重试</button>
           </div>
-        </div>
-        <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
-          <div class="agent-message">{{ pendingQuestion }}</div>
         </div>
         <div v-if="progress.messages.length || Object.keys(progress.tools).length" class="agent-progress" aria-label="本轮临时进度">
           <div v-for="message in progress.messages" :key="message.id">
@@ -260,7 +260,7 @@
           <span>{{ canInput ? '提交' : '发送' }}</span>
         </button>
       </form>
-      <p v-if="canInput" class="agent-panel__hint">{{ inputMode === 'steer' ? '当前工具批次结束后生效。' : '当前工作准备结束时生效。' }}输入不会撤销已执行的操作。</p>
+      <p v-if="canInput" class="agent-panel__hint">{{ inputMode === 'steer' ? '下一个可执行的步骤会考虑你的新指示。' : '当前工作准备结束且仍有执行额度时处理。' }}输入不会撤销已执行的操作。</p>
     </section>
   </div>
 </template>

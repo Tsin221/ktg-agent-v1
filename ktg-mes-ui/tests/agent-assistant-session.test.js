@@ -79,6 +79,8 @@ for (const [reason, phrase] of Object.entries({
   max_tool_calls: '工具启动次数', cancelled: '用户取消', USAGE_PERSISTENCE_FAILED: '用量记录失败'
 })) assert.match(runStatusText({ status: 'failed', stop_reason: reason }), new RegExp(phrase))
 assert.strictEqual(inputStatusText({ status: 'not_consumed' }), '本轮未消费，可主动作为新问题发送')
+assert.strictEqual(inputStatusText({ status: 'not_consumed', reason: 'limit' }), '本轮执行额度已用完，可作为新问题发送')
+assert.strictEqual(inputStatusText({ status: 'queued', mode: 'follow_up' }), '已排队，等待当前工作收尾')
 assert.deepStrictEqual(visibleInputs([
   { request_id: 'i1', status: 'consumed', message: '查库存' },
   { request_id: 'i2', status: 'not_consumed', message: '继续' }

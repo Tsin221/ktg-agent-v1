@@ -254,6 +254,7 @@ class AgentLoop:
         turn = 0
         tool_calls_started = 0
         task_budget = self._task_budget
+        closeout_limit: str | None = None
         usage_accumulator = _UsageAccumulator()
         replan_reasons: list[str] = []
         replan_task: tuple[str, str | None, int | None] | None = None
@@ -285,6 +286,8 @@ class AgentLoop:
                     if usage_limit is not None:
                         limit_reason = usage_limit
                     elif task_budget.closeout_turns < TASK_CLOSEOUT_TURNS:
+                        if closeout_limit is None:
+                            closeout_limit = limit_reason
                         task_budget.closeout_turns += 1
                         limit_reason = None
                 if limit_reason == "MODEL_USAGE_UNAVAILABLE":
@@ -587,6 +590,17 @@ class AgentLoop:
                             continue
                 if close_inputs is not None:
                     close_inputs()
+                if (
+                    closeout_limit is not None
+                    and response.stop_reason is StopReason.COMPLETED
+                    and task_budget is not None
+                    and any(status != "completed" for _, status in task_budget.steps)
+                ):
+                    return await self._limited_result(
+                        publisher=publisher, history=history, baseline=baseline,
+                        reason=closeout_limit, turns=turn, tool_calls=tool_calls_started,
+                        usage_accumulator=usage_accumulator, message=response.message,
+                    )
                 agent_status = self._agent_status(response.stop_reason)
                 await self._emit_agent_end_once(
                     publisher,

@@ -57,8 +57,8 @@ class Settings:
     enable_production_issue: bool = False
     enable_workorder_progress: bool = False
     max_total_tokens: int | None = None
-    max_tool_calls: int = 12
-    max_model_turns: int = 8
+    max_tool_calls: int = 24
+    max_model_turns: int = 16
     context_window: int | None = None
     context_reserve_tokens: int | None = None
     context_threshold_ratio: float = 0.8
@@ -195,8 +195,8 @@ class Settings:
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
             enable_workorder_progress=os.environ.get("AGENT_ENABLE_WORKORDER_PROGRESS", "false").lower() == "true",
             max_total_tokens=max_total_tokens,
-            max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 12) or 12,
-            max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 8) or 8,
+            max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 24) or 24,
+            max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 16) or 16,
             max_output_tokens=positive_integer("AGENT_MAX_OUTPUT_TOKENS", 1024) or 1024,
             context_window=context_window,
             context_reserve_tokens=context_reserve_tokens,
