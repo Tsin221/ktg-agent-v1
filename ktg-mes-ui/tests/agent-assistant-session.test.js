@@ -8,7 +8,8 @@ const transformed = transformFileSync(filename, { babelrc: false, configFile: fa
 const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
-  visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText } = moduleRef.exports
+  visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText,
+  queryCardPresentation, toolProgressText } = moduleRef.exports
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'
@@ -40,6 +41,77 @@ const followUpHistory = presentMessages([
 assert.deepStrictEqual(followUpHistory.map(item => item.text), ['第一问', '第一答', '追问', '第二答'])
 assert.strictEqual(followUpHistory[3].sourceText, '追问')
 
+let messageId = 10
+const message = (runId, role, content, fields = {}) => ({
+  message_id: ++messageId, run_id: runId, role, content, ...fields
+})
+const chat = (runId, role, text) => message(runId, role, [{ type: 'text', text }])
+const query = (runId, name, args, details, error = '') => {
+  const id = 'call-' + messageId
+  return [message(runId, 'assistant', [{ type: 'tool_call', id, name, arguments: args }]),
+    message(runId, 'tool', error ? [{ type: 'text', text: error }] : [], {
+      tool_call_id: id, details, is_error: !!error
+    })]
+}
+const orderA = { workorderId: 12, workorderCode: 'WO-A', productCode: 'A-01' }
+const orderB = { workorderId: 31, workorderCode: 'WO-B', productCode: 'A-01' }
+const orderC = { workorderId: 38, workorderCode: 'WO-C', productCode: 'B-01' }
+const orders = { kind: 'workorders', page: 1, page_size: 5, rows: [orderA, orderB, orderC] }
+const orderDetail = { kind: 'workorder', id: 12, data: orderA, queried_at: '2026-11-14T01:00:00Z' }
+const multi = [chat('long', 'user', '核对三张工单'),
+  ...query('long', 'ktg_list_workorders', { page: 1, page_size: 5 }, orders),
+  ...query('long', 'ktg_list_workorders', { page: 1, page_size: 20 }, { ...orders, page_size: 20 }),
+  ...query('long', 'ktg_list_workorders', { workorder_code: 'WO', page: 1, page_size: 5 }, orders),
+  ...query('long', 'ktg_pro_workorder_get', { workorder_id: 12 }, orderDetail),
+  ...query('long', 'ktg_pro_workorder_get', { workorder_id: 12 }, { ...orderDetail, queried_at: '2026-11-14T02:00:00Z' }),
+  ...query('long', 'ktg_pro_workorder_get', { workorder_id: 31 }, { kind: 'workorder', id: 31, data: orderB }),
+  ...query('long', 'ktg_pro_workorder_get', { workorder_id: 38 }, { kind: 'workorder', id: 38, data: orderC }),
+  ...query('long', 'ktg_pro_task_list', { workorder_id: 12 }, { kind: 'protask', rows: [], total: 0 }),
+  ...query('long', 'ktg_pro_feedback_list', { workorder_id: 12 }, null, '读取超时'),
+  ...query('long', 'ktg_query_stock_summary', { item_code: 'A-01' }, { kind: 'stock_summary', groups: [] }),
+  ...query('long', 'ktg_query_stock', { item_code: 'B-01' }, { kind: 'stock', rows: [{ itemCode: 'B-01', quantityOnhand: 0 }] }),
+  ...query('long', 'preview', {}, { kind: 'workorder_draft_preview' }),
+  chat('long', 'assistant', '已汇总三张工单。WO-A 的报工待核实。')]
+const detailEntries = queryCardPresentation(presentMessages(multi)).filter(entry => entry.queryDetails)
+assert.strictEqual(detailEntries.length, 1)
+const multiResult = detailEntries[0]
+assert.match(multiResult.text, /报工待核实/)
+assert.deepStrictEqual(multiResult.results.map(result => result.kind), ['workorder_draft_preview'])
+const groups = Object.fromEntries(multiResult.queryDetails.groups.map(group => [group.title, group.queries]))
+assert.strictEqual(multiResult.queryDetails.count, 11)
+assert.strictEqual(multiResult.queryDetails.failed, 1)
+assert.strictEqual(groups['通用查询'].length, 3)
+assert.deepStrictEqual(groups['WO-A'][0].attempts.map(item => item.time), [orderDetail.queried_at, '2026-11-14T02:00:00Z'])
+assert.strictEqual(groups['WO-A'][2].attempts[0].error, '读取超时')
+assert.strictEqual(groups['产品 A-01'][0].attempts[0].result.kind, 'stock_summary')
+assert.strictEqual(groups['WO-C'][1].attempts[0].result.kind, 'stock')
+
+const single = [chat('single', 'user', '查 WO-A'),
+  ...query('single', 'ktg_pro_workorder_get', { workorder_id: 12 }, orderDetail), chat('single', 'assistant', '工单 WO-A')]
+assert.strictEqual(queryCardPresentation(presentMessages(single))[1].results[0].kind, 'workorder')
+const resumed = [...multi, chat('resume', 'user', '继续此任务'),
+  ...query('resume', 'update_task', {}, { task_id: 'task-a', version: 2 }),
+  ...query('resume', 'ktg_pro_workorder_get', { workorder_id: 12 }, orderDetail), chat('resume', 'assistant', '续办完成')]
+const restored = queryCardPresentation(presentMessages(JSON.parse(JSON.stringify(resumed))))
+assert.deepStrictEqual(restored.filter(entry => entry.queryDetails).map(entry => [entry.runId, entry.queryDetails.count]), [['long', 11], ['resume', 1]])
+const legacy = [message('old', 'tool', [], { details: orders }), message('old', 'tool', [], { details: orders })]
+assert.strictEqual(queryCardPresentation(presentMessages(legacy))[0].queryDetails.groups[0].queries.length, 2)
+const changed = [...query('changed', 'ktg_pro_workorder_get', { workorder_id: 12 }, orderDetail),
+  ...query('changed', 'ktg_pro_workorder_get', { workorder_id: 12 }, { ...orderDetail, data: { ...orderA, quantity: 5 } })]
+assert.strictEqual(queryCardPresentation(presentMessages(changed))[0].queryDetails.groups[0].queries.length, 2)
+const resumeHistory = [
+  ...query('task-start', 'create_task', {}, { task_id: 'tracked', version: 1 }),
+  ...query('task-start', 'ktg_pro_workorder_get', { workorder_id: 12 }, orderDetail),
+  ...query('different-task', 'create_task', {}, { task_id: 'other', version: 1 }),
+  ...query('different-task', 'ktg_pro_workorder_get', { workorder_id: 31 }, { kind: 'workorder', data: orderB }),
+  ...query('task-resume', 'ktg_query_stock_summary', { item_code: 'A-01' }, { kind: 'stock_summary', groups: [] }),
+  ...query('task-resume', 'update_task', {}, { task_id: 'tracked', version: 2 }),
+  chat('task-resume', 'assistant', '已补查 WO-A 的库存')
+]
+const resumedDetails = queryCardPresentation(presentMessages(resumeHistory)).at(-1).queryDetails
+assert.deepStrictEqual(resumedDetails.groups.map(group => group.title), ['WO-A'])
+assert.strictEqual(resumedDetails.count, 1)
+
 let progress = { messages: [], tools: {} }
 progress = progressFromEvent(progress, { type: 'message_start', payload: { message_id: 'm1', role: 'assistant' } })
 progress = progressFromEvent(progress, { type: 'message_update', payload: { message_id: 'm1', delta_type: 'text', text: '正在' } })
@@ -54,6 +126,9 @@ progress = progressFromEvent(progress, { type: 'tool_execution_end', payload: { 
 assert.deepStrictEqual(progress.messages.map(message => message.text), ['正在查', '再查'])
 assert.strictEqual(progress.messages[1].status, 'incomplete')
 assert.strictEqual(progress.tools.t1.status, 'succeeded')
+assert.strictEqual(toolProgressText({ a: { name: 'ktg_pro_workorder_get', status: 'running' },
+  b: { name: 'ktg_query_stock', status: 'running' } }), '正在查询工单详情 · 另有 1 项正在执行')
+assert.strictEqual(toolProgressText({ a: progress.tools.t1 }), '已执行 1 项操作')
 assert.strictEqual(isTerminalRun('running'), false)
 assert.strictEqual(isTerminalRun('completed'), true)
 assert.strictEqual(runStatusText({ status: 'needs_reconciliation' }), '业务结果待核验；请查询对应操作回执。')

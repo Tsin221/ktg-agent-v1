@@ -78,10 +78,35 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="attr3 != null "> and attr3 = #{attr3}</if>
             <if test="attr4 != null "> and attr4 = #{attr4}</if>
              and quantity_onhand != 0
-             order by recpt_date asc
         </where>
+        order by recpt_date asc, material_stock_id asc
     </select>
     
+    <resultMap id="WmStockSummaryGroupResult" type="com.ktg.mes.wm.domain.WmStockSummaryGroup">
+        <constructor>
+            <arg column="item_id" javaType="java.lang.Long"/>
+            <arg column="item_code" javaType="java.lang.String"/>
+            <arg column="warehouse_id" javaType="java.lang.Long"/>
+            <arg column="warehouse_code" javaType="java.lang.String"/>
+            <arg column="warehouse_name" javaType="java.lang.String"/>
+            <arg column="unit_of_measure" javaType="java.lang.String"/>
+            <arg column="quantity_onhand" javaType="java.math.BigDecimal"/>
+            <arg column="source_row_count" javaType="java.lang.Long"/>
+        </constructor>
+    </resultMap>
+
+    <select id="selectStockSummary" resultMap="WmStockSummaryGroupResult">
+        select item_id, min(item_code) as item_code, warehouse_id,
+               min(warehouse_code) as warehouse_code, min(warehouse_name) as warehouse_name,
+               min(unit_of_measure) as unit_of_measure,
+               sum(quantity_onhand) as quantity_onhand, count(*) as source_row_count
+        from wm_material_stock
+        where item_code = #{itemCode} and quantity_onhand != 0
+        <if test="warehouseId != null">and warehouse_id = #{warehouseId}</if>
+        group by item_id, warehouse_id, binary trim(unit_of_measure)
+        order by item_id, warehouse_id, binary trim(unit_of_measure)
+    </select>
+
     <select id="selectWmMaterialStockByMaterialStockId" parameterType="Long" resultMap="WmMaterialStockResult">
         <include refid="selectWmMaterialStockVo"/>
         where material_stock_id = #{materialStockId}

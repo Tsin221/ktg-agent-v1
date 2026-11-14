@@ -16,6 +16,7 @@ _DOMAINS = {
     "ktg_count_products": ("md", "items"),
     "ktg_search_items": ("md", "items"),
     "ktg_query_stock": ("wm", "stock"),
+    "ktg_query_stock_summary": ("wm", "stock"),
     "ktg_list_workorders": ("pro", "workorder"),
     "ktg_preview_create_workorder_draft": ("pro", "workorder"),
     "ktg_preview_edit_workorder_draft": ("pro", "workorder"),
@@ -103,7 +104,7 @@ def _reviewed_policy(definition: ToolDefinition) -> PermissionPolicy:
     name = definition.name
     if name in {"ktg_count_products", "ktg_search_items"}:
         return PermissionLeaf("mes:md:mditem:list")
-    if name == "ktg_query_stock":
+    if name in {"ktg_query_stock", "ktg_query_stock_summary"}:
         return PermissionLeaf("mes:wm:wmstock:list")
     if name == "ktg_list_workorders":
         return PermissionLeaf("mes:pro:workorder:list")

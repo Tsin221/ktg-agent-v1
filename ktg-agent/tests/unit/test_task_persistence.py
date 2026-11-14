@@ -386,10 +386,10 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
     assert system.count('"current_step_id": "next"') == 1
     assert system.count('"version": 2') == 1
     assert system.index('"tool_call_id": "stock"') < system.index('"tool_call_id": "early"')
-    assert '"quantityOnhand": 0' in system
-    assert '"page_verified": true' in system and '"covered_rows": [1, 20]' in system
+    assert '"quantityOnhand": 0' not in system
+    assert '"stock_usage": "historical_only"' in system
     assert '"page_count": 3' in system and '"page_size": 20' in system
-    assert '"details_omitted": false' in system
+    assert '"covered_rows"' not in system
     assert '"coverage": "partial"' in system
     assert UserMessage((TextBlock("Resume current workorder"),)) in messages
     assert not any(isinstance(m, ToolResultMessage) and m.tool_call_id == "unrelated" for m in messages)
@@ -495,3 +495,117 @@ def test_workorder_resume_confirmation_status_is_read_only_and_owner_bound() -> 
     store.begin(preview_id=awaiting, user_key="id:1", action="create")
     store.finish(awaiting, ToolResult("Saved"))
     assert store.confirmation_status(awaiting, "id:1") == "succeeded"
+
+
+@pytest.mark.parametrize(("status", "queried_code", "warehouse_id", "save_allowed", "old_completed"), [
+    ("succeeded", "A-01", None, True, False),
+    ("failed", "A-01", None, False, False),
+    ("succeeded", "OTHER", None, False, False),
+    ("succeeded", "A-01", 1, False, False),
+    ("not_started", "A-01", None, False, False),
+    ("not_started", "A-01", None, True, True),
+])
+def test_legacy_summary_step_requires_fresh_matching_evidence(
+    tmp_path: Path, status: str, queried_code: str, warehouse_id: int | None, save_allowed: bool,
+    old_completed: bool,
+) -> None:
+    repo = SessionRepository(tmp_path / "legacy-stock.sqlite")
+    session = repo.create_session("id:1").id
+    original = repo.create_run("id:1", session, "start", "digest", {"message": "核对工单的分仓库存"}).id
+    repo.update_run_status("id:1", original, "running")
+    step_status = "completed" if old_completed else "in_progress"
+    task_id = repo.save_task("id:1", session, original, [step(status=step_status)], title="Order")["task_id"]
+    assert isinstance(task_id, str)
+    old_call = ToolCall("old", "ktg_query_stock", {"item_code": "A-01"})
+    repo.append_message("id:1", original, AssistantMessage((old_call,)))
+    repo.append_message("id:1", original, ToolResultMessage(
+        old_call.id, (TextBlock("old quantity"),),
+        details={"page": 1, "page_size": 10, "total": 49,
+                 "rows": [{"itemCode": "A-01", "quantityOnhand": 208}] * 10},
+    ))
+    repo.append_event("id:1", original, 1, "tool_execution_start", {
+        "tool_call_id": old_call.id, "task_id": task_id, "step_id": "stable",
+    })
+    repo.update_run_status("id:1", original, "cancelled")
+    resumed = repo.create_run("id:1", session, "resume", "digest", {"task_id": task_id, "message": "沿用已经核对过的结果"}).id
+    repo.update_run_status("id:1", resumed, "running")
+
+    tools, _, budget = task_run_configuration(repo, resumed, {"userId": 1})
+    assert budget.evidence is not None
+    save = next(tool for tool in tools if tool.name == "update_task")
+    arguments: JsonObject = {"item_code": queried_code}
+    if warehouse_id is not None:
+        arguments["warehouse_id"] = warehouse_id
+    call = ToolCall("fresh", "ktg_query_stock_summary", arguments)
+    data: JsonObject = {
+        "kind": "stock_summary", "filters": {"item_code": queried_code, "warehouse_id": warehouse_id},
+        "queried_at": "2026-11-14T00:00:00Z", "no_records": True, "groups": [],
+    }
+    messages = (
+        AssistantMessage((call,)),
+        ToolResultMessage(call.id, (TextBlock(status),), is_error=status != "succeeded", details=data),
+    )
+    events = (
+        AgentEvent(resumed, 1, AgentEventType.TOOL_EXECUTION_START, {
+            "tool_call_id": call.id, "task_id": task_id, "step_id": "stable",
+        }),
+        AgentEvent(resumed, 2, AgentEventType.TOOL_EXECUTION_END, {"tool_call_id": call.id, "status": status}),
+    )
+    completed = frozenset({"stable"} if old_completed else ())
+    preferred, fallback = budget.evidence(task_id, messages, events, None if old_completed else "stable", completed)
+    old = next(record for record in (*preferred, *fallback) if record["tool_call_id"] == old_call.id)
+    assert old["stock_usage"] == ("new_summary_required_for_reporting" if old_completed else "historical_only")
+    assert "evidence" not in old
+    assert "result" not in old
+    async def execute() -> ToolResult:
+        return await save.execute(ToolContext(resumed, "save", identity={"userId": 1}), {
+            "task_id": task_id, "expected_version": 1, "steps": [step(status="completed")],
+        })
+
+    saved = asyncio.run(execute())
+    assert (saved.status is ToolStatus.SUCCEEDED) is save_allowed
+    assert repo.get_task("id:1", session, task_id)["current_version"] == (2 if save_allowed else 1)
+    if not save_allowed:
+        assert saved.error_code == "STOCK_SUMMARY_UNVERIFIED"
+
+
+@pytest.mark.parametrize("successful", [True, False])
+def test_redirected_stock_step_uses_a_new_scope_after_replan(tmp_path: Path, successful: bool) -> None:
+    repo, session, run = setup_run(tmp_path / "redirected-stock.sqlite")
+    task_id = repo.save_task("id:1", session, run, [step(status="in_progress")], title="Stock")["task_id"]
+    assert isinstance(task_id, str)
+    tools, _, budget = task_run_configuration(repo, run, {"userId": 1})
+    budget.set_task(task_id, [step(status="in_progress")], version=1)
+    assert budget.evidence is not None
+    save = next(tool for tool in tools if tool.name == "update_task")
+
+    def stock_result(call_id: str, step_id: str, code: str, succeeded: bool) -> tuple[
+        tuple[Message, ...], tuple[AgentEvent, ...]
+    ]:
+        call = ToolCall(call_id, "ktg_query_stock_summary", {"item_code": code})
+        messages: tuple[Message, ...] = (AssistantMessage((call,)), ToolResultMessage(
+            call_id, (TextBlock("returned"),), is_error=not succeeded, details={
+                "kind": "stock_summary", "filters": {"item_code": code, "warehouse_id": None},
+                "queried_at": "2026-11-14T00:00:00Z", "no_records": True, "groups": [],
+            } if succeeded else None,
+        ))
+        events = (AgentEvent(run, 1, AgentEventType.TOOL_EXECUTION_START, {
+            "tool_call_id": call_id, "task_id": task_id, "step_id": step_id,
+        }),)
+        return messages, events
+
+    old_messages, old_events = stock_result("old", "stable", "A-01", False)
+    budget.evidence(task_id, old_messages, old_events, "stable", frozenset())
+
+    async def update(version: int, status: str) -> ToolResult:
+        return await save.execute(ToolContext(run, "save", identity={"userId": 1}), {
+            "task_id": task_id, "expected_version": version,
+            "steps": [step("replaced", description="Check B-02", status=status)],
+        })
+
+    assert asyncio.run(update(1, "in_progress")).status is ToolStatus.SUCCEEDED
+    new_messages, new_events = stock_result("new", "replaced", "B-02", successful)
+    budget.evidence(task_id, (*old_messages, *new_messages), (*old_events, *new_events), "replaced", frozenset())
+    result = asyncio.run(update(2, "completed"))
+    assert result.error_code == (None if successful else "STOCK_SUMMARY_UNVERIFIED")
+    assert repo.get_task("id:1", session, task_id)["current_version"] == (3 if successful else 2)

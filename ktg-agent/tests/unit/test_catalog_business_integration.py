@@ -28,7 +28,7 @@ def test_existing_definitions_have_permissions_and_nonretryable_previews(tmp_pat
         *build_query_tools(), *build_workorder_tools(PreviewStore()),
         *build_inventory_tools(InventoryStore(str(tmp_path / "inventory.db")), frozenset({RECEIPT, ISSUE})),
     )
-    assert len(definitions) == 12
+    assert len(definitions) == 13
     for definition in definitions:
         assert definition.required_permissions, definition.name
         if definition.name.startswith("ktg_preview_"):
@@ -46,7 +46,7 @@ def test_business_catalog_resolves_and_filters_existing_tools(tmp_path: Path) ->
         {definition.name: True for definition in definitions},
     )
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert len(catalog.candidate_snapshot(admin, switches).candidates) == 8
+    assert len(catalog.candidate_snapshot(admin, switches).candidates) == 9
     for definition in definitions:
         assert catalog.resolve_definition(definition.name, definition.version) is definition
         if not definition.expose_to_model:

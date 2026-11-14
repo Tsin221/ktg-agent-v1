@@ -5,6 +5,13 @@
       <span v-if="result.total !== undefined">共 {{ result.total }} 条</span>
     </div>
     <div v-if="result.kind === 'product_count'" class="result-card__count">当前账号可见的产品记录，不含物料。</div>
+    <template v-else-if="result.kind === 'stock_summary'">
+      <p v-if="result.no_records" class="result-card__empty">无匹配库存记录</p>
+      <div v-for="group in result.groups" :key="`${group.itemId}-${group.warehouseId}-${group.unitOfMeasure}`" class="result-card__row">
+        <strong>{{ group.warehouseName || group.warehouseCode || '未分仓' }}</strong>
+        <span>{{ group.itemCode }} · {{ group.quantityOnhand }} {{ group.unitOfMeasure || '' }}</span>
+      </div>
+    </template>
     <dl v-else-if="result.kind === 'workorder_progress'" class="result-card__facts">
       <div><dt>工单</dt><dd>{{ result.workorder.workorderCode }} · {{ result.workorder.workorderName }}</dd></div>
       <div><dt>计划量</dt><dd>{{ result.workorder.quantity }} {{ result.metrics.unit || '' }}</dd></div>
@@ -65,6 +72,7 @@ export default {
         product_count: '产品总数',
         items: '产品查询',
         stock: '库存查询',
+        stock_summary: '分仓库存汇总',
         workorders: '工单查询',
         workorder: '工单详情', protask: '生产任务', feedback: '报工记录', workorder_progress: '工单进度试验视图'
       }[this.result.kind] || '查询结果'
@@ -81,7 +89,7 @@ export default {
       })[key] || key
     },
     rowKey(row, index) {
-      return row.itemId || row.materialStockId || row.workorderId || index
+      return row.recordId ?? row.taskId ?? row.materialStockId ?? row.itemId ?? row.workorderId ?? index
     }
   }
 }
@@ -123,6 +131,24 @@ export default {
   color: #303133;
   font-size: 13px;
 }
+
+.result-card__facts {
+  margin: 0;
+  color: #303133;
+  font-size: 13px;
+}
+
+.result-card__facts > div {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid #ebeef5;
+  overflow-wrap: anywhere;
+}
+
+.result-card__facts dt { color: #606266; }
+.result-card__facts dd { margin: 0; }
 
 .result-card__empty,
 .result-card__meta {

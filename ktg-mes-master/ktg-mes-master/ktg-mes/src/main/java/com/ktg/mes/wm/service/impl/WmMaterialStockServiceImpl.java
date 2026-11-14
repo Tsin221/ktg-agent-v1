@@ -3,6 +3,7 @@ package com.ktg.mes.wm.service.impl;
 import java.util.List;
 import com.ktg.common.exception.BussinessException;
 import com.ktg.mes.wm.domain.WmMaterialStock;
+import com.ktg.mes.wm.domain.WmStockSummaryGroup;
 import com.ktg.mes.wm.mapper.WmMaterialStockMapper;
 import com.ktg.mes.wm.service.IWmMaterialStockService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,6 +45,12 @@ public class WmMaterialStockServiceImpl implements IWmMaterialStockService
     public List<WmMaterialStock> selectWmMaterialStockList(WmMaterialStock wmMaterialStock)
     {
         return wmMaterialStockMapper.selectWmMaterialStockList(wmMaterialStock);
+    }
+
+    @Override
+    public List<WmStockSummaryGroup> selectStockSummary(String itemCode, Long warehouseId)
+    {
+        return wmMaterialStockMapper.selectStockSummary(itemCode, warehouseId);
     }
 
     /**

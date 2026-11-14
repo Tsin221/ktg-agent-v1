@@ -1,8 +1,10 @@
 package com.ktg.mes.wm.mapper;
 
 import com.ktg.mes.wm.domain.WmMaterialStock;
+import com.ktg.mes.wm.domain.WmStockSummaryGroup;
 
 import java.util.List;
+import org.apache.ibatis.annotations.Param;
 
 /**
  * 库存记录Mapper接口
@@ -20,6 +22,9 @@ public interface WmMaterialStockMapper
      */
     public WmMaterialStock selectWmMaterialStockByMaterialStockId(Long materialStockId);
 
+
+    List<WmStockSummaryGroup> selectStockSummary(@Param("itemCode") String itemCode,
+                                                  @Param("warehouseId") Long warehouseId);
 
     public WmMaterialStock loadMaterialStock(WmMaterialStock stock);
 

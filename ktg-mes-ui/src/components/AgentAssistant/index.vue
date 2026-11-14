@@ -73,6 +73,9 @@
             继续此任务
           </button>
         </div>
+        <p v-if="currentTaskStep" class="agent-task-card__current" role="status">
+          进行中 · {{ currentTaskStep.description }}
+        </p>
         <div v-show="taskPanelOpen" id="agent-task-details">
           <div v-if="tasks.length" class="agent-task-card__controls">
             <div class="agent-task-card__field">
@@ -128,7 +131,7 @@
         >{{ example }}</button>
 
         <div v-for="message in displayedMessages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
-          <div class="agent-message">{{ message.text }}</div>
+          <div v-if="message.text" class="agent-message">{{ message.text }}</div>
           <div
             v-for="(result, index) in message.results || []"
             :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
@@ -210,6 +213,35 @@
               <agent-result-card v-else :result="result" />
             </div>
           </div>
+          <p v-if="message.queryError" class="agent-message agent-message--error" role="alert">查询失败 · {{ message.queryError }}</p>
+          <details
+            v-if="message.queryDetails"
+            class="agent-query-details"
+            :open="openQueryDetails[message.id] || null"
+            @toggle="$set(openQueryDetails, message.id, $event.target.open)"
+          >
+            <summary>
+              查看查询明细 · {{ message.queryDetails.count }} 次查询<span v-if="message.queryDetails.failed" class="agent-query-error"> · {{ message.queryDetails.failed }} 次失败</span>
+            </summary>
+            <div v-if="openQueryDetails[message.id]" class="agent-query-details__body">
+              <section v-for="group in message.queryDetails.groups" :key="group.id" class="agent-query-group">
+                <h4>{{ group.title }}</h4>
+                <div v-for="query in group.queries" :key="query.id" class="agent-query-record">
+                  <component :is="query.attempts.length > 1 ? 'details' : 'div'">
+                    <summary v-if="query.attempts.length > 1">{{ query.title }} · 重复查询 {{ query.attempts.length }} 次</summary>
+                    <div v-for="attempt in query.attempts" :key="attempt.id" class="agent-query-attempt">
+                      <p class="agent-query-attempt__meta">
+                        <span v-if="attempt.time">查询时间 {{ attempt.time }}</span>
+                        <span v-if="attempt.scope">{{ attempt.scope }}</span>
+                      </p>
+                      <p v-if="attempt.error" class="agent-query-error">{{ query.title }}失败 · {{ attempt.error }}</p>
+                      <agent-result-card v-else-if="attempt.result" :result="attempt.result" />
+                    </div>
+                  </component>
+                </div>
+              </section>
+            </div>
+          </details>
         </div>
         <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
           <div class="agent-message">{{ pendingQuestion }}</div>
@@ -222,17 +254,14 @@
             <button v-if="input.status === 'unconfirmed'" type="button" @click="retryInput">用同一请求重试</button>
           </div>
         </div>
-        <div v-if="progress.messages.length || Object.keys(progress.tools).length" class="agent-progress" aria-label="本轮临时进度">
-          <div v-for="message in progress.messages" :key="message.id">
-            <div v-if="message.text" class="agent-message">{{ message.text }}</div>
-            <div v-if="message.text" class="agent-progress__status">{{ message.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && message.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
-          </div>
-          <div v-for="(tool, id) in progress.tools" :key="id" class="agent-progress__tool">
-            {{ tool.name }}：{{ tool.message || (tool.status === 'running' ? '执行中' : tool.status) }}
+        <div v-if="liveMessage" class="agent-progress" aria-label="本轮临时进度">
+          <div v-if="liveMessage">
+            <div class="agent-message">{{ liveMessage.text }}</div>
+            <div class="agent-progress__status">{{ liveMessage.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && liveMessage.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
           </div>
         </div>
         <div v-if="activeRun || loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
-          {{ loading ? '正在提交问题…' : runStatusText(activeRun) }}
+          {{ loading ? '正在提交问题…' : toolActivity || runStatusText(activeRun) }}
           <button v-if="streamError && activeRun && !isTerminalRun(activeRun.status)" type="button" @click="followRun">重新连接</button>
           <button v-if="canCancel" type="button" :disabled="cancelLoading" @click="stopRun">
             {{ cancelLoading ? '停止请求中…' : '停止后续执行' }}
@@ -305,7 +334,7 @@ import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import AgentDvRepairCard from './DvRepairCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
 import { isTerminalRun, pageContext, presentMessages, optionCardPresentation, progressFromEvent, runStatusText, usageText,
-  contextStatusText, contextPressureText,
+  contextStatusText, contextPressureText, queryCardPresentation, toolProgressText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
 const requestId = () => (window.crypto && window.crypto.randomUUID)
@@ -396,6 +425,7 @@ export default {
       completedDvRepairPreviewIds: [],
       messages: [],
       expandedOptions: {},
+      openQueryDetails: {},
       examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
   },
@@ -416,12 +446,21 @@ export default {
       if (!steps || !steps.length) return null
       return { completed: steps.filter(step => step.status === 'completed').length, total: steps.length }
     },
+    currentTaskStep() {
+      const version = this.taskDetail && this.taskDetail.versions[0]
+      if (!this.canInput || !version || version.run_id !== this.activeRunId) return null
+      return version.steps.find(step => step.status === 'in_progress')
+    },
     panelStyle() {
       if (this.viewport.width <= 600) return {}
       const size = clampPanelSize(this.panelSize, this.viewport)
       return { width: `${size.width}px`, height: `${size.height}px` }
     },
-    displayedMessages() { return optionCardPresentation([...this.messages, ...this.businessMessages], this.expandedOptions) },
+    displayedMessages() {
+      return optionCardPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]), this.expandedOptions)
+    },
+    liveMessage() { return this.progress.messages.slice().reverse().find(message => message.text && !message.queryPreface) },
+    toolActivity() { return this.canInput ? toolProgressText(this.progress.tools) : '' },
     contextStatus() {
       const context = this.sessionStats && this.sessionStats.context
       if (!context || !context.configured) return null
@@ -610,6 +649,7 @@ export default {
     resetIdentity() {
       this.cancelTitle()
       this.expandedOptions = {}
+      this.openQueryDetails = {}
       this.sessionStats = null
       this.epoch++
       agentSession.checkIdentity()
@@ -674,6 +714,7 @@ export default {
       if (sessionId !== this.sessionId) this.resetTasks()
       this.cancelTitle()
       this.expandedOptions = {}
+      this.openQueryDetails = {}
       agentSession.close()
       this.sessionLoading = true
       this.panelError = ''
@@ -1714,6 +1755,19 @@ export default {
 .agent-entry { display: flex; flex-direction: column; margin-top: 12px; }
 .agent-entry--user { align-items: flex-end; }
 .agent-entry--assistant { align-items: stretch; }
+.agent-query-details { margin-top: 8px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; }
+.agent-query-details summary { padding: 9px 10px; cursor: pointer; color: #303133; font-weight: 500; }
+.agent-query-details summary:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
+.agent-query-details__body { padding: 0 10px 10px; }
+.agent-query-group { padding: 8px 0 0; border-top: 1px solid #ebeef5; }
+.agent-query-group + .agent-query-group { margin-top: 10px; }
+.agent-query-group h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.agent-query-record { margin-top: 6px; }
+.agent-query-record summary { padding: 6px 0; font-size: 12px; }
+.agent-query-attempt__meta { display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 0; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
+.agent-query-attempt__meta:empty { display: none; }
+.agent-query-attempt + .agent-query-attempt { margin-top: 10px; }
+.agent-query-error { color: #b83232; overflow-wrap: anywhere; }
 .agent-option-summary { margin-top: 10px; padding: 10px 12px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; color: #303133; }
 .agent-option-summary button { padding: 0; border: 0; background: transparent; color: var(--current-color, #409eff); cursor: pointer; text-align: left; min-height: 32px; }
 .agent-option-summary button:focus-visible { outline: 2px solid var(--current-color, #409eff); outline-offset: 2px; }
@@ -1740,7 +1794,6 @@ export default {
 .agent-panel__hint { margin: 0; padding: 0 12px 8px; background: #fff; color: #606266; font-size: 12px; }
 .agent-progress { margin-top: 12px; }
 .agent-progress__status { margin: 3px 0 8px; color: #606266; font-size: 12px; }
-.agent-progress__tool { margin-top: 6px; padding: 7px 10px; border-left: 3px solid #a0cfff; background: #fff; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
 .agent-run-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: #606266; font-size: 12px; }
 .agent-run-usage__details { width: 100%; }
 .agent-run-usage__details summary { color: #337ecc; cursor: pointer; }
@@ -1863,6 +1916,7 @@ export default {
   background: #f0f5fb;
 }
 .agent-task-card__summary { color: #606266; font-weight: 400; }
+.agent-task-card__current { margin: 5px 0 0; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
 .agent-task-card #agent-task-details { padding: 0 4px 5px; }
 
 .agent-task-card__continue i { margin-right: 2px; }

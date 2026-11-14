@@ -1071,7 +1071,21 @@ class AgentLoop:
         from ktg_agent.context.tokens import estimate_tools_tokens
         from ktg_agent.context.window import ContextOverflowError, fit_window
 
-        projected = project_model_messages(history)
+        model_history = history
+        if self._task_budget is not None and self._task_budget.resume_request is not None:
+            old_stock_calls = {
+                block.id for message in history[:baseline] if isinstance(message, AssistantMessage)
+                for block in message.content if isinstance(block, ToolCall)
+                and block.name in {"ktg_query_stock", "ktg_query_stock_summary"}
+            }
+            # Historic totals and rows remain in the transcript for audit. Use
+            # scoped evidence to decide which, if any, may be reused on resume.
+            model_history = [
+                replace(message, content=(TextBlock("历史库存工具结果，仅供审计。"),))
+                if isinstance(message, ToolResultMessage) and message.tool_call_id in old_stock_calls
+                else message for message in history
+            ]
+        projected = project_model_messages(model_history)
         historical_ids: set[str] = set()
         fallback: list[JsonObject] = []
         schemas = (self._discovery.begin_request(f"{publisher.run_id}:{turn}").schemas
@@ -1170,7 +1184,10 @@ class AgentLoop:
                         if isinstance(message, ToolResultMessage) and message.tool_call_id in stock_results
                         else message for message in projected
                     )
-                fallback = [record for record in fallback if record["tool_call_id"] not in visible_ids]
+                fallback = [
+                    record for record in fallback
+                    if record["tool_call_id"] not in visible_ids or "stock_usage" in record
+                ]
             if latest_steering is not None:
                 steering_text = "\n".join(block.text for block in latest_steering.content if block.model_visible)
                 instruction += (

@@ -1,6 +1,7 @@
 package com.ktg.mes.wm.service;
 
 import com.ktg.mes.wm.domain.WmMaterialStock;
+import com.ktg.mes.wm.domain.WmStockSummaryGroup;
 
 import java.util.List;
 
@@ -29,6 +30,8 @@ public interface IWmMaterialStockService
      * @return 库存记录集合
      */
     public List<WmMaterialStock> selectWmMaterialStockList(WmMaterialStock wmMaterialStock);
+
+    List<WmStockSummaryGroup> selectStockSummary(String itemCode, Long warehouseId);
 
     /**
      * 新增库存记录

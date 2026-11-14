@@ -27,10 +27,28 @@ export function pageContext(route) {
 const textOf = message => (message.content || []).filter(block => block.type === 'text' && block.model_visible !== false)
   .map(block => block.text).join('')
 
+const queryLabels = {
+  product_count: '产品总数', items: '产品查询', workorders: '工单查询',
+  workorder: '工单详情', protask: '生产任务', feedback: '报工记录',
+  stock: '库存查询', stock_summary: '分仓库存汇总', workorder_progress: '工单进度试验视图'
+}
+const queryTools = {
+  ktg_count_products: 'product_count', ktg_search_items: 'items', ktg_list_workorders: 'workorders',
+  ktg_pro_workorder_get: 'workorder', ktg_pro_task_list: 'protask', ktg_pro_task_get: 'protask',
+  ktg_pro_feedback_list: 'feedback', ktg_pro_feedback_get: 'feedback', ktg_query_stock: 'stock',
+  ktg_query_stock_summary: 'stock_summary', ktg_pro_workorder_progress: 'workorder_progress'
+}
+const taskTools = ['create_task', 'update_task']
+const progressTools = [...taskTools, 'search_tools', 'load_tools']
+const toolKind = name => Object.prototype.hasOwnProperty.call(queryTools, name) ? queryTools[name] : undefined
+const isQueryKind = kind => Object.prototype.hasOwnProperty.call(queryLabels, kind)
+const isQueryPreface = calls => calls.length > 0 && calls.every(call => toolKind(call.name) || progressTools.includes(call.name))
+
 export function presentMessages(items) {
   const entries = []
   const turns = new Map()
   const questions = new Map()
+  const calls = new Map()
   for (const item of items) {
     const runId = item.run_id
     if (item.role === 'user') {
@@ -38,23 +56,47 @@ export function presentMessages(items) {
       entries.push(entry)
       questions.set(runId, entry.text)
     } else if (item.role === 'assistant' || item.role === 'tool') {
+      if (!calls.has(runId)) calls.set(runId, new Map())
+      const runCalls = calls.get(runId)
       let entry = turns.get(runId)
       if (!entry || (item.role === 'assistant' && entry.text)) {
-        entry = { id: `message-${item.message_id}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId), results: [], resultIds: [] }
+        entry = { id: `message-${item.message_id}`, runId, role: 'assistant', text: '', sourceText: questions.get(runId),
+          results: [], resultIds: [], queries: [] }
         turns.set(runId, entry)
         entries.push(entry)
       }
-      if (item.role === 'assistant' && textOf(item)) entry.text = textOf(item)
-      if (item.role === 'tool' && item.details && item.details.kind) {
-        entry.results.push(item.details)
-        entry.resultIds.push(`result-${item.message_id}`)
+      if (item.role === 'assistant') {
+        const toolCalls = (item.content || []).filter(block => block.type === 'tool_call')
+        toolCalls.forEach(call => runCalls.set(call.id, call))
+        const text = textOf(item)
+        if (text) {
+          entry.text = text
+          entry.queryPreface = isQueryPreface(toolCalls)
+        }
+      } else {
+        const call = runCalls.get(item.tool_call_id)
+        const result = item.details
+        const id = `result-${item.message_id}`
+        const kind = result && result.kind
+        if (call && taskTools.includes(call.name) && result && typeof result.task_id === 'string' && !item.is_error) {
+          entry.taskIds = [...new Set([...(entry.taskIds || []), result.task_id])]
+        }
+        if (kind) {
+          entry.results.push(result)
+          entry.resultIds.push(id)
+        }
+        const queryKind = isQueryKind(kind) ? kind : call && toolKind(call.name)
+        if (queryKind && (isQueryKind(kind) || (item.is_error && !kind))) {
+          entry.queries.push({ id, kind: queryKind, result, call,
+            time: (result && result.queried_at) || item.created_at,
+            error: item.is_error ? textOf(item) || '查询未成功' : '' })
+        }
       }
     }
   }
-  return entries.filter(entry => entry.role === 'user' || entry.text || (entry.results && entry.results.length))
+  return entries.filter(entry => entry.role === 'user' || entry.text || entry.results.length || entry.queries.length || entry.taskIds)
 }
 
-// Compare only options and query scope, not timestamps or unrelated card kinds.
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
   if (value && typeof value === 'object') {
@@ -64,6 +106,135 @@ function canonical(value) {
     }, {})
   }
   return value
+}
+
+function queryScope(args) {
+  const labels = { workorder_id: '工单 ID', workorder_code: '工单编号', workorder_name: '工单名称',
+    workorder_type: '工单类型', item_code: '产品编码', item_name: '产品名称', warehouse_id: '仓库 ID',
+    task_id: '任务 ID', record_id: '报工 ID', status: '状态', from_time: '开始时间', to_time: '结束时间',
+    page: '页码', page_size: '每页条数' }
+  return Object.keys(labels).filter(key => args[key] != null).map(key => `${labels[key]} ${args[key]}`).join(' · ')
+}
+
+const queryRows = result => result ? result.rows || [result.workorder || result.data].filter(Boolean) : []
+
+function workorderGroups(queries, priorQueries) {
+  const orders = new Map()
+  const codes = new Map()
+  const products = new Map()
+  const tasks = new Map()
+  const orderId = value => value == null ? '' : String(value)
+  for (const { result } of [...priorQueries, ...queries]) {
+    for (const row of queryRows(result)) {
+      const id = orderId(row.workorderId)
+      if (!id) continue
+      if (row.workorderCode) {
+        orders.set(id, row.workorderCode)
+        codes.set(row.workorderCode, id)
+      }
+      if (row.productCode) {
+        const matches = products.get(row.productCode) || new Set()
+        matches.add(id)
+        products.set(row.productCode, matches)
+      }
+      if (row.taskId != null) tasks.set(orderId(row.taskId), id)
+    }
+  }
+
+  const groups = new Map()
+  for (const item of queries) {
+    const { kind, result, call, error } = item
+    const args = (call && call.arguments) || {}
+    const rows = queryRows(result)
+    const rowIds = new Set(rows.map(row => orderId(row.workorderId)))
+    let id = orderId(args.workorder_id) || (rowIds.size === 1 ? [...rowIds][0] : '')
+    if (!id && (kind === 'protask' || kind === 'feedback')) id = tasks.get(orderId(args.task_id))
+    if (!id && kind === 'workorders' && !rows.length) id = codes.get(args.workorder_code)
+
+    const stock = kind === 'stock' || kind === 'stock_summary'
+    const rowProducts = new Set(rows.map(row => row.itemCode))
+    const product = stock && (args.item_code || (result && result.filters && result.filters.item_code) ||
+      (rowProducts.size === 1 ? [...rowProducts][0] : ''))
+    const matches = products.get(product)
+    if (!id && matches && matches.size === 1) id = [...matches][0]
+
+    const key = id ? `order:${id}` : product ? `product:${product}` : 'general'
+    if (!groups.has(key)) {
+      groups.set(key, { id: key, title: id ? orders.get(id) || `工单 ID ${id}` : product ? `产品 ${product}` : '通用查询',
+        queries: [], duplicates: new Map() })
+    }
+    const group = groups.get(key)
+    let signature
+    if (!error && call && call.arguments && result) {
+      const businessResult = { ...result }
+      delete businessResult.queried_at
+      delete businessResult.spill
+      signature = JSON.stringify(canonical([call.name, call.arguments, businessResult]))
+    }
+    const prior = signature && group.duplicates.get(signature)
+    const attempt = { ...item, scope: queryScope(args) }
+    if (prior) prior.attempts.push(attempt)
+    else {
+      const query = { id: item.id, title: queryLabels[kind], attempts: [attempt] }
+      group.queries.push(query)
+      if (signature) group.duplicates.set(signature, query)
+    }
+  }
+  return [...groups.values()].map(({ id, title, queries }) => ({ id, title, queries }))
+}
+
+export function queryCardPresentation(messages) {
+  const runs = new Map()
+  for (const entry of messages) {
+    if (entry.role !== 'assistant' || !entry.runId) continue
+    if (!runs.has(entry.runId)) runs.set(entry.runId, { queries: [], taskIds: new Set() })
+    const run = runs.get(entry.runId)
+    run.queries.push(...(entry.queries || []))
+    for (const taskId of entry.taskIds || []) run.taskIds.add(taskId)
+    run.last = entry
+    if (entry.text && !entry.queryPreface) run.answer = entry
+  }
+  const taskQueries = new Map()
+  for (const run of runs.values()) {
+    run.priorQueries = []
+    if (run.taskIds.size !== 1) continue
+    const taskId = [...run.taskIds][0]
+    run.priorQueries = taskQueries.get(taskId) || []
+    taskQueries.set(taskId, [...run.priorQueries, ...run.queries])
+  }
+  return messages.map(entry => {
+    const run = entry.role === 'assistant' && runs.get(entry.runId)
+    if (!run || !run.queries.length) return entry
+    const single = !run.taskIds.size && run.queries.length === 1 && run.queries[0]
+    if (single && !single.error) return entry
+    const retained = (entry.results || []).map((result, index) => ({ result, id: entry.resultIds[index] }))
+      .filter(item => !(entry.queries || []).some(query => query.id === item.id))
+    const output = { ...entry, results: retained.map(item => item.result), resultIds: retained.map(item => item.id) }
+    if (entry.queryPreface && run.answer) output.text = ''
+    if (entry === run.last) {
+      if (single) {
+        output.queryError = single.error
+      } else {
+        output.queryDetails = { count: run.queries.length, failed: run.queries.filter(query => query.error).length,
+          groups: workorderGroups(run.queries, run.priorQueries) }
+      }
+    }
+    return output
+  }).filter(entry => entry.role === 'user' || entry.text || (entry.results && entry.results.length) || entry.queryDetails || entry.queryError)
+}
+
+export function toolProgressText(tools) {
+  const all = Object.values(tools)
+  const running = all.filter(tool => tool.status === 'running')
+  if (running.length) {
+    const tool = running[0]
+    const kind = toolKind(tool.name)
+    const label = kind ? `正在查询${queryLabels[kind].replace(/查询$/, '')}`
+      : taskTools.includes(tool.name) ? '正在更新任务清单'
+        : progressTools.includes(tool.name) ? '正在准备查询' : '正在执行操作'
+    return running.length === 1 ? label : `${label} · 另有 ${running.length - 1} 项正在执行`
+  }
+  return all.length ? `已执行 ${all.length} 项操作` : ''
 }
 
 export function optionCardPresentation(messages, expanded = {}) {
@@ -106,6 +277,8 @@ export function progressFromEvent(progress, event) {
       } else if (event.type === 'message_end') {
         messages.splice(index, 1, { ...previous,
           text: payload.message ? textOf(payload.message) : previous.text,
+          queryPreface: payload.stop_reason === 'tool_call' && isQueryPreface(
+            ((payload.message && payload.message.content) || []).filter(block => block.type === 'tool_call')),
           status: payload.stop_reason === 'completed' || payload.stop_reason === 'tool_call' ? 'ended' : 'incomplete' })
       }
     }

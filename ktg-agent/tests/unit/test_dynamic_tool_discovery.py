@@ -196,13 +196,15 @@ def test_natural_language_discovery_and_actionable_load_errors() -> None:
             return permissions, switches
 
         discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access)
-        for query in ("全部库存", "查询所有仓库的全部库存汇总", "查询库存列表 分页 仓库 物料 数量 单位", "仓储"):
+        cases = {"查询指定物料分仓库存汇总": "ktg_query_stock_summary",
+                 "查询库存明细 批次 库位": "ktg_query_stock"}
+        for query, expected in cases.items():
             result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
             assert result.details is not None
-            assert cast(list[dict[str, object]], result.details["items"])[0]["name"] == "ktg_query_stock"
-            assert "ktg_query_stock" in result.content and "1.0" in result.content
+            assert cast(list[dict[str, object]], result.details["items"])[0]["name"] == expected
+            assert expected in result.content and "1.0" in result.content
         overview = await discovery.execute(ToolCall("s", "search_tools", {"query": ""}))
-        assert overview.details is not None and len(cast(list[object], overview.details["items"])) == 4
+        assert overview.details is not None and len(cast(list[object], overview.details["items"])) == 5
         invalid = await discovery.execute(ToolCall("s", "search_tools", {"module": "库存"}))
         assert invalid.error_code == "VALIDATION_ERROR" and "wm" in invalid.content
         wrong = await discovery.execute(ToolCall("l", "load_tools", {"tools": [
@@ -376,7 +378,7 @@ def test_production_and_inventory_search_separates_nearby_intents(tmp_path: Path
             "报工详情 不合格数量": "ktg_pro_feedback_get",
             "生成新增生产工单预览": "ktg_preview_create_workorder_draft",
             "编辑工单草稿生成预览": "ktg_preview_edit_workorder_draft",
-            "查指定物料的分仓库存": "ktg_query_stock",
+            "查指定物料的分仓库存": "ktg_query_stock_summary",
             "预览物料入库单": "ktg_preview_item_receipt",
             "预览生产领料单": "ktg_preview_production_issue",
             "查询库存操作执行回执": "ktg_wm_operation_result",
