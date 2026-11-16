@@ -2,6 +2,7 @@
   <div class="agent-assistant">
     <button
       v-if="!open"
+      ref="launcher"
       class="agent-launcher"
       type="button"
       aria-label="打开 KTG 智能助手"
@@ -13,46 +14,79 @@
 
     <section v-else class="agent-panel" :style="panelStyle" role="dialog" aria-label="KTG 智能助手">
       <button class="agent-panel__resize" type="button" aria-label="调整助手窗口大小：方向键调整宽高" title="拖动调整宽高；方向键每次调整20像素" @pointerdown.prevent="startResize" @keydown="resizeKey">⤢</button>
-      <header class="agent-panel__header">
-        <div>
-          <h2>KTG 智能助手</h2>
-          <p>使用当前登录账号权限</p>
-        </div>
-        <button ref="closeButton" type="button" aria-label="收起智能查询助手" @click="closePanel">
-          <i class="el-icon-minus" aria-hidden="true" />
-        </button>
-      </header>
+      <div class="agent-panel__top">
+        <header class="agent-panel__header">
+          <div class="agent-panel__identity">
+            <h2>KTG 智能助手</h2>
+            <p :title="sessionTitle">{{ sessionTitle }}</p>
+          </div>
+          <div class="agent-panel__actions">
+            <button
+              ref="sessionToggle"
+              type="button"
+              class="agent-panel__session-toggle"
+              :aria-expanded="sessionsOpen ? 'true' : 'false'"
+              aria-controls="agent-session-controls"
+              @click="sessionsOpen = !sessionsOpen"
+            >
+              会话 <i :class="sessionsOpen ? 'el-icon-arrow-up' : 'el-icon-arrow-down'" aria-hidden="true" />
+            </button>
+            <button class="agent-panel__minimize" type="button" aria-label="收起智能查询助手" @click="closePanel">
+              <i class="el-icon-minus" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
 
-      <div class="agent-panel__sessions">
-        <label for="agent-session-select">会话</label>
-        <select id="agent-session-select" :value="sessionId" :disabled="sessionLoading || !sessions.length"
-                @change="selectSession($event.target.value)">
-          <option v-if="!sessionId" value="" disabled hidden>{{ sessions.length ? '未选中会话' : '暂无会话' }}</option>
-          <option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.title || '未命名会话' }}</option>
-        </select>
-        <button type="button" :disabled="sessionLoading || titleSaving" @click="editTitle('create')">新会话</button>
-        <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
+        <div v-show="sessionsOpen" id="agent-session-controls" class="agent-panel__session-drawer">
+          <div class="agent-panel__sessions">
+            <label for="agent-session-select">切换</label>
+            <select
+              id="agent-session-select"
+              :value="sessionId"
+              :disabled="sessionLoading || !sessions.length"
+              @change="selectSession($event.target.value)"
+            >
+              <option v-if="!sessionId" value="" disabled hidden>{{ sessions.length ? '未选中会话' : '暂无会话' }}</option>
+              <option v-for="session in sessions" :key="session.session_id" :value="session.session_id">{{ session.title || '未命名会话' }}</option>
+            </select>
+            <button type="button" :disabled="sessionLoading || titleSaving" @click="editTitle('create')">新会话</button>
+            <button type="button" :disabled="sessionLoading || titleSaving || !sessionId" @click="editTitle('rename')">重命名</button>
+          </div>
+
+          <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
+            <div class="agent-title-form__header">
+              <label for="agent-session-title">{{ titleMode === 'create' ? '新建会话' : '重命名会话' }}</label>
+              <button
+                type="button"
+                class="agent-title-form__close"
+                aria-label="取消"
+                title="取消"
+                :disabled="titleSaving"
+                @click="cancelTitle"
+              >
+                <i class="el-icon-close" aria-hidden="true" />
+              </button>
+            </div>
+            <div class="agent-title-form__fields">
+              <input
+                id="agent-session-title"
+                ref="titleInput"
+                v-model="titleDraft"
+                :disabled="titleSaving"
+                :placeholder="titleMode === 'create' ? '会话名称（可选）' : '输入会话名称'"
+                :aria-invalid="titleError ? 'true' : null"
+                :aria-describedby="titleError ? 'agent-session-title-error' : null"
+                maxlength="200"
+                @keydown.esc.prevent="cancelTitle"
+              >
+              <button type="submit" class="agent-title-form__submit" :disabled="titleSaving">
+                {{ titleSaving ? '保存中…' : (titleMode === 'create' ? '创建' : '保存') }}
+              </button>
+            </div>
+            <p v-if="titleError" id="agent-session-title-error" role="alert">{{ titleError }}</p>
+          </form>
+        </div>
       </div>
-
-      <form v-if="titleMode" class="agent-panel__title-form" @submit.prevent="saveTitle">
-        <div class="agent-title-form__header">
-          <label for="agent-session-title">{{ titleMode === 'create' ? '新建会话' : '重命名会话' }}</label>
-          <button type="button" class="agent-title-form__close" aria-label="取消" title="取消"
-                  :disabled="titleSaving" @click="cancelTitle">
-            <i class="el-icon-close" aria-hidden="true"></i>
-          </button>
-        </div>
-        <div class="agent-title-form__fields">
-          <input id="agent-session-title" ref="titleInput" v-model="titleDraft" :disabled="titleSaving"
-                 :placeholder="titleMode === 'create' ? '会话名称（可选）' : '输入会话名称'"
-                 :aria-invalid="titleError ? 'true' : null" :aria-describedby="titleError ? 'agent-session-title-error' : null"
-                 maxlength="200" @keydown.esc.prevent="cancelTitle">
-          <button type="submit" class="agent-title-form__submit" :disabled="titleSaving">
-            {{ titleSaving ? '保存中…' : (titleMode === 'create' ? '创建' : '保存') }}
-          </button>
-        </div>
-        <p v-if="titleError" id="agent-session-title-error" role="alert">{{ titleError }}</p>
-      </form>
 
       <section v-if="titleMode !== 'create' && (tasks.length || taskError)" class="agent-task-card" aria-labelledby="agent-task-heading">
         <div class="agent-task-card__header">
@@ -118,17 +152,20 @@
       </section>
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
-        <div class="agent-message agent-message--assistant">
-          我可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。
-        </div>
-        <button
-          v-for="example in examples"
-          :key="example"
-          type="button"
-          class="agent-example"
-          :disabled="loading"
-          @click="submitExample(example)"
-        >{{ example }}</button>
+        <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
+          <h3>今天想查询什么？</h3>
+          <p>你可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。</p>
+          <div class="agent-welcome__examples">
+            <button
+              v-for="example in examples"
+              :key="example"
+              type="button"
+              class="agent-example"
+              :disabled="composerBusy"
+              @click="submitExample(example)"
+            >{{ example }}</button>
+          </div>
+        </section>
 
         <div v-for="message in displayedMessages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
           <div v-if="message.text" class="agent-message">{{ message.text }}</div>
@@ -145,6 +182,7 @@
             <div v-show="!message.resultPresentation[index] || message.resultPresentation[index].open" :id="message.resultPresentation[index] ? message.resultPresentation[index].id : null">
               <agent-workorder-draft-card
                 v-if="isWorkorderResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingPreviewId === result.preview_id"
                 :completed="completedPreviewIds.includes(result.preview_id)"
@@ -154,6 +192,7 @@
               />
               <agent-inventory-card
                 v-else-if="isInventoryResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingInventoryId === result.operation_id"
                 :completed="completedInventoryIds.includes(result.operation_id)"
@@ -163,6 +202,7 @@
               />
               <agent-dv-machinery-type-card
                 v-else-if="isDvMachineryTypeResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingDvPreviewId === result.preview_id"
                 :completed="completedDvPreviewIds.includes(result.preview_id)"
@@ -170,6 +210,7 @@
               />
               <agent-dv-machinery-card
                 v-else-if="isDvMachineryResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingMachineryPreviewId === result.preview_id"
                 :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
@@ -177,6 +218,7 @@
               />
               <agent-dv-subject-card
                 v-else-if="isDvSubjectResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingSubjectPreviewId === result.preview_id"
                 :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
@@ -184,6 +226,7 @@
               />
               <agent-tm-tool-type-card
                 v-else-if="isTmToolTypeResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingTmToolTypePreviewId === result.preview_id"
                 :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
@@ -191,6 +234,7 @@
               />
               <agent-tm-tool-card
                 v-else-if="isTmToolResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingTmToolPreviewId === result.preview_id"
                 :completed="completedTmToolPreviewIds.includes(result.preview_id)"
@@ -198,6 +242,7 @@
               />
               <agent-dv-check-plan-card
                 v-else-if="isDvCheckPlanResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingCheckPlanPreviewId === result.preview_id"
                 :completed="completedDvCheckPlanPreviewIds.includes(result.preview_id)"
@@ -205,12 +250,13 @@
               />
               <agent-dv-repair-card
                 v-else-if="isDvRepairResult(result)"
+                class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingRepairPreviewId === result.preview_id"
                 :completed="completedDvRepairPreviewIds.includes(result.preview_id)"
                 @confirm="confirmDvRepairPreview"
               />
-              <agent-result-card v-else :result="result" />
+              <agent-result-card v-else class="agent-result-surface" :result="result" />
             </div>
           </div>
           <p v-if="message.queryError" class="agent-message agent-message--error" role="alert">查询失败 · {{ message.queryError }}</p>
@@ -235,7 +281,7 @@
                         <span v-if="attempt.scope">{{ attempt.scope }}</span>
                       </p>
                       <p v-if="attempt.error" class="agent-query-error">{{ query.title }}失败 · {{ attempt.error }}</p>
-                      <agent-result-card v-else-if="attempt.result" :result="attempt.result" />
+                      <agent-result-card v-else-if="attempt.result" class="agent-result-surface" :result="attempt.result" />
                     </div>
                   </component>
                 </div>
@@ -260,6 +306,12 @@
             <div class="agent-progress__status">{{ liveMessage.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && liveMessage.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
           </div>
         </div>
+      </div>
+
+      <div
+        v-if="activeRun || loading || contextStatusText(contextStatus) || confirmingPreviewId || confirmingInventoryId || pendingSubmission || panelError"
+        class="agent-panel__status"
+      >
         <div v-if="activeRun || loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
           {{ loading ? '正在提交问题…' : toolActivity || runStatusText(activeRun) }}
           <button v-if="streamError && activeRun && !isTerminalRun(activeRun.status)" type="button" @click="followRun">重新连接</button>
@@ -267,23 +319,24 @@
             {{ cancelLoading ? '停止请求中…' : '停止后续执行' }}
           </button>
         </div>
-        <div v-if="activeRun" class="agent-run-usage" role="status">
-          <span>{{ usageText(activeRun.usage) }}</span>
-          <span v-if="activeRun.budget && activeRun.budget.max_total_tokens != null">总 token 停止阈值：{{ activeRun.budget.max_total_tokens }}</span>
-          <details v-if="activeRun.usage && activeRun.usage.source !== 'legacy_unknown'" class="agent-run-usage__details">
-            <summary>用量详情</summary>
-            <div>已知输入 {{ activeRun.usage.known_input_tokens }} · 输出 {{ activeRun.usage.known_output_tokens }} token</div>
-            <div>其中缓存输入 {{ activeRun.usage.known_cached_input_tokens }} token（已包含在输入中）</div>
-            <div v-if="activeRun.usage.unknown_request_count">{{ activeRun.usage.unknown_request_count }} 次模型调用用量暂缺</div>
-          </details>
-        </div>
-        <div v-if="contextStatusText(contextStatus)" class="agent-context-status" role="status">
-          <details>
-            <summary>上下文状态</summary>
+        <details v-if="activeRun || contextStatusText(contextStatus)" class="agent-run-details">
+          <summary>运行详情</summary>
+          <div v-if="activeRun" class="agent-run-usage">
+            <strong>用量</strong>
+            <div>{{ usageText(activeRun.usage) }}</div>
+            <div v-if="activeRun.budget && activeRun.budget.max_total_tokens != null">总 token 停止阈值：{{ activeRun.budget.max_total_tokens }}</div>
+            <template v-if="activeRun.usage && activeRun.usage.source !== 'legacy_unknown'">
+              <div>已知输入 {{ activeRun.usage.known_input_tokens }} · 输出 {{ activeRun.usage.known_output_tokens }} token</div>
+              <div>其中缓存输入 {{ activeRun.usage.known_cached_input_tokens }} token（已包含在输入中）</div>
+              <div v-if="activeRun.usage.unknown_request_count">{{ activeRun.usage.unknown_request_count }} 次模型调用用量暂缺</div>
+            </template>
+          </div>
+          <div v-if="contextStatusText(contextStatus)" class="agent-context-status">
+            <strong>上下文状态</strong>
             <div>{{ contextPressureText(contextStatus) }}</div>
             <div>{{ contextStatusText(contextStatus) }}</div>
-          </details>
-        </div>
+          </div>
+        </details>
         <p v-if="confirmingPreviewId || confirmingInventoryId" class="agent-business-status" role="status">独立业务确认仍在核验结果；停止聊天运行不会撤销已发出的确认。</p>
         <div v-if="pendingSubmission" class="agent-message agent-message--assistant" role="status">
           问题提交回执未确认。<button type="button" :disabled="loading" @click="retryPendingRun">用同一请求重试</button>
@@ -313,6 +366,7 @@
         </button>
       </form>
       <p v-if="canInput" class="agent-panel__hint">{{ inputMode === 'steer' ? '下一个可执行的步骤会考虑你的新指示。' : '当前工作准备结束且仍有执行额度时处理。' }}输入不会撤销已执行的操作。</p>
+      <p v-else class="agent-panel__hint">使用当前登录账号权限</p>
     </section>
   </div>
 </template>
@@ -366,6 +420,7 @@ export default {
   data() {
     return {
       open: false,
+      sessionsOpen: false,
       panelSize: { width: 390, height: 620 },
       viewport: { width: 1024, height: 768 },
       resizeStart: null,
@@ -430,6 +485,14 @@ export default {
     }
   },
   computed: {
+    sessionTitle() {
+      const current = this.sessions.find(session => session.session_id === this.sessionId)
+      return this.sessionId ? current && current.title || '未命名会话' : '暂无会话'
+    },
+    showWelcome() {
+      return !this.sessionLoading && !this.loading && !this.activeRun && !this.liveMessage &&
+        !this.pendingQuestion && !this.pendingSubmission && !this.displayedMessages.length && !this.displayedInputs.length
+    },
     visibleTaskVersion() {
       if (!this.taskDetail) return null
       return this.taskDetail.versions.find(item =>
@@ -830,7 +893,11 @@ export default {
       return this.send(this.taskId)
     },
     selectSession(sessionId) {
-      if (sessionId && sessionId !== this.sessionId) this.loadSession(sessionId)
+      if (sessionId && sessionId !== this.sessionId) {
+        this.sessionsOpen = false
+        this.$refs.sessionToggle && this.$refs.sessionToggle.focus()
+        this.loadSession(sessionId)
+      }
     },
     async newSession(title) {
       const epoch = ++this.epoch
@@ -842,6 +909,8 @@ export default {
         this.sessions.unshift(session)
         agentSession.setSession(session.session_id)
         await this.loadSession(session.session_id, epoch)
+        if (epoch !== this.epoch) return
+        this.sessionsOpen = false
         this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
       } catch (error) {
         if (epoch === this.epoch) this.panelError = this.errorText(error, '新建会话失败。')
@@ -937,6 +1006,8 @@ export default {
     closePanel() {
       this.finishResize()
       this.open = false
+      this.sessionsOpen = false
+      this.$nextTick(() => this.$refs.launcher && this.$refs.launcher.focus())
     },
     submitExample(example) {
       this.draft = example
@@ -1598,6 +1669,18 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+.agent-assistant {
+  --assistant-accent: var(--current-color, #1890ff);
+  --assistant-action: #135da6;
+  --assistant-text: #202b3a;
+  --assistant-muted: #536275;
+  --assistant-line: #e2e8f0;
+  --assistant-surface: #f5f7fa;
+}
+@supports (color: color-mix(in srgb, blue, black)) {
+  .agent-assistant { --assistant-action: color-mix(in srgb, var(--assistant-accent), #142235 44%); }
+}
+
 .agent-launcher,
 .agent-panel {
   position: fixed;
@@ -1614,16 +1697,15 @@ export default {
   padding: 0 16px;
   border: 0;
   border-radius: 22px;
-  background: var(--current-color, #409eff);
+  background: var(--assistant-action);
   color: #fff;
   box-shadow: 0 6px 18px rgba(31, 45, 61, 0.2);
   cursor: pointer;
 }
 
-.agent-launcher:focus,
-.agent-panel button:focus,
-.agent-panel textarea:focus {
-  outline: 2px solid #303133;
+.agent-launcher:focus-visible,
+.agent-panel :is(button, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--assistant-action);
   outline-offset: 2px;
 }
 
@@ -1634,13 +1716,14 @@ export default {
   width: 390px;
   height: min(620px, calc(100vh - 48px));
   overflow: hidden;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  background: #f5f7fa;
-  box-shadow: 0 12px 36px rgba(31, 45, 61, 0.22);
+  border: 1px solid var(--assistant-line);
+  border-radius: 16px;
+  background: #fff;
+  color: var(--assistant-text);
+  box-shadow: 0 16px 48px rgba(24, 39, 60, 0.16), 0 2px 8px rgba(24, 39, 60, 0.05);
 }
 
-.agent-panel__resize { position: absolute; top: 0; left: 0; width: 24px; height: 24px; border: 0; background: transparent; color: #606266; cursor: nwse-resize; touch-action: none; }
+.agent-panel__resize { position: absolute; z-index: 2; top: 3px; left: 3px; width: 24px; height: 24px; border: 0; background: transparent; color: #606266; cursor: nwse-resize; touch-action: none; }
 .agent-panel__title-form {
   flex-shrink: 0;
   display: grid;
@@ -1716,45 +1799,118 @@ export default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px 14px 26px;
+  gap: 12px;
+  padding: 14px 14px 14px 29px;
+  border-bottom: 1px solid var(--assistant-line);
+}
+.agent-panel__top { position: relative; z-index: 1; flex-shrink: 0; }
+.agent-panel__session-drawer {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  max-height: min(48vh, 240px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 4px;
+  border: solid var(--assistant-line);
+  border-width: 0 0 1px;
   background: #fff;
-  border-bottom: 1px solid #e4e7ed;
+  box-shadow: 0 10px 18px rgba(24, 39, 60, 0.1);
 }
-
-.agent-panel__header h2,
+.agent-panel__session-drawer .agent-panel__title-form { margin-bottom: 8px; }
+.agent-panel__identity { min-width: 0; }
+.agent-panel__actions { display: flex; flex-shrink: 0; align-items: center; gap: 5px; }
+.agent-panel__header h2 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.35; }
 .agent-panel__header p {
-  margin: 0;
+  margin: 3px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--assistant-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-
-.agent-panel__header h2 { font-size: 16px; color: #303133; }
-.agent-panel__header p { margin-top: 4px; font-size: 12px; color: #909399; }
-.agent-panel__header button { border: 0; background: transparent; color: #606266; cursor: pointer; font-size: 18px; }
+.agent-panel__header button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--assistant-muted);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.agent-panel__header button:hover,
+.agent-panel__header button[aria-expanded="true"] { background: var(--assistant-surface); color: var(--assistant-action); }
+.agent-panel__minimize { min-width: 36px; }
 
 .agent-panel__sessions {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
-  color: #606266;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--assistant-line);
+  background: var(--assistant-surface);
+  color: var(--assistant-muted);
   font-size: 12px;
 }
-.agent-panel__sessions select { flex: 1; min-width: 0; padding: 6px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
+.agent-panel__sessions select {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  padding: 4px 6px;
+  border: 1px solid var(--assistant-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--assistant-text);
+  font: inherit;
+}
 .agent-panel__sessions button,
-.agent-message--loading button { border: 0; background: transparent; color: #409eff; cursor: pointer; }
+.agent-panel__status button {
+  min-height: 32px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--assistant-action);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.agent-panel__sessions button:hover:not(:disabled),
+.agent-panel__status button:hover:not(:disabled) { background: #eaf2fc; }
+.agent-panel__sessions button:disabled,
+.agent-panel__status button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .agent-panel__messages {
-  min-height: 0;
+  box-sizing: border-box;
+  min-height: 48px;
   flex: 1;
-  overflow-y: auto;
-  padding: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px clamp(14px, 4vw, 24px);
 }
-
-.agent-entry { display: flex; flex-direction: column; margin-top: 12px; }
+.agent-entry { display: flex; min-width: 0; flex-direction: column; }
+.agent-entry + .agent-entry { margin-top: 18px; }
 .agent-entry--user { align-items: flex-end; }
 .agent-entry--assistant { align-items: stretch; }
+
+.agent-panel .agent-result-surface {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: var(--assistant-surface);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.agent-result-surface ::v-deep button { --current-color: var(--assistant-action); }
+
 .agent-query-details { margin-top: 8px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; }
 .agent-query-details summary { padding: 9px 10px; cursor: pointer; color: #303133; font-weight: 500; }
 .agent-query-details summary:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
@@ -1769,77 +1925,111 @@ export default {
 .agent-query-attempt + .agent-query-attempt { margin-top: 10px; }
 .agent-query-error { color: #b83232; overflow-wrap: anywhere; }
 .agent-option-summary { margin-top: 10px; padding: 10px 12px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; color: #303133; }
-.agent-option-summary button { padding: 0; border: 0; background: transparent; color: var(--current-color, #409eff); cursor: pointer; text-align: left; min-height: 32px; }
+.agent-option-summary button { padding: 0; border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; text-align: left; min-height: 32px; }
 .agent-option-summary button:focus-visible { outline: 2px solid var(--current-color, #409eff); outline-offset: 2px; }
 .agent-option-summary p { margin: 4px 0 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .agent-message {
-  max-width: 88%;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background: #fff;
-  color: #303133;
+  color: var(--assistant-text);
   font-size: 14px;
-  line-height: 1.55;
+  line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.agent-entry--user .agent-message { max-width: 88%; padding: 9px 12px; border-radius: 12px 12px 3px 12px; background: #eaf2fc; }
+.agent-message--error { margin: 8px 0 0; padding: 7px 9px; border-radius: 8px; color: #922e38; background: #fff1f2; font-size: 12px; }
+.agent-input-status { margin-top: 4px; color: var(--assistant-muted); font-size: 12px; text-align: right; }
+.agent-input-status button { border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; }
+.agent-business-status { margin: 8px 0; color: var(--assistant-muted); font-size: 12px; }
+.agent-panel__hint { flex-shrink: 0; margin: 0; padding: 0 16px 9px; color: var(--assistant-muted); font-size: 12px; line-height: 1.35; }
+.agent-progress { margin-top: 14px; padding-left: 10px; border-left: 2px solid var(--assistant-accent); }
+.agent-progress__status { margin-top: 3px; color: var(--assistant-muted); font-size: 12px; }
+.agent-panel__status {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 26%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 5px 14px;
+  border-top: 1px solid var(--assistant-line);
+  background: var(--assistant-surface);
+}
+.agent-panel__status .agent-message { font-size: 12px; white-space: normal; }
+.agent-message--loading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  color: var(--assistant-muted);
+}
+.agent-run-details { color: var(--assistant-muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.agent-run-details summary { padding: 4px 0; color: var(--assistant-action); cursor: pointer; }
+.agent-run-usage,
+.agent-context-status { margin: 4px 0 7px; }
 
-.agent-entry--user .agent-message { background: var(--current-color, #409eff); color: #fff; }
-.agent-message--loading { margin-top: 12px; color: #606266; }
-.agent-message--error { margin-top: 12px; color: #c45656; }
-.agent-input-status { margin-top: 4px; color: #606266; font-size: 12px; text-align: right; }
-.agent-input-status button { border: 0; background: transparent; color: #337ecc; cursor: pointer; }
-.agent-business-status { margin: 8px 0; color: #606266; font-size: 12px; }
-.agent-panel__hint { margin: 0; padding: 0 12px 8px; background: #fff; color: #606266; font-size: 12px; }
-.agent-progress { margin-top: 12px; }
-.agent-progress__status { margin: 3px 0 8px; color: #606266; font-size: 12px; }
-.agent-run-usage { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: #606266; font-size: 12px; }
-.agent-run-usage__details { width: 100%; }
-.agent-run-usage__details summary { color: #337ecc; cursor: pointer; }
-.agent-context-status { margin-top: 8px; color: #606266; font-size: 12px; }
-.agent-context-status summary { color: #337ecc; cursor: pointer; }
-
+.agent-welcome { max-width: 440px; margin: clamp(12px, 4vh, 32px) auto 0; }
+.agent-welcome h3 { margin: 0 0 8px; font-size: 22px; font-weight: 700; line-height: 1.3; }
+.agent-welcome p { margin: 0 0 16px; color: var(--assistant-muted); line-height: 1.65; }
+.agent-welcome__examples { display: flex; flex-wrap: wrap; gap: 8px; }
 .agent-example {
-  display: block;
-  margin-top: 8px;
-  padding: 7px 10px;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
-  background: #fff;
-  color: #409eff;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--assistant-line);
+  border-radius: 8px;
+  background: var(--assistant-surface);
+  color: var(--assistant-action);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
+.agent-example:hover:not(:disabled) { background: #eaf2fc; }
 
 .agent-panel__composer {
   flex-shrink: 0;
-  display: flex;
-  gap: 8px;
-  padding: 12px;
-  border-top: 1px solid #e4e7ed;
-  background: #fff;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 8px;
+  padding: 10px 14px 7px;
+  border-top: 1px solid var(--assistant-line);
 }
-
 .agent-panel__composer textarea {
-  min-width: 0;
-  flex: 1;
+  grid-column: 1 / -1;
+  width: 100%;
+  box-sizing: border-box;
   resize: none;
   padding: 9px 10px;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
-  color: #303133;
+  border: 1px solid var(--assistant-line);
+  border-radius: 9px;
+  background: var(--assistant-surface);
+  color: var(--assistant-text);
   font: inherit;
+  line-height: 1.35;
 }
-.agent-panel__composer select { max-width: 98px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
-
+.agent-panel__composer select {
+  justify-self: start;
+  min-width: 0;
+  padding: 0 5px;
+  border: 1px solid var(--assistant-line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--assistant-text);
+  font: inherit;
+  font-size: 12px;
+}
 .agent-panel__composer button {
-  min-width: 72px;
+  grid-column: 2;
+  min-width: 68px;
+  min-height: 34px;
   border: 0;
-  border-radius: 4px;
-  background: var(--current-color, #409eff);
+  border-radius: 8px;
+  background: var(--assistant-action);
   color: #fff;
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
+.agent-panel__composer button:hover:not(:disabled) { background: #104f8e; }
 
 .agent-panel__composer button:disabled,
 .agent-example:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -1849,11 +2039,16 @@ export default {
   .agent-launcher { right: 16px; bottom: 16px; }
   .agent-panel__resize { display: none; }
   .agent-panel { inset: 0; width: 100%; height: 100%; border: 0; border-radius: 0; }
+  .agent-panel__header { padding-left: 14px; }
 }
 .agent-task-card {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 24%;
   margin: 8px 12px 0;
   padding: 5px 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid #dfe4ed;
   border-radius: 6px;
   background: #fff;
@@ -1909,14 +2104,15 @@ export default {
   padding: 0 4px;
   border-color: transparent;
   background: transparent;
-  color: #303133;
-  white-space: nowrap;
+  color: var(--assistant-text);
+  flex-wrap: wrap;
+  text-align: left;
 }
 .agent-task-card button.agent-task-card__toggle:hover {
   background: #f0f5fb;
 }
 .agent-task-card__summary { color: #606266; font-weight: 400; }
-.agent-task-card__current { margin: 5px 0 0; color: #606266; font-size: 12px; overflow-wrap: anywhere; }
+.agent-task-card__current { max-height: 3.5em; margin: 5px 0 0; overflow: auto; color: var(--assistant-muted); font-size: 12px; overflow-wrap: anywhere; }
 .agent-task-card #agent-task-details { padding: 0 4px 5px; }
 
 .agent-task-card__continue i { margin-right: 2px; }
@@ -1977,10 +2173,8 @@ export default {
 .agent-task-card__progress progress::-moz-progress-bar { background: #337ecc; }
 
 .agent-task-card__steps {
-  max-height: clamp(60px, 22vh, 140px);
   margin: 0;
   padding: 0;
-  overflow: auto;
   list-style: none;
 }
 
