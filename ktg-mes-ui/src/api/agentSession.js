@@ -96,10 +96,10 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     }
     if (!pointer) return null
     try {
-      await api.getSession(pointer.sessionId) // Always recheck ownership before using a saved ID.
+      await api.getSession(pointer.sessionId, { restoring: true }) // Always recheck ownership before using a saved ID.
       if (!checkIdentity() || current !== generation) return null
       if (pointer.runId) {
-        const run = await api.getRun(pointer.runId)
+        const run = await api.getRun(pointer.runId, { restoring: true })
         if (!checkIdentity() || current !== generation) return null
         if (run.session_id !== pointer.sessionId) {
           pointer.runId = null
@@ -110,6 +110,8 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
       return getState()
     } catch (error) {
       clear()
+      // A remembered ID can disappear after demo login renewal or an administrator reset.
+      if (error.response && error.response.status === 404) return null
       throw error
     }
   }

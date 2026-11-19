@@ -1,0 +1,24 @@
+<!doctype html><meta charset="utf-8"><title>首次打开助手检查</title>
+<style>body{margin:0;font:16px system-ui}#result{padding:20px}iframe{width:100%;height:850px;border:0}</style>
+<div id="result">检查旧会话失效后的首次打开…</div><iframe id="mes"></iframe>
+<script type="module">
+const frame=document.querySelector('#mes'), result=document.querySelector('#result');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(read){for(let i=0;i<200;i++){if(read())return;await sleep(100)}throw Error('等待页面超时')}
+localStorage.setItem('ktg-agent-session-pointer',JSON.stringify({sessionId:'expired-first-open-regression',runId:null,seq:0}));
+try {
+ frame.src='/experience';
+ await until(()=>frame.contentDocument?.querySelector('.agent-launcher'));
+ const doc=frame.contentDocument;const notices=[];
+ const observer=new MutationObserver(()=>{for(const e of doc.querySelectorAll('.el-message--error'))notices.push(e.textContent)});
+ observer.observe(doc.body,{childList:true,subtree:true});
+ frame.contentDocument.querySelector('.agent-launcher').click();
+ await until(()=>doc.querySelector('#agent-query-input'));
+ await sleep(3000);
+ observer.disconnect();
+ if(notices.length||doc.querySelector('.el-message--error'))throw Error('首次打开出现全局错误：'+notices.join(','));
+ if(localStorage.getItem('ktg-agent-session-pointer'))throw Error('失效会话未清除');
+ if(doc.querySelector('#agent-query-input').disabled)throw Error('输入框未就绪');
+ result.textContent='通过：失效会话自动清除，首次打开无错误提示，可以输入问题。';result.style.color='green';
+}catch(error){result.textContent=String(error);result.style.color='red'}
+</script>

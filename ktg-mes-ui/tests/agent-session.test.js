@@ -138,6 +138,16 @@ async function main() {
   assert.strictEqual(restored.getState(), null)
   assert.strictEqual(saved.size, 0)
 
+  saved.set('ktg-agent-session-pointer', JSON.stringify({ sessionId: 'expired', runId: null, seq: 0 }))
+  const expired = createAgentSessionClient({
+    api: { ...api, getSession: async (_id, options) => {
+      assert.strictEqual(options.restoring, true)
+      throw Object.assign(new Error('Not found'), { response: { status: 404 } })
+    } }, storage, getIdentity: () => auth, fetchStream
+  })
+  assert.strictEqual(await expired.restoreSession(), null)
+  assert.strictEqual(saved.size, 0)
+
   saved.set('ktg-agent-session-pointer', JSON.stringify({ sessionId: 'old', runId: 'r1', seq: 3 }))
   const foreign = createAgentSessionClient({
     api: { ...api, getSession: async () => { throw new Error('SESSION_NOT_FOUND') } },

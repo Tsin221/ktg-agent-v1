@@ -14,7 +14,7 @@
     "test:tooltype": "node tests/tooltype-validation.test.js",
     "test:tm-tool-agent": "node tests/agent-tm-tool.test.js",
     "test:tm-tooltype-agent": "node tests/agent-tm-tooltype.test.js",
-    "test:agent-session": "node tests/agent-session.test.js && node tests/agent-assistant-session.test.js && node tests/agent-assistant-state.test.js && node tests/agent-result-card.test.js"
+    "test:agent-session": "node tests/agent-session.test.js && node tests/agent-assistant-session.test.js && node tests/agent-assistant-state.test.js && node tests/agent-result-card.test.js && node tests/agent-recovery-errors.test.js"
   },
   "husky": {
     "hooks": {

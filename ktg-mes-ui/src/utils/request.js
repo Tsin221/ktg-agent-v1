@@ -112,6 +112,11 @@ service.interceptors.response.use(res => {
     }
   },
   error => {
+    // Recovery callers handle these statuses locally; keep rejecting for their cleanup.
+    const expected = error.config && error.config.expectedErrorStatuses
+    if (error.response && Array.isArray(expected) && expected.includes(error.response.status)) {
+      return Promise.reject(error)
+    }
     console.log('err' + error)
     let { message } = error;
     const responseMessage = error.response && error.response.data && error.response.data.msg;

@@ -21,8 +21,9 @@ export const listAgentSessions = params => request({
   baseURL: '', url: sessionUrl, method: 'get', params
 })
 
-export const getAgentSession = sessionId => request({
-  baseURL: '', url: sessionUrl + '/' + id(sessionId), method: 'get'
+export const getAgentSession = (sessionId, { restoring = false } = {}) => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId), method: 'get',
+  expectedErrorStatuses: restoring ? [404] : []
 })
 
 export const getAgentSessionStats = sessionId => request({
@@ -47,8 +48,9 @@ export const createAgentRun = (sessionId, { requestId, message, pageContext, tas
   headers: { repeatSubmit: false }
 })
 
-export const getAgentRun = runId => request({
-  baseURL: '', url: runUrl + '/' + id(runId), method: 'get'
+export const getAgentRun = (runId, { restoring = false } = {}) => request({
+  baseURL: '', url: runUrl + '/' + id(runId), method: 'get',
+  expectedErrorStatuses: restoring ? [404] : []
 })
 
 export const cancelAgentRun = (runId, requestId) => request({
