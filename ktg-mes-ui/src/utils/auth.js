@@ -1,6 +1,6 @@
 import Cookies from 'js-cookie'
 
-const TokenKey = 'Admin-Token'
+const TokenKey = process.env.VUE_APP_DEMO_MODE === 'true' ? 'KTG-Demo-Token' : 'Admin-Token'
 
 export function getToken() {
   return Cookies.get(TokenKey)

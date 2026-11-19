@@ -24,6 +24,7 @@
 
 # Generated dependencies and build caches
 **/node_modules/
+**/dist-demo/
 **/target/
 **/.venv/
 **/.pytest_cache/

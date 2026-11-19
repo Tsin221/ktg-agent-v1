@@ -9,9 +9,15 @@ import { isRelogin } from '@/utils/request'
 NProgress.configure({ showSpinner: false })
 
 const whiteList = ['/login', '/auth-redirect', '/bind', '/register']
+if (process.env.VUE_APP_DEMO_MODE === 'true') whiteList.push('/experience')
 
 router.beforeEach((to, from, next) => {
   NProgress.start()
+  if (process.env.VUE_APP_DEMO_MODE === 'true' && to.path === '/experience') {
+    next()
+    NProgress.done()
+    return
+  }
   if (getToken()) {
     to.meta.title && store.dispatch('settings/setTitle', to.meta.title)
     /* has token*/
@@ -45,7 +51,7 @@ router.beforeEach((to, from, next) => {
       // 在免登录白名单，直接进入
       next()
     } else {
-      next(`/login?redirect=${to.fullPath}`) // 否则全部重定向到登录页
+      next(process.env.VUE_APP_DEMO_MODE === 'true' ? '/experience' : `/login?redirect=${to.fullPath}`)
       NProgress.done()
     }
   }

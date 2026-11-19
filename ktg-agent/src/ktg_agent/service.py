@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ktg_agent.identity_scope import identity_scope
+
 import json
 from collections.abc import Callable
 from time import time
@@ -883,8 +885,8 @@ class QueryService:
     def _identity_key(identity: JsonObject) -> str:
         user_id = identity.get("userId")
         if isinstance(user_id, int):
-            return f"id:{user_id}"
+            return f"id:{user_id}{identity_scope(identity)}"
         username = identity.get("userName")
         if isinstance(username, str) and username.strip():
-            return f"name:{username.strip()}"
+            return f"name:{username.strip()}{identity_scope(identity)}"
         raise ValueError("KTG 未返回有效用户身份。")

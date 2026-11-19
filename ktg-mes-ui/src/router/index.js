@@ -30,6 +30,9 @@ import Layout from '@/layout'
 
 // 公共路由
 export const constantRoutes = [
+  ...(process.env.VUE_APP_DEMO_MODE === 'true' ? [{
+    path: '/experience', component: () => import('@/views/experience'), hidden: true
+  }] : []),
   {
     path: '/redirect',
     component: Layout,

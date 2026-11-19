@@ -43,6 +43,7 @@ class KTGClient:
         timeout_seconds: float = 15.0,
         transport: KTGTransport | None = None,
         write_transport: KTGWriteTransport | None = None,
+        scope_by_token: bool = False,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("KTG_BASE_URL must be an HTTP(S) URL")
@@ -53,12 +54,17 @@ class KTGClient:
         self._timeout_seconds = timeout_seconds
         self._transport = transport or self._default_transport
         self._write_transport = write_transport or self._default_write_transport
+        self._identity_scope = hashlib.sha256(authorization.encode()).hexdigest() if scope_by_token else None
 
     async def get_current_user(self) -> JsonObject:
         payload = await self.get("/getInfo")
         user = payload.get("user")
         if not isinstance(user, dict):
             raise KTGError("AUTH_INVALID", "KTG 未返回有效用户身份。", status=401)
+        user = dict(user)
+        user.pop("_agent_scope", None)
+        if self._identity_scope:
+            user["_agent_scope"] = self._identity_scope
         return cast(JsonObject, user)
 
     async def get(

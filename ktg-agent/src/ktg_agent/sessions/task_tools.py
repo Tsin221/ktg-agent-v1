@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ktg_agent.identity_scope import identity_scope
+
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
@@ -55,7 +57,7 @@ def owner_from_identity(identity: JsonObject) -> str:
     user_id = identity.get("userId")
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         raise KTGError("AUTH_INVALID", "KTG 未返回有效用户身份。", status=401)
-    return f"id:{user_id}"
+    return f"id:{user_id}{identity_scope(identity)}"
 
 
 _STOCK_TOOLS = {"ktg_query_stock", STOCK_SUMMARY_TOOL}

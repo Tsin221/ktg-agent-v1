@@ -1,0 +1,48 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MES 浏览器业务验收</title><style>body{margin:0;font:15px system-ui}#results{padding:8px 20px;background:#eff6ff}iframe{border:0;width:100%;height:900px}.pass{color:#087749}.fail{color:#bc2030}</style><div id="results"></div><iframe id="mes" title="真实 MES"></iframe><script type="module">
+const frame=document.querySelector('#mes'),out=document.querySelector('#results');
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(read,timeout=15000){const end=Date.now()+timeout;while(Date.now()<end){const value=read();if(value)return value;await pause(100)}return null}
+const check=(ok,text)=>{const p=document.createElement('p');p.className=ok?'pass':'fail';p.textContent=(ok?'通过 · ':'失败 · ')+text;out.append(p);if(!ok)throw Error(text)};
+try {
+ frame.src='/experience';
+ check(await until(()=>frame.contentDocument?.querySelector('.agent-launcher')),'免登录进入完整 MES');
+ let doc=frame.contentDocument;
+ frame.contentWindow.addEventListener('error',e=>{out.append(Object.assign(document.createElement('p'),{textContent:'页面错误：'+e.message}))});
+ frame.contentWindow.addEventListener('unhandledrejection',e=>{out.append(Object.assign(document.createElement('p'),{textContent:'请求错误：'+String(e.reason)}))});
+ doc.querySelector('#app')?.__vue__?.$router.onError(e=>{out.append(Object.assign(document.createElement('p'),{textContent:'路由错误：'+String(e)}))});
+ check(doc.querySelector('.sidebar-container')&&doc.querySelector('.el-table'),'原有菜单、业务表格已显示');
+ check(!doc.body.innerText.includes('102,400'),'首页不显示旧的示例设备总数');
+ const equipmentMenu=[...doc.querySelectorAll('.el-submenu__title')].find(e=>e.textContent.includes('设备管理'));
+ equipmentMenu.click();await pause(200);
+ const repairLink=[...doc.querySelectorAll('.sidebar-container a')].find(e=>e.textContent.includes('维修单'));
+ check(repairLink,'维修业务菜单可用');repairLink.click();
+ check(await until(()=>doc.querySelector('.app-main')?.innerText.includes('REP-001')),'点击菜单进入真实维修单页面');
+ const add=[...doc.querySelectorAll('.app-main button')].find(e=>e.textContent.trim()==='新增');
+ check(add,'维修单新增操作可用');add.click();
+ check(await until(()=>[...doc.querySelectorAll('.el-dialog__wrapper')].some(e=>getComputedStyle(e).display!=='none')),'原有维修单表单正常打开');
+ const close=[...doc.querySelectorAll('.el-dialog__wrapper')].find(e=>getComputedStyle(e).display!=='none')?.querySelector('.el-dialog__headerbtn');
+ close?.click();await pause(200);
+ for(const menu of doc.querySelectorAll('.el-submenu__title'))if(!menu.parentElement.classList.contains('is-open'))menu.click();
+ await pause(250);
+ const links=[...doc.querySelectorAll('.sidebar-container a')].map(e=>({href:e.getAttribute('href'),label:e.textContent.trim()})).filter(e=>e.href?.startsWith('/')&&!['/','/index'].includes(e.href));
+ for(const item of links){
+  const link=[...doc.querySelectorAll('.sidebar-container a')].find(e=>e.getAttribute('href')===item.href);link.click();
+  if(!await until(()=>frame.contentWindow.location.pathname===item.href,20000))throw Error('菜单未打开：'+item.label);
+  await pause(800);
+  const error=doc.querySelector('.el-message--error');if(error)throw Error(item.label+'：'+error.textContent);
+ }
+ check(true,`${links.length} 个已开放业务菜单均可进入`);
+ doc.querySelector('.agent-launcher').click();
+ const input=await until(()=>doc.querySelector('#agent-query-input'));
+ check(input,'现有 AI 助手可以打开');
+ input.value='查询设备 DEV-001 的维修记录';input.dispatchEvent(new frame.contentWindow.Event('input',{bubbles:true}));await pause(100);
+ doc.querySelector('.agent-panel__composer').dispatchEvent(new frame.contentWindow.Event('submit',{bubbles:true,cancelable:true}));
+ check(await until(()=>doc.querySelector('.agent-entry--assistant')?.innerText.includes('REP-001'),120000),'通过浏览器发送问题并收到真实维修记录');
+ check(!doc.querySelector('.agent-message--error'),'助手未显示接口错误');
+ frame.contentWindow.location.reload();
+ check(await until(()=>frame.contentDocument?.querySelector('.agent-launcher')),'刷新后保持体验登录');
+ doc=frame.contentDocument;doc.querySelector('.agent-launcher').click();
+ check(await until(()=>doc.body.innerText.includes('REP-001'),20000),'刷新后恢复会话记录');
+ document.title='PASS · MES 浏览器业务验收';
+}catch(error){document.title='FAIL · MES 浏览器业务验收';out.append(Object.assign(document.createElement('p'),{className:'fail',textContent:'失败：'+String(error)}));console.error(error)}
+</script></html>

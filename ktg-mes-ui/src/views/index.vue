@@ -1,7 +1,8 @@
 <template>
   <div class="dashboard-editor-container">
 
-    <panel-group @handleSetLineChartData="handleSetLineChartData" />
+    <demo-equipment-summary v-if="demoMode" />
+    <panel-group v-else @handleSetLineChartData="handleSetLineChartData" />
 
     <el-row :gutter="32" style="padding:16px 16px 0;margin-bottom:32px;">
         <el-card>
@@ -79,6 +80,7 @@ import {getHomeList} from "@/api/mes/pro/workorder";
 import {getMyCharts} from "@/api/mes/report/chart";
 import Chart from "./mes/report/chart/chart.vue"
 import PanelGroup from './dashboard/PanelGroup'
+import DemoEquipmentSummary from './dashboard/DemoEquipmentSummary'
 import LineChart from './dashboard/LineChart'
 import RaddarChart from './dashboard/RaddarChart'
 import PieChart from './dashboard/PieChart'
@@ -106,6 +108,7 @@ const lineChartData = {
 export default {
   name: 'Index',
   components: {
+    DemoEquipmentSummary,
     Chart,
     PanelGroup,
     LineChart,
@@ -115,6 +118,7 @@ export default {
   },
   data() {
     return {
+        demoMode: process.env.VUE_APP_DEMO_MODE === 'true',
         loading: true,
         queryParams: {status:'CONFIRMED'},
         workorderList: [],

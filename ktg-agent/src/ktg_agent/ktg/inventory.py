@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ktg_agent.identity_scope import identity_scope
+
 import hashlib
 import json
 import sqlite3
@@ -31,7 +33,7 @@ _ACTIONS = {
 def _user_key(identity: object) -> str:
     if not isinstance(identity, Mapping) or not isinstance(identity.get("userId"), int):
         raise ValueError("KTG 未返回有效用户 ID。")
-    return f"id:{identity['userId']}"
+    return f"id:{identity['userId']}{identity_scope(identity)}"
 
 
 def _digest(proposal: Mapping[str, object]) -> str:

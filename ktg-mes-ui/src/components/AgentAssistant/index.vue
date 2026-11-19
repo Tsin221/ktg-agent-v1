@@ -153,8 +153,9 @@
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
-          <h3>今天想查询什么？</h3>
-          <p>你可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。</p>
+          <h3>{{ demoMode ? '今天想处理什么？' : '今天想查询什么？' }}</h3>
+          <p v-if="demoMode">查询记录，或告诉我你想办理的业务。</p>
+          <p v-else>你可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"
@@ -352,7 +353,7 @@
           v-model="draft"
           rows="2"
           maxlength="2000"
-          placeholder="例如：查询产品 A 的库存"
+          :placeholder="demoMode ? '例如：查一下设备 DEV-001 的维修记录' : '例如：查询产品 A 的库存'"
           :disabled="composerBusy"
           @keydown.enter.exact.prevent="send"
         />
@@ -481,7 +482,10 @@ export default {
       messages: [],
       expandedOptions: {},
       openQueryDetails: {},
-      examples: ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
+      demoMode: process.env.VUE_APP_DEMO_MODE === 'true',
+      examples: process.env.VUE_APP_DEMO_MODE === 'true'
+        ? ['查一下设备 DEV-001 的维修记录', '查看工单 WO-002 的生产情况', '查询 BRG-6204 的分仓库存']
+        : ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
     }
   },
   computed: {

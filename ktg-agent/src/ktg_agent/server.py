@@ -51,6 +51,7 @@ class Settings:
     ktg_base_url: str
     host: str = "127.0.0.1"
     port: int = 8001
+    scope_by_token: bool = False
     inventory_db_path: str = ""
     session_db_path: str = ""
     enable_item_receipt: bool = False
@@ -172,6 +173,7 @@ class Settings:
             ktg_base_url=ktg_base_url,
             host=host,
             port=port,
+            scope_by_token=os.environ.get("AGENT_SCOPE_BY_TOKEN", "false").lower() == "true",
             inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
             session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
             workorder_db_path=os.environ.get("AGENT_WORKORDER_DB", "").strip(),
@@ -244,6 +246,7 @@ def create_service(settings: Settings) -> QueryService:
         return KTGClient(
             base_url=settings.ktg_base_url,
             authorization=authorization,
+            scope_by_token=settings.scope_by_token,
         )
 
     actions = frozenset(
@@ -468,7 +471,8 @@ def create_service(settings: Settings) -> QueryService:
 
 def create_session_service(settings: Settings, service: QueryService) -> SessionService:
     def client_factory(authorization: str) -> KTGClient:
-        return KTGClient(base_url=settings.ktg_base_url, authorization=authorization)
+        return KTGClient(base_url=settings.ktg_base_url, authorization=authorization,
+                         scope_by_token=settings.scope_by_token)
 
     repository = create_session_repository(settings)
     repository.recover_interrupted_runs()

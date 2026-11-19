@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ktg_agent.identity_scope import identity_scope
+
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
@@ -1095,10 +1097,10 @@ def _identity_key(identity: object) -> str:
         raise PreviewError("AUTH_REQUIRED", "无法确认当前用户身份。")
     user_id = identity.get("userId")
     if isinstance(user_id, int) and user_id >= 0:
-        return f"id:{user_id}"
+        return f"id:{user_id}{identity_scope(identity)}"
     username = identity.get("userName")
     if isinstance(username, str) and username.strip():
-        return f"name:{username.strip()}"
+        return f"name:{username.strip()}{identity_scope(identity)}"
     raise PreviewError("AUTH_REQUIRED", "无法确认当前用户身份。")
 
 
