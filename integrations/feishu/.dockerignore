@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!bridge.py
+!cards.py
+!requirements.lock
+!wheels/
+!wheels/**

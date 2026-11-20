@@ -13,6 +13,7 @@ import threading
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from cards import render_result as result_card
 
 LOG = logging.getLogger('ktg.feishu')
 
@@ -107,24 +108,6 @@ class Store:
     def save_account(self, owner: str, token: str):
         with self.connect() as db:
             db.execute('INSERT OR REPLACE INTO accounts VALUES (?,?,?)', (owner, token, time.time()+7*3600))
-
-
-def result_card(result: dict, mes_url: str) -> dict:
-    answer = result.get('answer')
-    if not isinstance(answer, str) or not answer.strip():
-        answer = '本次查询未完成，请稍后重新提问。'
-    if len(answer) > 3500:
-        answer = answer[:3500] + '\n（内容较长，已截取）'
-    return {
-        'config': {'wide_screen_mode': True},
-        'header': {'template': 'blue', 'title': {'tag': 'plain_text', 'content': 'KTG MES · 查询结果'}},
-        'elements': [
-            {'tag': 'div', 'text': {'tag': 'plain_text', 'content': answer}},
-            {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary',
-                'text': {'tag': 'plain_text', 'content': '打开 MES'}, 'url': mes_url}]},
-            {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': 'ktg_demo 演示数据 · 请以业务记录为准'}]},
-        ],
-    }
 
 
 def process_one(store: Store, query, reply, mes_url: str) -> bool:

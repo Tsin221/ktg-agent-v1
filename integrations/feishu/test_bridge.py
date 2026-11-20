@@ -82,8 +82,48 @@ class BridgeTests(unittest.TestCase):
 
     def test_card_cannot_turn_answer_into_actions_or_mentions(self):
         card=result_card({'answer':'<at id=all> [click](https://bad.example)','results':[]},'http://example.test/experience')
-        self.assertEqual(card['elements'][0]['text']['tag'],'plain_text')
-        self.assertEqual(card['elements'][1]['actions'][0]['url'],'http://example.test/experience')
+        def walk(value):
+            if isinstance(value,dict):
+                yield value
+                for child in value.values():yield from walk(child)
+            elif isinstance(value,list):
+                for child in value:yield from walk(child)
+        parts=list(walk(card))
+        self.assertNotIn('markdown',[p.get('tag') for p in parts])
+        self.assertEqual([p['url'] for p in parts if 'url' in p],['http://example.test/experience'])
+
+    def test_repair_card_uses_facts_table_and_recorded_date_flow(self):
+        repair={'repairId':1,'repairCode':'REP-001','machineryCode':'DEV-001','machineryName':'一号装配机',
+                'status':'FINISHED','repairResult':'SUCCESS','requireDate':'2026-11-11',
+                'finishDate':'2026-11-12','confirmDate':'2026-11-13'}
+        card=result_card({'answer':'不应显示的长篇说明'*200,'results':[
+            {'kind':'dv_repair_detail','repair':repair},
+            {'kind':'dv_repair_lines','repair':repair,'rows':[{'repairId':1,'malfunction':'连接件异响','repairDes':'紧固后试运行正常'}],'total':1}]},'http://example.test')
+        raw=json.dumps(card,ensure_ascii=False)
+        for text in ['REP-001','已完成','连接件异响','紧固后试运行正常','11-11','11-12','11-13','→']:
+            self.assertIn(text,raw)
+        self.assertNotIn('不应显示',raw)
+        self.assertGreaterEqual(sum(e.get('tag')=='column_set' for e in card['elements']),3)
+
+    def test_unqueried_repair_lines_are_not_invented(self):
+        card=result_card({'answer':'维修成功，已验收','results':[{'kind':'dv_repair_detail','repair':{
+            'repairId':1,'repairCode':'REP-001','status':'PREPARE'}}]},'http://example.test')
+        raw=json.dumps(card,ensure_ascii=False)
+        self.assertIn('草稿',raw);self.assertIn('未查询',raw)
+        self.assertNotIn('维修成功',raw);self.assertNotIn('已验收',raw)
+
+    def test_repair_lines_do_not_leak_between_records(self):
+        repair={'repairId':1,'repairCode':'REP-001'}
+        card=result_card({'results':[{'kind':'dv_repair_lines','repair':repair,'total':1,
+            'rows':[{'repairId':2,'malfunction':'其他单据的故障'}]}]},'http://example.test')
+        self.assertNotIn('其他单据的故障',json.dumps(card,ensure_ascii=False))
+
+    def test_list_is_bounded_and_preserves_pagination_notice(self):
+        rows=[{'machineryCode':f'DEV-{n:03}','machineryName':f'设备{n}','status':'WORKING','password':'never expose'} for n in range(7)]
+        card=result_card({'results':[{'kind':'dv_machinery_list','rows':rows,'total':20}]},'http://example.test')
+        raw=json.dumps(card,ensure_ascii=False)
+        self.assertIn('DEV-004',raw);self.assertNotIn('DEV-005',raw)
+        self.assertIn('20',raw);self.assertIn('5',raw);self.assertNotIn('never expose',raw)
 
     def test_adapter_uses_separate_demo_tokens_and_only_query_endpoint(self):
         account=Path(self.tmp.name)/'account.json'
