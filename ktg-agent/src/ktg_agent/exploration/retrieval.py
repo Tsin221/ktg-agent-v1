@@ -349,7 +349,7 @@ async def search_business(engine: ReadEngine, arguments: Mapping[str, Any]) -> J
     if sort and specs:
         records = order_rows(records, sort, {key: value.type for key, value in specs[0].fields.items()})
     if any(row["requires_confirmation"] for row in records):
-        reads.warnings.append("相近表达或线索不完整的结果仅为候选；即使只有一条也需核实，不能据此认定故障因果。")
+        reads.warnings.append("相近表达或线索不完整的结果需结合详情、真实关联核实，不能仅凭相似度认定对象或故障因果。可继续查询自行核实，仍无法分辨时再请用户选择。")
     headline = (f"本次已查范围找到 {len(records)} 条候选" if records else "本次已查范围未找到匹配记录")
     if not reads.complete:
         headline += "，部分范围尚未核实"

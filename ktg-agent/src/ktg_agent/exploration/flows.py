@@ -138,7 +138,7 @@ def _repair_result(
     reference = row["record_ref"]
     finished = bool(row.get("finish_date"))
     accepted = bool(row.get("confirm_date"))
-    repair_state = "未核实" if date_warnings else "已完成" if finished else "进行中"
+    repair_state = "未核实" if date_warnings or not finished else "已完成"
     acceptance_state = "未核实" if date_warnings else "已完成" if accepted else "未查到关联记录"
     outcome = row.get("repair_result")
     if date_warnings:

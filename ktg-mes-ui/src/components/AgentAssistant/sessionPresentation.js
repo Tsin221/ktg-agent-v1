@@ -129,6 +129,17 @@ export function compactResultPresentation(messages) {
       presentation: message.resultPresentation && message.resultPresentation[index] || null,
       reference: referenceKinds.has(result.kind) && !result.error
     }))
+    const candidates = new Set()
+    for (let index = results.length - 1; index >= 0; index--) {
+      const entry = results[index]
+      const rows = entry.result.records
+      if (entry.result.kind !== 'exploration_search' || !Array.isArray(rows) || !rows.length ||
+          !rows.every(row => row && typeof row.entity === 'string' && Number.isInteger(row.id))) continue
+      const signature = JSON.stringify([entry.result.coverage, entry.result.offset || 0,
+        rows.map(row => JSON.stringify([row.entity, row.id])).sort()])
+      if (candidates.has(signature)) entry.reference = true
+      else candidates.add(signature)
+    }
     const main = results.filter(item => !item.reference)
     const references = results.filter(item => item.reference)
     const ordered = [...main, ...references]

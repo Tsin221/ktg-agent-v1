@@ -85,6 +85,7 @@ import { getAgentExplorationView } from '@/api/agent'
 const labels = {
   code: '编号', name: '名称', label: '类型', status: '状态', specification: '型号', machinery_spec: '型号',
   workshop_name: '车间', machinery_name: '设备', product_name: '产品', item_name: '物料', client_name: '客户',
+  machinery_code: '设备编号', item_code: '物料编号', workorder_code: '工单编号',
   require_date: '报修日期', finish_date: '完工日期', confirm_date: '验收日期', request_date: '需求日期',
   malfunction: '故障', repair_des: '处理情况', repair_result: '维修结果', unit_of_measure: '单位',
   quantity: '计划数量', quantity_produced: '已生产', quantity_onhand: '现存量', quantity_issued: '领料量',
