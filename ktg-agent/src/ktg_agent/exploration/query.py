@@ -179,10 +179,27 @@ def order_rows(rows: Sequence[JsonObject], sort: Sequence[Mapping[str, object]],
 
 def aggregate_rows(rows: Sequence[JsonObject], group_by: Sequence[str],
                    aggregates: Sequence[Mapping[str, object]], fields: Mapping[str, str]) -> list[JsonObject]:
-    if not aggregates or any(not isinstance(field, str) or field not in fields for field in group_by):
+    if (not group_by and not aggregates) or any(not isinstance(field, str) or field not in fields for field in group_by):
         raise KTGError("UNSUPPORTED_FILTER", "分组或聚合条件无效。")
+    aliases = set(group_by)
+    required = set(group_by)
+    for aggregate in aggregates:
+        op, alias, field = aggregate.get("op"), aggregate.get("as"), aggregate.get("field")
+        if not isinstance(alias, str) or not alias or alias in aliases:
+            raise _invalid("聚合别名必须非空且不能重复。")
+        aliases.add(alias)
+        if op == "count_records" and set(aggregate) == {"op", "as"}:
+            continue
+        if (not isinstance(op, str) or op not in {"sum", "avg", "min", "max"}
+                or not isinstance(field, str) or field not in fields
+                or set(aggregate) != {"op", "as", "field"}
+                or fields[field] not in {"integer", "decimal", "number", "numeric"}):
+            raise KTGError("AMBIGUOUS_AGGREGATION", "请选择可用数值字段、聚合方式和根实体粒度。")
+        required.add(field)
     deduplicated: dict[str, JsonObject] = {}
     for row in rows:
+        if not required <= row.keys():
+            raise KTGError("FIELD_UNAVAILABLE", "来源未返回所需分组或统计字段，不能将缺失字段当作空值。")
         if row.get("id") is None:
             raise KTGError("AMBIGUOUS_AGGREGATION", "缺少根实体主键，无法确定统计粒度。")
         key = str(row["id"])
@@ -191,7 +208,7 @@ def aggregate_rows(rows: Sequence[JsonObject], group_by: Sequence[str],
         deduplicated[key] = row
     groups: dict[tuple[object, ...], list[JsonObject]] = {(): []} if not group_by else {}
     for row in deduplicated.values():
-        groups.setdefault(tuple(row.get(key) for key in group_by), []).append(row)
+        groups.setdefault(tuple(row[key] for key in group_by), []).append(row)
     output: list[JsonObject] = []
     for group, members in groups.items():
         result: JsonObject = {field: members[0].get(field) for field in group_by}

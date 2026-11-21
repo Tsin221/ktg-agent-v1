@@ -181,8 +181,15 @@
               <p>{{ message.resultPresentation[index].summary }}<span v-if="message.resultPresentation[index].queriedAt"> · 查询时间 {{ message.resultPresentation[index].queriedAt }}</span></p>
             </div>
             <div v-show="!message.resultPresentation[index] || message.resultPresentation[index].open" :id="message.resultPresentation[index] ? message.resultPresentation[index].id : null">
+              <exploration-result
+                v-if="result && typeof result.kind === 'string' && result.kind.startsWith('exploration_')"
+                class="agent-result-surface"
+                :result="result"
+                :session-id="sessionId"
+                @selected="continueExploration($event, message.sourceText)"
+              />
               <agent-workorder-draft-card
-                v-if="isWorkorderResult(result)"
+                v-else-if="isWorkorderResult(result)"
                 class="agent-result-surface"
                 :result="result"
                 :confirming="confirmingPreviewId === result.preview_id"
@@ -366,8 +373,6 @@
           <span>{{ canInput ? '提交' : '发送' }}</span>
         </button>
       </form>
-      <p v-if="canInput" class="agent-panel__hint">{{ inputMode === 'steer' ? '下一个可执行的步骤会考虑你的新指示。' : '当前工作准备结束且仍有执行额度时处理。' }}输入不会撤销已执行的操作。</p>
-      <p v-else class="agent-panel__hint">使用当前登录账号权限</p>
     </section>
   </div>
 </template>
@@ -378,6 +383,7 @@ import { agentSession, createAgentSession, renameAgentSession, listAgentSessions
   confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
   confirmTmToolType, confirmTmTool } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
+import ExplorationResult from './ExplorationResult.vue'
 import AgentInventoryCard from './InventoryCard.vue'
 import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
 import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
@@ -417,7 +423,7 @@ export function clampPanelSize(size, viewport) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentTmToolCard, AgentDvCheckPlanCard, AgentDvRepairCard },
+  components: { ExplorationResult, AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentTmToolCard, AgentDvCheckPlanCard, AgentDvRepairCard },
   data() {
     return {
       open: false,
@@ -1012,6 +1018,12 @@ export default {
       this.open = false
       this.sessionsOpen = false
       this.$nextTick(() => this.$refs.launcher && this.$refs.launcher.focus())
+    },
+    continueExploration(candidate, sourceText) {
+      if (!candidate.resume || !sourceText || this.draft.trim() || this.pendingSubmission || this.inputAttempt || this.loading) return
+      const object = [candidate.code, candidate.name].filter(Boolean).join(' ')
+      this.draft = `已选择${object || '该对象'}，请继续完成刚才的问题：${sourceText}`
+      this.send()
     },
     submitExample(example) {
       this.draft = example
@@ -1945,7 +1957,6 @@ export default {
 .agent-input-status { margin-top: 4px; color: var(--assistant-muted); font-size: 12px; text-align: right; }
 .agent-input-status button { border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; }
 .agent-business-status { margin: 8px 0; color: var(--assistant-muted); font-size: 12px; }
-.agent-panel__hint { flex-shrink: 0; margin: 0; padding: 0 16px 9px; color: var(--assistant-muted); font-size: 12px; line-height: 1.35; }
 .agent-progress { margin-top: 14px; padding-left: 10px; border-left: 2px solid var(--assistant-accent); }
 .agent-progress__status { margin-top: 3px; color: var(--assistant-muted); font-size: 12px; }
 .agent-panel__status {

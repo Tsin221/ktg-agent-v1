@@ -9,6 +9,8 @@ from collections.abc import Callable
 from time import time
 from typing import cast
 from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from jsonschema import Draft202012Validator
 
 from ktg_agent.core.events import EventPublisher, EventSink
 from ktg_agent.core.loop import AgentLoop, AgentRunResult, RunLimits
@@ -80,6 +82,10 @@ from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
 from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches, ToolManifest
 from ktg_agent.tools.discovery import RunToolDiscovery, directory_definitions
+from ktg_agent.exploration.runtime import ExplorationRuntime
+from ktg_agent.exploration.tools import (
+    build_exploration_tools, exploration_factories, exploration_manifests,
+)
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
 from ktg_agent.tools.permissions import PermissionAny, PermissionAll, PermissionLeaf, PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.runner import CallAuthorization
@@ -93,10 +99,12 @@ type KTGClientFactory = Callable[[str], KTGClient]
 SYSTEM_PROMPT = """你是 KTG MES 的业务助手。
 用户问“你能做什么”时，用 search_tools(query="") 查看当前权限下的能力，直接按返回说明回答，不为介绍能力加载或执行业务工具。
 搜索可使用中文关键词；module 只能使用工具 schema 中的内部键。只复制搜索结果中的准确工具名和版本，不猜名称、不改版本。
-搜索未匹配时的备选能力不代表支持原请求。若已发现的工具需要用户尚未提供的必填条件，应询问该条件；不要通过反复搜索猜测另一个工具。
+搜索未匹配时的备选能力不代表支持原请求。若查询工具需要用户未提供的编号，应先用名称、型号、故障、时间等已有线索搜索对象，再使用结果中的真实编号或引用。只有确实缺少可辨别线索时才简短询问车间或故障，不要求用户记住完整编码。允许根据真实结果改词、换已授权工具、正反向追踪和继续翻页，不猜工具名或权限。
 例如现有分仓库存查询要求物料编码；“全部库存”不能擅自当成单个物料查询或声称支持全库汇总。
 必须通过已注册工具查询事实，不得猜测产品、库存或工单数据。
-涉及多张工单时，最终答复按工单编号分段汇总用户要求的字段及核对结果。工单编号独占一行，字段用简短列表，避免在窄对话窗显示 Markdown 表格。把查询失败、未执行和仅查到部分范围的项目标为未核实，并说明已查范围。工具确认无匹配记录时写明查询范围；数量为零须有实际数据。按最新已消费的用户要求确定汇总范围。
+所有回答优先给有证据的结论，后附少量关键字段；多条记录用简表，流程优先用完整流程工具返回的图和节点，不重复抄写长段说明。把查询失败、未执行和仅查到部分范围的项目标为未核实，并说明已查范围。工具确认无匹配记录时写明查询范围；数量为零须有实际数据。按最新已消费的用户要求确定汇总范围。
+用户只给零碎线索时，先自主发现和加载搜索/查询工具，组合编号前缀、名称、型号、故障、时间和真实关联。一次未匹配就根据结果改词、放宽不确定条件或换授权路径，不立即要求用户逐项填写条件。只有一条证据充分的匹配时，直接继续完成原问题；多条可能匹配时展示名称、车间等可区分字段的候选供点选。弱相似不冒充唯一确定，尽量用已有信息缩小范围；只有确实无法消歧时才追问一条容易记得的线索，不要求完整编号。
+根据当前问题、最近对话和用户点选自行理解‘它/那次/第二台’，不要逐项询问指代。若通用探索工具可用，先用它找对象和关系，内部实体键、字段和引用从真实目录/结果取得；没有工具覆盖的事实如实说明，不编造状态。列表中的候选/表格与完整流程会直接显示在助手里，最终文字只补结论和必要解释。
 所有查询都使用当前网页登录用户的身份和权限；权限不足时如实说明，不能改用其他身份。
 允许查询产品资料、分仓库存和生产工单，也可以为用户明确要求的工单草稿创建或编辑生成预览。
 设备分类支持查询树和详情；新增、改名、启停只生成预览，仍需网页确认；删除设备分类和修改父类型不支持，应让用户在页面或联系管理员处理。设备分类可能重名，按名称命中多个时必须让用户按 ID 或路径确认。
@@ -146,8 +154,10 @@ class QueryService:
         max_active_tools: int = 8,
         max_schema_tokens: int = 6000,
         enable_workorder_progress: bool = False,
+        exploration_runtime: ExplorationRuntime | None = None,
     ) -> None:
         self._provider = provider
+        self._exploration_runtime = exploration_runtime
         self._model_config = model_config
         self._ktg_client_factory = ktg_client_factory
         self._preview_store = workorder_store or PreviewStore(ttl_seconds=600)
@@ -197,6 +207,8 @@ class QueryService:
         definitions = (*definitions, *tm_tooltype_write_definitions)
         tm_tool_write_definitions = build_tm_tool_write_tools(tm_tool_store) if tm_tool_store else ()
         definitions = (*definitions, *tm_tool_write_definitions)
+        exploration_definitions = build_exploration_tools(exploration_runtime) if exploration_runtime is not None else ()
+        definitions = (*definitions, *exploration_definitions)
         self._registry = ToolRegistry(definitions)
         extra_factories = {**production_query_factories(), **workorder_progress_factories(),
                            **dv_machinerytype_factories(),
@@ -211,7 +223,8 @@ class QueryService:
                            **tm_tool_factories(),
                            **tm_tool_write_factories(tm_tool_write_definitions),
                            **dv_machinery_write_factories(machinery_write_definitions),
-                           **dv_machinerytype_write_factories(write_definitions)}
+                           **dv_machinerytype_write_factories(write_definitions),
+                           **exploration_factories(exploration_definitions)}
         extra_manifests = (*production_query_manifests(), *workorder_progress_manifests(),
                            *dv_machinerytype_manifests(),
                            *dv_machinery_manifests(), *dv_subject_manifests(),
@@ -225,7 +238,8 @@ class QueryService:
                            *tm_tool_manifests(),
                            *tm_tool_write_manifests(tm_tool_write_definitions),
                            *dv_machinery_write_manifests(machinery_write_definitions),
-                           *dv_machinerytype_write_manifests(write_definitions))
+                           *dv_machinerytype_write_manifests(write_definitions),
+                           *exploration_manifests(exploration_definitions))
         if inventory_store and inventory_actions:
             result_tool = next(item for item in definitions if item.name == "ktg_wm_operation_result")
             stock = PermissionAny((PermissionLeaf("mes:wm:wmstock:list"), PermissionLeaf("mes:wm:wmstock:query")))
@@ -245,6 +259,8 @@ class QueryService:
         self._catalog = build_legacy_catalog(definitions, extra_manifests=extra_manifests,
                                              extra_factories=extra_factories)
         enabled_modules = {"md": True, "wm": True, "pro": True, "dv": True, "tm": True}
+        if exploration_runtime is not None:
+            enabled_modules["system"] = True
         enabled_tools = {definition.name: (enable_workorder_progress or definition.name != "ktg_pro_workorder_progress")
                          for definition in definitions}
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
@@ -409,6 +425,7 @@ class QueryService:
 
         client = self._ktg_client_factory(authorization)
         identity = await client.get_current_user()
+        identity.pop("_agent_session_id", None)
         run_id = str(uuid4())
         permissions = (await self._current_permissions(client, identity)
                        if isinstance(client, KTGClient) else None)
@@ -427,7 +444,7 @@ class QueryService:
         result = await loop.run(
             run_id=run_id,
             messages=(
-                SystemMessage((TextBlock(SYSTEM_PROMPT),)),
+                SystemMessage((TextBlock(self.build_system_prompt(None)),)),
                 UserMessage((TextBlock(clean_message),)),
             ),
             identity=identity,
@@ -447,7 +464,9 @@ class QueryService:
         business_results: list[JsonValue] = []
         for item in result.messages:
             if (isinstance(item, ToolResultMessage) and item.details is not None
-                    and "catalog_version" not in item.details):
+                    and ("catalog_version" not in item.details
+                         or (str(item.details.get("kind", "")).startswith("exploration_")
+                             and item.details.get("kind") != "exploration_catalog"))):
                 business_results.append(item.details)
 
         username = identity.get("userName")
@@ -474,6 +493,7 @@ class QueryService:
         """Run an authenticated turn with durable session history."""
         client = self._ktg_client_factory(authorization)
         identity = await client.get_current_user()
+        identity.pop("_agent_session_id", None)
         permissions = (await self._current_permissions(client, identity)
                        if isinstance(client, KTGClient) else None)
         candidate = self._catalog.candidate_snapshot(
@@ -511,6 +531,10 @@ class QueryService:
             task_budget=task_budget,
         )
         system_prompt = self.build_system_prompt(page_context) + task_context
+        system_prompt += "\n当前业务时间：" + datetime.now(timezone(timedelta(hours=8))).isoformat()
+        if self._exploration_runtime is not None and identity.get("_agent_session_id"):
+            system_prompt += await self._exploration_runtime.focus_context(
+                ToolContext(run_id=run_id, tool_call_id=str(uuid4()), identity=identity, ktg_client=client))
         agent = Agent(loop)
         on_inputs_closed = on_agent_ready(agent) if on_agent_ready is not None else None
         return await agent.prompt(
@@ -521,6 +545,30 @@ class QueryService:
             ktg_client=client,
             on_inputs_closed=on_inputs_closed,
         )
+
+    async def exploration_view(self, *, session_id: str, tool: str, arguments: JsonObject,
+                               authorization: str) -> JsonObject:
+        """Read-only viewer; the HTTP boundary has verified ownership of session_id."""
+        runtime = self._exploration_runtime
+        if runtime is None:
+            raise KTGError("TOOL_DISABLED", "助手探索功能尚未启用。", status=404)
+        if tool not in {"ktg_read_record", "ktg_get_business_flow", "ktg_inspect_result"}:
+            raise ValueError("此入口只允许查看记录、流程或已有结果。")
+        definition = next(item for item in build_exploration_tools(runtime) if item.name == tool)
+        if not Draft202012Validator(definition.input_schema).is_valid(arguments):
+            raise ValueError("查看参数无效，请重新选择记录。")
+        client = self._ktg_client_factory(authorization)
+        identity = await client.get_current_user()
+        identity["_agent_session_id"] = session_id
+        result = await runtime.invoke(tool, arguments, ToolContext(
+            run_id=str(uuid4()), tool_call_id=str(uuid4()), identity=identity, ktg_client=client),
+            remember_selection=True)
+        if result.is_error:
+            code = result.error_code or "VIEW_UNAVAILABLE"
+            status = 403 if code == "PERMISSION_DENIED" else 410 if code == "REFERENCE_EXPIRED" else 400
+            details = result.details or {}
+            raise KTGError(code, str(details.get("message") or "记录暂不可查看，请重新查询。"), status=status)
+        return {"result": result.details}
 
     async def confirm(self, *, preview_id: str, authorization: str) -> JsonObject:
         clean_preview_id = preview_id.strip()

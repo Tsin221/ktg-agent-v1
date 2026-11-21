@@ -7,6 +7,12 @@ const sessionUrl = '/agent-api/v1/sessions'
 const runUrl = '/agent-api/v1/runs'
 const id = value => encodeURIComponent(value)
 
+export const getAgentExplorationView = (sessionId, tool, args) => request({
+  baseURL: '', url: '/agent-api/v1/exploration/view', method: 'post',
+  data: { session_id: sessionId, tool, arguments: args },
+  timeout: 30000, headers: { repeatSubmit: false }
+})
+
 export const createAgentSession = title => request({
   baseURL: '', url: sessionUrl, method: 'post', data: title ? { title } : {},
   headers: { repeatSubmit: false }

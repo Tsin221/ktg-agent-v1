@@ -18,6 +18,12 @@ if ([string]::IsNullOrWhiteSpace($env:AGENT_SESSION_DB)) {
 if ([string]::IsNullOrWhiteSpace($env:AGENT_WORKORDER_DB)) {
     $env:AGENT_WORKORDER_DB = Join-Path $workspaceRoot '.runtime\agent-workorders.sqlite3'
 }
+if ([string]::IsNullOrWhiteSpace($env:AGENT_ENABLE_EXPLORATION)) {
+    $env:AGENT_ENABLE_EXPLORATION = 'true'
+}
+if ([string]::IsNullOrWhiteSpace($env:AGENT_EXPLORATION_DB)) {
+    $env:AGENT_EXPLORATION_DB = Join-Path $workspaceRoot '.runtime\agent-exploration.sqlite3'
+}
 
 Set-Location .\ktg-agent
 uv run --locked python -m ktg_agent.server

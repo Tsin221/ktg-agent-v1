@@ -20,6 +20,8 @@ if ($Service -eq 'backend') {
     $env:AGENT_HOST = '127.0.0.1'
     $env:AGENT_PORT = '8002'
     $env:AGENT_SCOPE_BY_TOKEN = 'true'
+    $env:AGENT_ENABLE_EXPLORATION = 'true'
+    $env:AGENT_EXPLORATION_DB = Join-Path $demoRuntime 'exploration.sqlite3'
     foreach ($name in @('SESSION','WORKORDER','INVENTORY','DV_MACHINERYTYPE','DV_MACHINERY','DV_SUBJECT','DV_CHECKPLAN','DV_REPAIR','TM_TOOLTYPE','TM_TOOL')) {
         [Environment]::SetEnvironmentVariable("AGENT_${name}_DB", (Join-Path $demoRuntime "$($name.ToLower()).sqlite3"), 'Process')
     }

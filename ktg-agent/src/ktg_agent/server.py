@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 import json
 import os
 import select
@@ -18,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from ktg_agent.core.events import EventPublisher, EventSink
 from ktg_agent.context.compaction import PreparedCompaction
 from ktg_agent.core.loop import AgentRunResult, RunLimits
+from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.core.messages import JsonObject, Message
 from ktg_agent.context.spill import SpillSettings
 from ktg_agent.context.window import ContextPolicy
@@ -34,13 +34,16 @@ from ktg_agent.ktg.tm_tool_writes import TmToolPreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
+from ktg_agent.exploration.references import ReferenceStore
+from ktg_agent.exploration.runtime import ExplorationRuntime
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.repository import (ControlConflictError, ControlStateError,
                                            EventHistoryExpiredError, RunBusyError, RunConflictError,
                                            TaskSelectionRequired)
 from ktg_agent.sessions.service import SessionService
-from ktg_agent.sessions.task_tools import task_run_configuration
+from ktg_agent.sessions.task_tools import owner_from_identity, task_run_configuration
+from ktg_agent.tools.registry import ToolDefinition
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,8 @@ class Settings:
     tm_tool_db_path: str = ""
     enable_tm_tool_write: bool = False
     max_output_tokens: int = 1024
+    enable_exploration: bool = False
+    exploration_db_path: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -196,6 +201,8 @@ class Settings:
             enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
             enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
             enable_workorder_progress=os.environ.get("AGENT_ENABLE_WORKORDER_PROGRESS", "false").lower() == "true",
+            enable_exploration=os.environ.get("AGENT_ENABLE_EXPLORATION", "false").lower() == "true",
+            exploration_db_path=os.environ.get("AGENT_EXPLORATION_DB", "").strip(),
             max_total_tokens=max_total_tokens,
             max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 24) or 24,
             max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 16) or 16,
@@ -431,6 +438,17 @@ def create_service(settings: Settings) -> QueryService:
         for db_name, db_path in existing_paths:
             if db_path and tm_tool_path.resolve() == Path(db_path).resolve():
                 raise RuntimeError(f"AGENT_TM_TOOL_DB must differ from {db_name}")
+    exploration_runtime = None
+    if settings.enable_exploration:
+        exploration_path = Path(settings.exploration_db_path)
+        if not settings.exploration_db_path or not exploration_path.is_absolute():
+            raise RuntimeError("AGENT_EXPLORATION_DB must be an absolute path")
+        other_paths = (settings.session_db_path, settings.inventory_db_path, workorder_db_path,
+                       dv_machinerytype_db_path, dv_machinery_db_path, dv_subject_db_path,
+                       dv_checkplan_db_path, dv_repair_db_path, tm_tooltype_db_path, tm_tool_db_path)
+        if any(value and exploration_path.resolve() == Path(value).resolve() for value in other_paths):
+            raise RuntimeError("AGENT_EXPLORATION_DB must differ from other stores")
+        exploration_runtime = ExplorationRuntime(ReferenceStore(exploration_path))
     return QueryService(
         provider=provider,
         model_config=model_config,
@@ -463,6 +481,7 @@ def create_service(settings: Settings) -> QueryService:
         max_active_tools=settings.max_active_tools,
         max_schema_tokens=settings.max_schema_tokens,
         enable_workorder_progress=settings.enable_workorder_progress,
+        exploration_runtime=exploration_runtime,
         limits=RunLimits(max_model_turns=settings.max_model_turns, max_tool_calls=settings.max_tool_calls,
                          max_run_seconds=90, max_parallel_reads=3,
                          max_total_tokens=settings.max_total_tokens),
@@ -477,6 +496,13 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
     repository = create_session_repository(settings)
     repository.recover_interrupted_runs()
     repository.prune_events()
+    def configure_task(run_id: str, identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str, TaskBudget]:
+        run = repository.get_run(owner_from_identity(identity), run_id)
+        if run is None:
+            raise KeyError("run not found")
+        identity["_agent_session_id"] = run.session_id
+        return task_run_configuration(repository, run_id, identity)
+
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
                       event_sink: EventSink, register_agent: RegisterAgent) -> AgentRunResult:
@@ -485,7 +511,7 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
             page_context=page_context, authorization=authorization,
             event_sink=event_sink,
             on_agent_ready=register_agent,
-            task_configuration=partial(task_run_configuration, repository),
+            task_configuration=configure_task,
         )
 
     async def compact(run_id: str, prepared: PreparedCompaction, event_sink: EventSink,
@@ -594,6 +620,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
         if not is_run_create and not is_title and not is_compact and not is_cancel and not is_input and self.path not in {
             "/agent-api/v1/query",
+            "/agent-api/v1/exploration/view",
             "/agent-api/v1/workorder-drafts/confirm",
             "/agent-api/v1/inventory-operations/confirm",
             "/agent-api/v1/dv-machinerytype/confirm",
@@ -626,7 +653,19 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         authorization = self.headers.get("Authorization", "")
         try:
-            if self.path == "/agent-api/v1/sessions":
+            if self.path == "/agent-api/v1/exploration/view":
+                if set(payload) != {"session_id", "tool", "arguments"}:
+                    raise ValueError("查看请求只允许会话、工具和参数。")
+                session_id, tool, arguments = payload["session_id"], payload["tool"], payload["arguments"]
+                if (not isinstance(session_id, str) or not session_id or len(session_id) > 128
+                        or not isinstance(tool, str) or not isinstance(arguments, dict)):
+                    raise ValueError("查看请求参数无效。")
+                async def view() -> JsonObject:
+                    await self.server.session_service.get(authorization, session_id)
+                    return await self.server.query_service.exploration_view(
+                        session_id=session_id, tool=tool, arguments=arguments, authorization=authorization)
+                response = asyncio.run(view())
+            elif self.path == "/agent-api/v1/sessions":
                 title = payload.get("title")
                 if title is not None and (not isinstance(title, str) or not title.strip()):
                     raise ValueError("title 必须是非空文本。")

@@ -81,7 +81,7 @@ export function presentMessages(items) {
         if (call && taskTools.includes(call.name) && result && typeof result.task_id === 'string' && !item.is_error) {
           entry.taskIds = [...new Set([...(entry.taskIds || []), result.task_id])]
         }
-        if (kind) {
+        if (kind && kind !== 'exploration_catalog') {
           entry.results.push(result)
           entry.resultIds.push(id)
         }
