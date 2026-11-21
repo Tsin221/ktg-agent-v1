@@ -83,7 +83,8 @@ def _input(name: str) -> JsonObject:
             "include": {"type": "array", "items": {"enum": ["fields", "dictionaries", "relations", "metrics", "apis", "sql_views"]},
                         "minItems": 1, "maxItems": 6, "uniqueItems": True}, **paging})
     elif name == "ktg_search_business":
-        schema = _object({"query": _text(2000), "entity_types": _strings(22),
+        schema = _object({"query": {**_text(2000), "description": "用户原话或保留有效线索的检索改写；保留时间、否定、编号前缀与目标对象，不只留下泛化关键词。"},
+            "entity_types": {**_strings(22), "description": "最终返回候选的对象类型，可从目录或前次结果取得键；关联线索来源不必混入候选类型。例如按维修线索找设备时可只返回设备。"},
             "filters": {"$ref": "#/$defs/condition"},
             "entity_filters": _map({"$ref": "#/$defs/condition"}, 22), "sort": _sort(), **paging}, ("query",))
         schema["not"] = {"required": ["filters", "entity_filters"]}

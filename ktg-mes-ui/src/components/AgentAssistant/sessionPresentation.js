@@ -108,6 +108,40 @@ function canonical(value) {
   return value
 }
 
+// These are read-only reference cards. Previews, confirmations and outcomes
+// remain in the main result area and are never hidden by this projection.
+const referenceKinds = new Set([
+  'dv_machinerytype_tree', 'dv_machinerytype_detail', 'dv_machinery_list', 'dv_machinery_detail',
+  'md_machinery_workshop_options', 'dv_subject_list', 'dv_subject_detail',
+  'dv_checkplan_list', 'dv_checkplan_detail', 'dv_checkplan_options', 'dv_checkplan_links',
+  'dv_checkplan_machinery_candidates', 'dv_checkplan_subject_candidates',
+  'dv_repair_list', 'dv_repair_detail', 'dv_repair_lines', 'dv_repair_options',
+  'dv_repair_machinery_candidates', 'dv_repair_subject_candidates',
+  'tm_tooltype_list', 'tm_tooltype_detail', 'tm_tooltype_options',
+  'tm_tool_list', 'tm_tool_detail', 'tm_tool_options'
+])
+
+export function compactResultPresentation(messages) {
+  return messages.map(message => {
+    if (message.role !== 'assistant') return message
+    const results = (message.results || []).map((result, index) => ({ result,
+      id: message.resultIds && message.resultIds[index] || `${message.id}-${index}`,
+      presentation: message.resultPresentation && message.resultPresentation[index] || null,
+      reference: referenceKinds.has(result.kind) && !result.error
+    }))
+    const main = results.filter(item => !item.reference)
+    const references = results.filter(item => item.reference)
+    const ordered = [...main, ...references]
+    const text = message.text || ''
+    const long = text.length > 160 || /\n\s*\|/.test(text)
+    const firstParagraph = (text.trim().split(/\n\s*\n/)[0] || '').replace(/^\s*\|.*$/gm, '').trim() || '查询结果见下方。'
+    const preview = long ? firstParagraph.slice(0, 120) + (firstParagraph.length > 120 ? '…' : '') : text
+    return { ...message, results: ordered.map(item => item.result), resultIds: ordered.map(item => item.id),
+      resultPresentation: ordered.map(item => item.presentation), evidenceStart: main.length,
+      evidenceCount: references.length, textPreview: preview, hasFullText: long && preview !== text }
+  })
+}
+
 function queryScope(args) {
   const labels = { workorder_id: '工单 ID', workorder_code: '工单编号', workorder_name: '工单名称',
     workorder_type: '工单类型', item_code: '产品编码', item_name: '产品名称', warehouse_id: '仓库 ID',

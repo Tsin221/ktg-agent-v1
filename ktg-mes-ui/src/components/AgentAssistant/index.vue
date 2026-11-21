@@ -169,11 +169,21 @@
         </section>
 
         <div v-for="message in displayedMessages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
-          <div v-if="message.text" class="agent-message">{{ message.text }}</div>
+          <div v-if="message.text" class="agent-message">{{ message.textPreview || message.text }}</div>
+          <details v-if="message.hasFullText" class="agent-query-details">
+            <summary>查看完整回复</summary>
+            <div class="agent-message">{{ message.text }}</div>
+          </details>
           <div
             v-for="(result, index) in message.results || []"
             :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
           >
+            <div v-if="message.evidenceCount && index === message.evidenceStart" class="agent-option-summary">
+              <button type="button" :aria-expanded="openQueryDetails[message.id + '-evidence'] ? 'true' : 'false'" @click="$set(openQueryDetails, message.id + '-evidence', !openQueryDetails[message.id + '-evidence'])">
+                {{ openQueryDetails[message.id + '-evidence'] ? '收起查询依据' : '查看查询依据' }} · {{ message.evidenceCount }} 项
+              </button>
+            </div>
+            <div v-show="!message.evidenceCount || index < message.evidenceStart || openQueryDetails[message.id + '-evidence']">
             <div v-if="message.resultPresentation[index]" class="agent-option-summary">
               <button type="button" :aria-expanded="message.resultPresentation[index].open ? 'true' : 'false'" :aria-controls="message.resultPresentation[index].id" @click="toggleOptions(message.resultPresentation[index])">
                 {{ message.resultPresentation[index].title }} · {{ message.resultPresentation[index].open ? '收起' : '展开完整内容' }}
@@ -266,6 +276,7 @@
               />
               <agent-result-card v-else class="agent-result-surface" :result="result" />
             </div>
+            </div>
           </div>
           <p v-if="message.queryError" class="agent-message agent-message--error" role="alert">查询失败 · {{ message.queryError }}</p>
           <details
@@ -310,7 +321,7 @@
         </div>
         <div v-if="liveMessage" class="agent-progress" aria-label="本轮临时进度">
           <div v-if="liveMessage">
-            <div class="agent-message">{{ liveMessage.text }}</div>
+            <div class="agent-message">{{ liveMessage.text.length > 120 ? liveMessage.text.slice(0, 120) + '…' : liveMessage.text }}</div>
             <div class="agent-progress__status">{{ liveMessage.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && liveMessage.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
           </div>
         </div>
@@ -394,7 +405,7 @@ import AgentTmToolCard from './TmToolCard.vue'
 import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
 import AgentDvRepairCard from './DvRepairCard.vue'
 import { isWorkorderAssistantResult } from './workorderPresentation'
-import { isTerminalRun, pageContext, presentMessages, optionCardPresentation, progressFromEvent, runStatusText, usageText,
+import { isTerminalRun, pageContext, presentMessages, optionCardPresentation, compactResultPresentation, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText, queryCardPresentation, toolProgressText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
@@ -530,7 +541,7 @@ export default {
       return { width: `${size.width}px`, height: `${size.height}px` }
     },
     displayedMessages() {
-      return optionCardPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]), this.expandedOptions)
+      return compactResultPresentation(optionCardPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]), this.expandedOptions))
     },
     liveMessage() { return this.progress.messages.slice().reverse().find(message => message.text && !message.queryPreface) },
     toolActivity() { return this.canInput ? toolProgressText(this.progress.tools) : '' },
