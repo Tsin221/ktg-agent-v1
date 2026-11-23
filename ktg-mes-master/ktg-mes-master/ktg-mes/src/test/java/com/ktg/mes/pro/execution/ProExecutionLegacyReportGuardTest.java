@@ -4,12 +4,18 @@ import com.ktg.mes.pro.controller.ProFeedbackController;
 import com.ktg.mes.pro.controller.ProFeedBackMobController;
 import com.ktg.mes.pro.controller.ProTaskMobController;
 import com.ktg.mes.pro.domain.ProFeedback;
+import com.ktg.mes.pro.domain.ProTask;
+import com.ktg.mes.pro.domain.ProWorkorder;
 import com.ktg.mes.pro.mapper.ProFeedbackMapper;
+import com.ktg.mes.pro.service.IProRouteProcessService;
+import com.ktg.mes.pro.service.IProTaskService;
+import com.ktg.mes.pro.service.IProWorkorderService;
 import com.ktg.mes.pro.service.impl.ProFeedbackServiceImpl;
 import com.ktg.mes.wm.domain.WmItemConsume;
 import com.ktg.mes.wm.domain.WmItemConsumeLine;
 import com.ktg.mes.wm.mapper.WmItemConsumeMapper;
 import com.ktg.mes.wm.mapper.WmItemConsumeLineMapper;
+import com.ktg.mes.wm.service.IWmItemConsumeService;
 import com.ktg.mes.wm.service.impl.WmItemConsumeServiceImpl;
 import com.ktg.mes.wm.service.impl.WmItemConsumeLineServiceImpl;
 import org.junit.jupiter.api.*;
@@ -19,6 +25,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.embedded.*;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -99,6 +106,34 @@ class ProExecutionLegacyReportGuardTest {
         lines.deleteWmItemConsumeLineByLineId(222222L);
         verify(feedbackMapper).updateProFeedback(f);verify(feedbackMapper).selectProFeedbackByRecordId(111L);
         verify(consumeMapper).deleteWmItemConsumeByRecordId(22222L);verify(consumeLineMapper).deleteWmItemConsumeLineByLineId(222222L);
+    }
+
+    @Test void oldApprovalStillReachesOriginalControllerAndCompletesUnboundFeedback() {
+        ProFeedback old = new ProFeedback();
+        old.setRecordId(222L); old.setWorkorderId(2L); old.setTaskId(22L);
+        old.setQuantityFeedback(BigDecimal.ONE);
+        old.setQuantityQualified(BigDecimal.ONE);
+        old.setQuantityUnquanlified(BigDecimal.ZERO);
+        when(feedbackMapper.selectProFeedbackByRecordId(222L)).thenReturn(old);
+        IProTaskService tasks = mock(IProTaskService.class);
+        ProTask task = new ProTask(); task.setTaskId(22L); task.setWorkorderId(2L);
+        when(tasks.selectProTaskByTaskId(22L)).thenReturn(task);
+        IProWorkorderService orders = mock(IProWorkorderService.class);
+        when(orders.selectProWorkorderByWorkorderId(2L)).thenReturn(new ProWorkorder());
+        IProRouteProcessService route = mock(IProRouteProcessService.class);
+        IWmItemConsumeService consumption = mock(IWmItemConsumeService.class);
+        ProFeedbackController controller = new ProFeedbackController();
+        ReflectionTestUtils.setField(controller,"proFeedbackService",feedbacks);
+        ReflectionTestUtils.setField(controller,"proTaskService",tasks);
+        ReflectionTestUtils.setField(controller,"proWorkorderService",orders);
+        ReflectionTestUtils.setField(controller,"proRouteProcessService",route);
+        ReflectionTestUtils.setField(controller,"wmItemConsumeService",consumption);
+        assertEquals(200,proxy(controller).execute(222L).get("code"));
+        assertEquals("FINISHED",old.getStatus());
+        assertEquals(BigDecimal.ONE,task.getQuantityProduced());
+        verify(tasks).updateProTask(task);
+        verify(consumption).generateItemConsume(old);
+        verify(feedbackMapper).updateProFeedback(old);
     }
 
     private void refused(Runnable action) {

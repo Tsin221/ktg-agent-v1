@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ktg.mes.pro.execution.mapper.ExecutionTraceMapper">
+    <select id="identity" resultType="map">
+        SELECT s.sn_id,s.sn_code,s.item_id,s.item_code,s.item_name,s.batch_code,
+               u.workorder_id,u.current_task_id,u.unit_state,u.assembly_feedback_id,u.created_at,u.updated_at,
+               w.workorder_code,w.workorder_name,w.status AS order_status,
+               o.route_id,o.route_code,o.route_name,o.released_at,o.release_user_id
+        FROM wm_sn s
+        LEFT JOIN pro_execution_unit u ON u.sn_id=s.sn_id
+        LEFT JOIN pro_execution_order o ON o.workorder_id=u.workorder_id
+        LEFT JOIN pro_workorder w ON w.workorder_id=u.workorder_id
+        WHERE s.sn_code=#{snCode}
+        LIMIT 2
+    </select>
+
+    <select id="tasks" resultType="map">
+        SELECT e.task_id,e.normal_step_no,e.process_id,e.process_code,e.process_name,e.step_kind,e.task_kind,
+               e.source_disposition_id,e.assigned_user_id,e.started_by,e.actual_started_at,e.ended_by,e.actual_ended_at,
+               t.task_code,t.task_name,t.status,t.workstation_id,t.workstation_code,t.workstation_name
+        FROM pro_execution_task e
+        JOIN pro_task t ON t.task_id=e.task_id AND t.workorder_id=e.workorder_id
+        LEFT JOIN pro_execution_disposition d ON d.disposition_id=e.source_disposition_id
+        WHERE e.workorder_id=#{workorderId}
+          AND (e.task_kind='NORMAL' OR (e.task_kind='REWORK' AND d.sn_id=#{snId}))
+        ORDER BY CASE WHEN e.task_kind='NORMAL' THEN 0 ELSE 1 END,e.normal_step_no,e.actual_started_at,e.task_id
+    </select>
+
+    <select id="inputs" resultType="map">
+        SELECT i.input_id,i.task_id,i.feedback_id,i.item_id,l.item_code,l.item_name,
+               i.source_batch_code,i.quantity,i.unit_of_measure,i.used_by,i.used_at,
+               i.material_stock_id,i.consume_line_id,h.record_id AS consume_record_id,h.consume_date,h.status AS consume_status
+        FROM pro_execution_input i
+        JOIN pro_execution_unit u ON u.sn_id=i.sn_id
+        JOIN pro_execution_task e ON e.task_id=i.task_id AND e.workorder_id=u.workorder_id
+        JOIN pro_feedback f ON f.record_id=i.feedback_id AND f.workorder_id=u.workorder_id AND f.task_id=i.task_id
+        JOIN wm_item_consume_line l ON l.line_id=i.consume_line_id AND l.item_id=i.item_id
+        JOIN wm_item_consume h ON h.record_id=l.record_id AND h.workorder_id=u.workorder_id AND h.task_id=i.task_id
+        WHERE i.sn_id=#{snId} AND u.workorder_id=#{workorderId}
+        ORDER BY i.used_at,i.input_id
+    </select>
+
+    <select id="transactions" resultType="map">
+        SELECT transaction_id,transaction_type,transaction_quantity,transaction_date,transaction_flag,material_stock_id,
+               source_doc_id,source_doc_code,source_doc_line_id,source_doc_type,related_transaction_id
+        FROM wm_transaction
+        WHERE source_doc_type=#{sourceDocType} AND source_doc_id=#{sourceDocId}
+          AND source_doc_line_id=#{sourceDocLineId} AND workorder_id=#{workorderId}
+        ORDER BY transaction_date,transaction_id
+    </select>
+
+    <select id="inspections" resultType="map">
+        SELECT i.inspection_id,i.round_no,i.task_id,i.ipqc_id,i.source_disposition_id,i.produce_line_id,
+               q.ipqc_code,q.ipqc_name,q.ipqc_type,q.template_id,q.check_result,q.inspect_date,q.inspector,q.status,
+               q.quantity_check,q.quantity_qualified,q.quantity_unqualified,h.record_id AS produce_record_id,
+               CASE WHEN h.record_id IS NOT NULL THEN p.batch_code END AS produced_batch_code,
+               CASE WHEN h.record_id IS NOT NULL THEN p.quantity_produce END AS quantity_produce
+        FROM pro_execution_inspection i
+        JOIN pro_execution_unit u ON u.sn_id=i.sn_id
+        JOIN pro_execution_task e ON e.task_id=i.task_id AND e.workorder_id=u.workorder_id
+        JOIN qc_ipqc q ON q.ipqc_id=i.ipqc_id AND q.workorder_id=u.workorder_id AND q.task_id=i.task_id
+        LEFT JOIN wm_product_produce_line p ON p.line_id=i.produce_line_id
+        LEFT JOIN wm_product_produce h ON h.record_id=p.record_id
+             AND h.workorder_id=u.workorder_id AND h.task_id=i.task_id
+        WHERE i.sn_id=#{snId} AND u.workorder_id=#{workorderId}
+        ORDER BY i.round_no,i.inspection_id
+    </select>
+
+    <select id="inspectionLines" resultType="map">
+        SELECT line_id,index_id,index_code,index_name,index_type,check_method,qc_tool,
+               unit_of_measure,stander_val,threshold_max,threshold_min,cr_quantity,maj_quantity,min_quantity,remark,attr1,attr2
+        FROM qc_ipqc_line WHERE ipqc_id=#{ipqcId} ORDER BY line_id
+    </select>
+
+    <select id="inspectionDefects" resultType="map">
+        SELECT record_id,line_id,defect_name,defect_level,defect_quantity,remark
+        FROM qc_defect_record WHERE qc_type='IPQC' AND qc_id=#{ipqcId} ORDER BY record_id
+    </select>
+
+    <select id="dispositions" resultType="map">
+        SELECT d.disposition_id,d.inspection_id,d.decision,d.reason,d.decided_by,d.decided_at,
+               e.task_id AS rework_task_id
+        FROM pro_execution_disposition d
+        JOIN pro_execution_unit u ON u.sn_id=d.sn_id
+        JOIN pro_execution_inspection i ON i.inspection_id=d.inspection_id AND i.sn_id=d.sn_id
+        LEFT JOIN pro_execution_task e ON e.source_disposition_id=d.disposition_id
+             AND e.workorder_id=u.workorder_id AND e.task_kind='REWORK'
+        WHERE d.sn_id=#{snId} AND u.workorder_id=#{workorderId}
+        ORDER BY d.decided_at,d.disposition_id
+    </select>
+
+    <select id="packing" resultType="map">
+        SELECT x.task_id,x.packed_by,x.packed_at,x.package_line_id,l.package_id,p.package_code
+        FROM pro_execution_pack x
+        JOIN pro_execution_unit u ON u.sn_id=x.sn_id
+        JOIN pro_execution_task e ON e.task_id=x.task_id AND e.workorder_id=u.workorder_id
+        LEFT JOIN wm_package_line l ON l.line_id=x.package_line_id AND l.workorder_id=u.workorder_id
+        LEFT JOIN wm_package p ON p.package_id=l.package_id
+        WHERE x.sn_id=#{snId} AND u.workorder_id=#{workorderId}
+    </select>
+
+    <select id="assemblyFeedback" resultType="map">
+        SELECT f.record_id,f.task_id,f.feedback_time,f.user_name,f.nick_name,f.status,f.quantity_feedback
+        FROM pro_execution_unit u
+        JOIN pro_feedback f ON f.record_id=u.assembly_feedback_id AND f.workorder_id=u.workorder_id
+        JOIN pro_execution_task e ON e.task_id=f.task_id AND e.workorder_id=u.workorder_id
+        WHERE u.sn_id=#{snId} AND u.workorder_id=#{workorderId}
+    </select>
+
+    <!-- Drive the query from the indexed actual (item_id,source_batch_code) facts.
+         Deduplicate before pagination; deliberately do not consult BOM or stock balance.
+         Match ExecutionAccessService.requireTrace's manager OR current-task assignment scope. -->
+    <sql id="materialRelation">
+        FROM (
+            SELECT i.sn_id,MIN(i.used_at) AS first_used_at,MAX(i.used_at) AS last_used_at,COUNT(*) AS input_count
+            FROM pro_execution_input i
+            JOIN pro_execution_unit iu ON iu.sn_id=i.sn_id
+            JOIN pro_execution_task ie ON ie.task_id=i.task_id AND ie.workorder_id=iu.workorder_id
+            JOIN pro_feedback f ON f.record_id=i.feedback_id AND f.workorder_id=iu.workorder_id AND f.task_id=i.task_id
+            JOIN wm_item_consume_line l ON l.line_id=i.consume_line_id AND l.item_id=i.item_id
+            JOIN wm_item_consume h ON h.record_id=l.record_id AND h.workorder_id=iu.workorder_id AND h.task_id=i.task_id
+            WHERE i.item_id=#{itemId} AND i.source_batch_code=#{batchCode}
+              AND BINARY i.source_batch_code=BINARY #{batchCode}
+            GROUP BY i.sn_id
+        ) matching
+        JOIN pro_execution_unit u ON u.sn_id=matching.sn_id
+        JOIN wm_sn s ON s.sn_id=u.sn_id
+        JOIN pro_execution_order o ON o.workorder_id=u.workorder_id
+        JOIN pro_workorder w ON w.workorder_id=u.workorder_id
+        JOIN pro_execution_task current_task ON current_task.task_id=u.current_task_id AND current_task.workorder_id=u.workorder_id
+        JOIN pro_task t ON t.task_id=current_task.task_id AND t.workorder_id=current_task.workorder_id
+        <if test="!manageAll">
+            WHERE (o.release_user_id=#{actorId} OR current_task.assigned_user_id=#{actorId})
+        </if>
+    </sql>
+    <select id="countMaterials" resultType="long">
+        SELECT COUNT(*) <include refid="materialRelation"/>
+    </select>
+    <select id="materialRows" resultType="map">
+        SELECT s.sn_id,s.sn_code,s.item_id,s.item_code,s.item_name,s.batch_code,
+               u.workorder_id,u.current_task_id,u.unit_state,w.workorder_code,w.workorder_name,w.status AS order_status,
+               matching.first_used_at,matching.last_used_at,matching.input_count
+        <include refid="materialRelation"/>
+        ORDER BY u.sn_id LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+</mapper>
