@@ -28,7 +28,7 @@ public class ExecutionAccessService {
     public void requireTaskUnits(ExecutionAction action, Long workorderId, Long taskId, Collection<Long> snIds) {
         if ((action != ExecutionAction.REPORT && action != ExecutionAction.PACK)
                 || snIds == null || snIds.isEmpty() || new HashSet<>(snIds).size() != snIds.size()
-                || snIds.contains(null)) {
+                || snIds.stream().anyMatch(Objects::isNull)) {
             throw ExecutionException.validation("单件列表无效");
         }
         for (Long snId : snIds) {

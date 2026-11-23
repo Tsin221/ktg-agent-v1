@@ -76,6 +76,7 @@ class ProExecutionAccessTest {
     @Test void workerNeedsAssignedTaskAndMatchingWorkorderAndUnit() {
         login(30, "producer", "report");
         assertDoesNotThrow(() -> access.requireOperation(ExecutionAction.REPORT, 1L, 11L, 100L));
+        assertDoesNotThrow(() -> access.requireTaskUnits(ExecutionAction.REPORT, 1L, 11L, new java.util.TreeSet<>(Arrays.asList(100L))));
         assertThrows(ExecutionException.class,
                 () -> access.requireOperation(ExecutionAction.REPORT, 1L, 11L, 200L));
         assertThrows(ExecutionException.class,
