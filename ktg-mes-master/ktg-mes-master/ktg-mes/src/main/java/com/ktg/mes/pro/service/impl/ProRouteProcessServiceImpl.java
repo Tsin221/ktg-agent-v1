@@ -143,6 +143,7 @@ public class ProRouteProcessServiceImpl implements IProRouteProcessService
     @Override
     public int insertProRouteProcess(ProRouteProcess proRouteProcess)
     {
+        validateExecutionKind(proRouteProcess);
         proRouteProcess.setCreateTime(DateUtils.getNowDate());
         return proRouteProcessMapper.insertProRouteProcess(proRouteProcess);
     }
@@ -156,6 +157,7 @@ public class ProRouteProcessServiceImpl implements IProRouteProcessService
     @Override
     public int updateProRouteProcess(ProRouteProcess proRouteProcess)
     {
+        validateExecutionKind(proRouteProcess);
         proRouteProcess.setUpdateTime(DateUtils.getNowDate());
         return proRouteProcessMapper.updateProRouteProcess(proRouteProcess);
     }
@@ -194,4 +196,19 @@ public class ProRouteProcessServiceImpl implements IProRouteProcessService
     {
         return proRouteProcessMapper.selectByRouteIds(routeIds);
     }
+    private void validateExecutionKind(ProRouteProcess step) {
+        String kind = step.getExecutionKind();
+        if (kind == null) return; // Historical unconfigured routes remain editable.
+        if (!java.util.Arrays.asList("ASSEMBLY", "INSPECTION", "PACKING").contains(kind))
+            throw new com.ktg.common.exception.ServiceException("非法执行类型");
+        if (step.getOrderNum() == null || step.getOrderNum() <= 0)
+            throw new com.ktg.common.exception.ServiceException("执行工序序号必须为正整数");
+        ProRouteProcess query = new ProRouteProcess(); query.setRouteId(step.getRouteId());
+        for (ProRouteProcess other : proRouteProcessMapper.selectProRouteProcessList(query)) {
+            if (java.util.Objects.equals(step.getRecordId(), other.getRecordId())) continue;
+            if (java.util.Objects.equals(step.getOrderNum(), other.getOrderNum()) || java.util.Objects.equals(step.getProcessId(), other.getProcessId()))
+                throw new com.ktg.common.exception.ServiceException("执行路线不允许重复序号或工序");
+        }
+    }
+
 }

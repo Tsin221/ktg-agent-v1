@@ -160,6 +160,8 @@
       </el-table-column>
       <el-table-column label="操作" width="250px" align="center" class-name="small-padding fixed-width">
         <template slot-scope="scope">
+          <el-button v-if="scope.row.status === 'PREPARE'" v-hasPermi="['mes:pro:execution:release']" size="mini" type="text" @click="$refs.executionRelease.open(scope.row)">生产下达</el-button>
+          <el-button v-else v-hasPermi="['mes:pro:execution:query']" size="mini" type="text" @click="$refs.executionRelease.open(scope.row)">执行详情</el-button>
           <el-button
             size="mini"
             type="text"
@@ -371,10 +373,12 @@
         <el-button @click="cancel">关 闭</el-button>
       </div>
     </el-dialog>
+    <execution-release-dialog ref="executionRelease" @released="getList" />
   </div>
 </template>
 
 <script>
+import ExecutionReleaseDialog from "./ExecutionReleaseDialog.vue";
 import { listWorkorder, getWorkorder, delWorkorder, addWorkorder, updateWorkorder } from "@/api/mes/pro/workorder";
 import Workorderbom from "./bom/bom.vue";
 import WorkorderItemList from "./items/item.vue";
@@ -390,6 +394,7 @@ export default {
   name: "Workorder",
   dicts: ['mes_order_status','mes_workorder_sourcetype','mes_workorder_type'],
   components: {
+    ExecutionReleaseDialog,
     Treeselect,
     ItemSelect ,
     ClientSelect,

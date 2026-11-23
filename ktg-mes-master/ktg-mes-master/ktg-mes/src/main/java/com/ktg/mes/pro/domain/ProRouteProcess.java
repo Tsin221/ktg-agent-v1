@@ -18,6 +18,10 @@ public class ProRouteProcess extends BaseEntity
     /** 记录ID */
     private Long recordId;
 
+    private String executionKind;
+    public String getExecutionKind() { return executionKind; }
+    public void setExecutionKind(String executionKind) { this.executionKind = executionKind; }
+
     /** 工艺路线ID */
     @Excel(name = "工艺路线ID")
     private Long routeId;

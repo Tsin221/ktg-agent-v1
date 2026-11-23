@@ -74,6 +74,7 @@ public class PartTypeSerialNoHandler implements PartTypeTemplate {
     private String cycleN(SysAutoCodePart sysAutoCodePart){
         List<SysAutoCodeResult> rs = getAutoCodeResult(sysAutoCodePart.getRuleId(),"","");
         if(CollectionUtil.isNotEmpty(rs)){
+            AutoCodeUtil.threadLocal.set(false);
             //存在记录则在当前记录加上步长
             Integer lastSerialNo = rs.get(0).getLastSerialNo();
             return String.format("%0"+sysAutoCodePart.getPartLength()+"d",lastSerialNo+sysAutoCodePart.getSeriaStep());

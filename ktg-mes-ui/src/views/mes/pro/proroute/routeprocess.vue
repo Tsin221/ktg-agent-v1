@@ -41,6 +41,7 @@
       <el-table-column label="序号" align="center" fixed prop="orderNum" />
       <el-table-column label="工序编码" width="120px" fixed align="center" prop="processCode" />
       <el-table-column label="工序名称" width="150px" fixed align="center" prop="processName" />
+      <el-table-column label="执行类型" width="120" align="center"><template slot-scope="scope">{{ executionKinds[scope.row.executionKind] || "未配置" }}</template></el-table-column>
       <el-table-column label="下一道工序" width="150px"  align="center" prop="nextProcessName" />
       <el-table-column label="与下一道工序关系" width="150px" align="center" prop="linkType">
         <template slot-scope="scope">
@@ -95,6 +96,12 @@
     <!-- 添加或修改工艺组成对话框 -->
     <el-dialog :title="title" :visible.sync="open" width="1100px" append-to-body>
       <el-form ref="form" :model="form" :rules="rules" label-width="150px">
+        <el-form-item label="执行类型" prop="executionKind">
+          <el-select v-model="form.executionKind" clearable @clear="form.executionKind = null" placeholder="未配置（历史工艺）">
+            <el-option v-for="(label, value) in executionKinds" :key="value" :label="label" :value="value" />
+          </el-select>
+          <span style="margin-left:12px">新下达路线按生产、质检、包装依次配置。</span>
+        </el-form-item>
         <el-row>
             <el-col :span="12">
                 <el-form-item label="序号" prop="orderNum">
@@ -222,6 +229,7 @@ export default {
   data() {
     return {
       // 遮罩层
+      executionKinds: { ASSEMBLY: "生产", INSPECTION: "质检", PACKING: "包装" },
       loading: true,
       // 选中数组
       ids: [],
@@ -315,6 +323,7 @@ export default {
     // 表单重置
     reset() {
       this.form = {
+        executionKind: null,
         recordId: null,
         routeId: this.routeId,
         processId: null,

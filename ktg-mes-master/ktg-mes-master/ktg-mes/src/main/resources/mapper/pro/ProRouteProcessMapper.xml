@@ -5,6 +5,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 <mapper namespace="com.ktg.mes.pro.mapper.ProRouteProcessMapper">
     
     <resultMap type="ProRouteProcess" id="ProRouteProcessResult">
+        <result property="executionKind" column="execution_kind" />
         <result property="recordId"    column="record_id"    />
         <result property="routeId"    column="route_id"    />
         <result property="processId"    column="process_id"    />
@@ -31,7 +32,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectProRouteProcessVo">
-        select record_id, route_id, process_id, process_code, process_name, order_num, next_process_id, next_process_code, next_process_name, link_type, default_pre_time, default_suf_time, color_code,key_flag, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from pro_route_process
+        select execution_kind, record_id, route_id, process_id, process_code, process_name, order_num, next_process_id, next_process_code, next_process_name, link_type, default_pre_time, default_suf_time, color_code,key_flag, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from pro_route_process
     </sql>
 
 
@@ -110,6 +111,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <insert id="insertProRouteProcess" parameterType="ProRouteProcess" useGeneratedKeys="true" keyProperty="recordId">
         insert into pro_route_process
         <trim prefix="(" suffix=")" suffixOverrides=",">
+            execution_kind,
             <if test="routeId != null">route_id,</if>
             <if test="processId != null">process_id,</if>
             <if test="processCode != null">process_code,</if>
@@ -134,6 +136,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="updateTime != null">update_time,</if>
          </trim>
         <trim prefix="values (" suffix=")" suffixOverrides=",">
+            #{executionKind},
             <if test="routeId != null">#{routeId},</if>
             <if test="processId != null">#{processId},</if>
             <if test="processCode != null">#{processCode},</if>
@@ -162,6 +165,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <update id="updateProRouteProcess" parameterType="ProRouteProcess">
         update pro_route_process
         <trim prefix="SET" suffixOverrides=",">
+            execution_kind = #{executionKind},
             <if test="routeId != null">route_id = #{routeId},</if>
             <if test="processId != null">process_id = #{processId},</if>
             <if test="processCode != null">process_code = #{processCode},</if>

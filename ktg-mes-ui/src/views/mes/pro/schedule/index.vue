@@ -126,6 +126,7 @@
       </el-table-column>
       <el-table-column label="操作" width="150px" align="center" class-name="small-padding fixed-width">
         <template slot-scope="scope">
+          <el-button v-hasPermi="['mes:pro:execution:query']" size="mini" type="text" @click="$refs.executionRelease.open(scope.row)">执行详情</el-button>
           <el-button
             size="mini"
             type="text"
@@ -268,10 +269,12 @@
         <el-button @click="cancel">关 闭</el-button>
       </div>
     </el-dialog>
+    <execution-release-dialog ref="executionRelease" />
   </div>
 </template>
 
 <script>
+import ExecutionReleaseDialog from "../workorder/ExecutionReleaseDialog.vue";
 import { listWorkorder, getWorkorder, delWorkorder, addWorkorder, updateWorkorder } from "@/api/mes/pro/workorder";
 import {listGanttTaskList} from "@/api/mes/pro/protask";
 import { listProductprocess } from "@/api/mes/pro/routeprocess";
@@ -284,6 +287,7 @@ export default {
   name: "Workorder",
   dicts: ['mes_order_status','mes_workorder_sourcetype'],
   components: {
+    ExecutionReleaseDialog,
     Treeselect,
     ProTask,
     GanttChar

@@ -35,11 +35,16 @@ public class AutoCodeUtil {
     @Autowired
     private PartTypeHandler partTypeHandler;
 
-    private String lastSerialNo;
+    @Autowired
+    private com.ktg.system.mapper.SysAutoCodeRuleMapper ruleLocks;
 
     @Log(title = "生成业务编号",businessType = BusinessType.INSERT)
-    synchronized
+    @org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
     public String genSerialCode(String ruleCode,String inputCharacter){
+        threadLocal.remove();
+        try {
+        Assert.notNull(ruleLocks.lockRule(ruleCode),"编码规则不存在");
+        final String[] lastSerialNo = new String[1];
 
         //查找编码规则
         SysAutoCodeRule rule = iAutoCodeRuleService.getOne(ruleCode);
@@ -61,7 +66,7 @@ public class AutoCodeUtil {
 
             //如果是流水号部分，则进行记录
             if(StringUtils.equals(codePart.getPartType(),PartTypeEnum.PART_TYPE_SERIALNO.getCode())){
-                lastSerialNo = partStr;
+                lastSerialNo[0] = partStr;
             }
             //将获取到的部分组装进整体编码中
             buff.append(partStr);
@@ -72,8 +77,11 @@ public class AutoCodeUtil {
         String autoCode = paddingStr(rule,buff);
 
         //将生成结果保存到数据库
-        saveAutoCodeResult(rule,autoCode,inputCharacter);
+        saveAutoCodeResult(rule,autoCode,inputCharacter,lastSerialNo[0]);
         return autoCode;
+        } finally {
+            threadLocal.remove();
+        }
     }
 
     /**
@@ -111,7 +119,7 @@ public class AutoCodeUtil {
         return sb.toString(); //如果不需要补齐，则直接返回
     }
 
-    private void saveAutoCodeResult(SysAutoCodeRule rule,String autoCode,String inputChar){
+    private void saveAutoCodeResult(SysAutoCodeRule rule,String autoCode,String inputChar,String lastSerialNo){
         Boolean flag = threadLocal.get(); //针对当前线程的判断 flag = true则数据库中没有当前规则的生成记录
         if(flag !=null && flag){
             SysAutoCodeResult rs = new SysAutoCodeResult();
