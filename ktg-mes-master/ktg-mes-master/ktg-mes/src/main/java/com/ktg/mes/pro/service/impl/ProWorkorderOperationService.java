@@ -123,6 +123,8 @@ public class ProWorkorderOperationService {
             }
         } catch (IllegalArgumentException ex) {
             return error(422, "VALIDATION_ERROR", ex.getMessage());
+        } catch (com.ktg.mes.pro.execution.ExecutionException ex) {
+            return ex.toAjaxResult();
         } catch (com.ktg.common.exception.ServiceException ex) {
             int code = ex.getCode() == null ? 409 : ex.getCode();
             return error(code, code == 409 ? "WORKORDER_CONFLICT" : "WORKORDER_ERROR", ex.getMessage());

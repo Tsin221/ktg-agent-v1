@@ -421,7 +421,9 @@ class WmTransactionAtomicityTest {
         @Bean DataSource dataSource() {
             DriverManagerDataSource source = new DriverManagerDataSource();
             source.setDriverClassName("com.mysql.cj.jdbc.Driver");
-            source.setUrl("jdbc:mysql://127.0.0.1:3306/ktg_s304_atomicity_test?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
+            String testPort = System.getenv("KTG_TEST_MYSQL_PORT");
+            int port = testPort == null ? 3306 : Integer.parseInt(testPort);
+            source.setUrl("jdbc:mysql://127.0.0.1:" + port + "/ktg_s304_atomicity_test?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
             source.setUsername("root");
             source.setPassword(System.getenv("MYSQL_ROOT_PASSWORD"));
             return source;

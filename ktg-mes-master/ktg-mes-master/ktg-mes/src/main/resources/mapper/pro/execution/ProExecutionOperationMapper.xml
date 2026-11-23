@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ktg.mes.pro.execution.mapper.ExecutionOperationMapper">
+    <resultMap id="operation" type="com.ktg.mes.pro.execution.ExecutionOperation">
+        <id column="operation_id" property="operationId"/>
+        <result column="action_type" property="actionType"/>
+        <result column="workorder_id" property="workorderId"/>
+        <result column="actor_id" property="actorId"/>
+        <result column="request_digest" property="requestDigest"/>
+        <result column="result_ref" property="resultRef"/>
+        <result column="committed_at" property="committedAt"/>
+    </resultMap>
+    <select id="lockWorkorder" resultType="java.lang.Long" flushCache="true" useCache="false">
+        SELECT workorder_id FROM pro_workorder WHERE workorder_id = #{workorderId} FOR UPDATE
+    </select>
+    <select id="selectById" resultMap="operation" useCache="false">
+        SELECT operation_id, action_type, workorder_id, actor_id, request_digest, result_ref, committed_at
+        FROM pro_execution_operation WHERE operation_id = #{operationId}
+    </select>
+    <insert id="insertClaim" parameterType="com.ktg.mes.pro.execution.ExecutionOperation">
+        INSERT INTO pro_execution_operation
+        (operation_id, action_type, workorder_id, actor_id, request_digest)
+        VALUES (#{operationId}, #{actionType}, #{workorderId}, #{actorId}, #{requestDigest})
+    </insert>
+    <update id="complete">
+        UPDATE pro_execution_operation SET result_ref = #{resultRef}, committed_at = CURRENT_TIMESTAMP(3)
+        WHERE operation_id = #{operationId} AND committed_at IS NULL AND result_ref IS NULL
+    </update>
+</mapper>

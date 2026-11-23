@@ -562,7 +562,9 @@ class InventoryOperationServiceTest {
             if (database != null) {
                 DriverManagerDataSource source = new DriverManagerDataSource();
                 source.setDriverClassName("com.mysql.cj.jdbc.Driver");
-                source.setUrl("jdbc:mysql://127.0.0.1:3306/" + database
+                String testPort = System.getenv("KTG_TEST_MYSQL_PORT");
+                int port = testPort == null ? 3306 : Integer.parseInt(testPort);
+                source.setUrl("jdbc:mysql://127.0.0.1:" + port + "/" + database
                         + "?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
                 source.setUsername("root");
                 source.setPassword(System.getenv("MYSQL_ROOT_PASSWORD"));
