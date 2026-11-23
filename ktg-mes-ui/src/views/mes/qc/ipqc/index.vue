@@ -106,7 +106,7 @@
     </el-row>
 
     <el-table v-loading="loading" :data="ipqcList" @selection-change="handleSelectionChange">
-      <el-table-column type="selection" width="55" align="center" />
+      <el-table-column type="selection" width="55" align="center" :selectable="row => row.status === 'PREPARE' && !row.executionProtected" />
       <el-table-column label="检验单编号" width="150px" align="center" prop="ipqcCode" >
         <template slot-scope="scope">
           <el-button
@@ -151,7 +151,7 @@
             type="text"
             icon="el-icon-edit"
             @click="handleUpdate(scope.row)"
-            v-if="scope.row.status =='PREPARE'"
+            v-if="scope.row.status =='PREPARE' && !scope.row.executionProtected"
             v-hasPermi="['mes:qc:ipqc:edit']"
           >修改</el-button>
           <el-button
@@ -159,7 +159,7 @@
             type="text"
             icon="el-icon-delete"
             @click="handleDelete(scope.row)"
-            v-if="scope.row.status =='PREPARE'"
+            v-if="scope.row.status =='PREPARE' && !scope.row.executionProtected"
             v-hasPermi="['mes:qc:ipqc:remove']"
           >删除</el-button>
         </template>

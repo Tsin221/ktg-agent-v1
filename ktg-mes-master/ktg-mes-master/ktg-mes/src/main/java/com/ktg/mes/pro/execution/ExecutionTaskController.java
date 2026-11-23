@@ -32,8 +32,8 @@ public class ExecutionTaskController {
     @GetMapping("/{taskId}/units")
     public TableDataInfo units(@PathVariable Long taskId,@RequestParam(defaultValue="1") int pageNum,
                                @RequestParam(defaultValue="20") int pageSize,@RequestParam(required=false) String state,
-                               @RequestParam(required=false) String snCode) {
-        return queries.units(taskId,pageNum,pageSize,state,snCode);
+                               @RequestParam(required=false) String snCode, @RequestParam(defaultValue="false") boolean includeHistory) {
+        return queries.units(taskId,pageNum,pageSize,state,snCode,includeHistory);
     }
 
     @GetMapping("/{taskId}/assignment-options")

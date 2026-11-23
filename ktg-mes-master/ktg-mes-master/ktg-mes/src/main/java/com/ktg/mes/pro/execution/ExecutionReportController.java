@@ -9,7 +9,10 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/mes/pro/execution/tasks/{taskId}")
 public class ExecutionReportController {
     private final ExecutionReportService service;
-    public ExecutionReportController(ExecutionReportService service) { this.service = service; }
+    private final ExecutionReworkService rework;
+    private final ExecutionInspectionService inspections;
+    private final ExecutionTaskQueryService tasks;
+    public ExecutionReportController(ExecutionReportService service, ExecutionReworkService rework, ExecutionInspectionService inspections, ExecutionTaskQueryService tasks) { this.service = service; this.rework=rework; this.inspections=inspections; this.tasks=tasks; }
 
     @PostMapping("/reports")
     public AjaxResult report(@PathVariable Long taskId, @RequestBody ExecutionReportRequest request) {
@@ -18,6 +21,10 @@ public class ExecutionReportController {
 
     @PostMapping("/completions")
     public AjaxResult complete(@PathVariable Long taskId, @RequestBody CompletionRequest request) {
+        if(request==null) throw ExecutionException.validation("完结请求不能为空");
+        java.util.Map<String,Object> task=tasks.taskRow(taskId,false);
+        if("REWORK".equals(task.get("task_kind")))return rework.complete(taskId,request.operationId);
+        if("INSPECTION".equals(task.get("step_kind")))return inspections.complete(taskId,request.operationId);
         return service.complete(taskId, request.operationId);
     }
 

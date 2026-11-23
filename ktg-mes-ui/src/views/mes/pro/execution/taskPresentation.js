@@ -16,11 +16,10 @@ export function availableActions(task) {
   if (!task) return []
   const actions = []
   if (task.canAssign) actions.push('assign')
-  // Stage B03 only installs operational UI for the normal assembly task.
-  if (task.stepKind !== 'ASSEMBLY' || task.taskKind === 'REWORK') return actions
+  if (!['ASSEMBLY', 'INSPECTION'].includes(task.stepKind) && task.taskKind !== 'REWORK') return actions
   if (task.status === 'READY' && task.canStart && task.availableUnits > 0) actions.push('start')
-  if (task.status === 'STARTED' && task.availableUnits > 0 && task.canReport) actions.push('report')
-  if (task.status === 'STARTED' && task.availableUnits === 0 && task.canComplete) actions.push('complete')
+  if (task.taskKind !== 'REWORK' && task.stepKind === 'ASSEMBLY' && task.status === 'STARTED' && task.availableUnits > 0 && task.canReport) actions.push('report')
+  if (task.status === 'STARTED' && task.canComplete && (task.taskKind === 'REWORK' || task.availableUnits === 0)) actions.push('complete')
   return actions
 }
 export const safeDocumentUrl = value => typeof value === 'string' && /^(https?:\/\/|\/(?!\/))[^\s\\]+$/i.test(value) ? value : ''

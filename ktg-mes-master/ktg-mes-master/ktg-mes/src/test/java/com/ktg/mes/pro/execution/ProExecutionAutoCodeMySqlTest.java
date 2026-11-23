@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProExecutionAutoCodeMySqlTest {
  @Test void realAllocatorAndMapperProduceUniqueBatchAndRollbackRetryOnSameThread() throws Exception {
   DriverManagerDataSource ds=new DriverManagerDataSource(System.getenv("MES_B01_MYSQL_URL"),System.getenv("MES_B01_MYSQL_USER"),System.getenv("MES_B01_MYSQL_PASSWORD"));ds.setDriverClassName("com.mysql.cj.jdbc.Driver");
-  JdbcTemplate db=new JdbcTemplate(ds);assertTrue(db.queryForObject("select database()",String.class).matches("ktg_mes_b01_[a-z0-9_]+"));
+  JdbcTemplate db=new JdbcTemplate(ds);assertTrue(db.queryForObject("select database()",String.class).matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"));
   SqlSessionFactoryBean f=new SqlSessionFactoryBean();f.setDataSource(ds);f.setTypeAliasesPackage("com.ktg.common.core.domain.entity");f.setMapperLocations(new ClassPathResource("mapper/system/SysAutoCodeResultMapper.xml"));
   SysAutoCodeResultServiceImpl results=new SysAutoCodeResultServiceImpl();ReflectionTestUtils.setField(results,"sysAutoCodeResultMapper",new SqlSessionTemplate(f.getObject()).getMapper(SysAutoCodeResultMapper.class));
   long ruleId=700000000000L+Math.abs(UUID.randomUUID().getLeastSignificantBits()%1000000000L);
@@ -39,7 +39,7 @@ class ProExecutionAutoCodeMySqlTest {
  }
  @Test void legacySingleAllocatorWaitsForBatchWithoutJvmLockInversion() throws Exception {
   DriverManagerDataSource ds=new DriverManagerDataSource(System.getenv("MES_B01_MYSQL_URL"),System.getenv("MES_B01_MYSQL_USER"),System.getenv("MES_B01_MYSQL_PASSWORD"));ds.setDriverClassName("com.mysql.cj.jdbc.Driver");
-  JdbcTemplate db=new JdbcTemplate(ds);assertTrue(db.queryForObject("select database()",String.class).matches("ktg_mes_b01_[a-z0-9_]+"));
+  JdbcTemplate db=new JdbcTemplate(ds);assertTrue(db.queryForObject("select database()",String.class).matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"));
   String ruleCode="B02-CONCURRENT-"+UUID.randomUUID();
   db.update("insert into sys_auto_code_rule(rule_code,rule_name,is_padded,enable_flag) values(?,?,'N','Y')",ruleCode,ruleCode);
   long ruleId=db.queryForObject("select rule_id from sys_auto_code_rule where rule_code=?",Long.class,ruleCode);
@@ -72,4 +72,42 @@ class ProExecutionAutoCodeMySqlTest {
   } finally {pool.shutdownNow();assertTrue(pool.awaitTermination(20,java.util.concurrent.TimeUnit.SECONDS));db.update("delete from sys_auto_code_result where rule_id=?",ruleId);db.update("delete from sys_auto_code_rule where rule_id=?",ruleId);}
  }
 
+ @Test void literalAndDateBatchRuleInitializesWithoutSerialAndRollsBackOrSerializesConcurrentCalls() throws Exception {
+  DriverManagerDataSource ds=new DriverManagerDataSource(System.getenv("MES_B01_MYSQL_URL"),System.getenv("MES_B01_MYSQL_USER"),System.getenv("MES_B01_MYSQL_PASSWORD"));
+  ds.setDriverClassName("com.mysql.cj.jdbc.Driver");JdbcTemplate db=new JdbcTemplate(ds);
+  assertTrue(db.queryForObject("select database()",String.class).matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"));
+  String ruleCode="B04-BATCH-"+UUID.randomUUID();
+  db.update("insert into sys_auto_code_rule(rule_code,rule_name,is_padded,enable_flag) values(?,?,'N','Y')",ruleCode,ruleCode);
+  long ruleId=db.queryForObject("select rule_id from sys_auto_code_rule where rule_code=?",Long.class,ruleCode);
+  java.util.concurrent.ExecutorService pool=java.util.concurrent.Executors.newFixedThreadPool(2);
+  try {
+   SqlSessionFactoryBean factory=new SqlSessionFactoryBean();factory.setDataSource(ds);factory.setTypeAliasesPackage("com.ktg.common.core.domain.entity");
+   factory.setMapperLocations(new ClassPathResource("mapper/system/SysAutoCodeResultMapper.xml"));
+   factory.getObject().getConfiguration().addMapper(com.ktg.system.mapper.SysAutoCodeRuleMapper.class);
+   SqlSessionTemplate sessions=new SqlSessionTemplate(factory.getObject());
+   SysAutoCodeResultServiceImpl results=new SysAutoCodeResultServiceImpl();ReflectionTestUtils.setField(results,"sysAutoCodeResultMapper",sessions.getMapper(SysAutoCodeResultMapper.class));
+   SysAutoCodeRule rule=new SysAutoCodeRule();rule.setRuleId(ruleId);rule.setRuleCode(ruleCode);rule.setIsPadded("N");
+   SysAutoCodePart literal=new SysAutoCodePart();literal.setRuleId(ruleId);literal.setPartType("FIXCHAR");literal.setFixCharacter("BAT");
+   SysAutoCodePart date=new SysAutoCodePart();date.setRuleId(ruleId);date.setPartType("NOWDATE");date.setDateFormat("yyyyMMdd");
+   IAutoCodeRuleService rules=mock(IAutoCodeRuleService.class);when(rules.getOne(ruleCode)).thenReturn(rule);
+   IAutoCodePartService parts=mock(IAutoCodePartService.class);when(parts.listPart(any())).thenReturn(Arrays.asList(literal,date));
+   PartTypeHandler handler=mock(PartTypeHandler.class);
+   when(handler.choiceExecute(any())).thenAnswer(call->{SysAutoCodePart part=call.getArgument(0);return "FIXCHAR".equals(part.getPartType())?new PartTypeFixCharHandler().partHandle(part):new PartTypeNowDateHandler().partHandle(part);});
+   AutoCodeUtil code=new AutoCodeUtil();ReflectionTestUtils.setField(code,"ruleLocks",sessions.getMapper(com.ktg.system.mapper.SysAutoCodeRuleMapper.class));ReflectionTestUtils.setField(code,"iAutoCodeRuleService",rules);ReflectionTestUtils.setField(code,"iAutoCodePartService",parts);ReflectionTestUtils.setField(code,"iAutoCodeResultService",results);ReflectionTestUtils.setField(code,"partTypeHandler",handler);
+   TransactionTemplate tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
+   tx.execute(status->{assertTrue(code.genSerialCode(ruleCode,"P").matches("BAT[0-9]{8}"));assertNull(AutoCodeUtil.threadLocal.get());status.setRollbackOnly();return null;});
+   assertEquals(0,db.queryForObject("select count(*) from sys_auto_code_result where rule_id=?",Integer.class,ruleId));
+   String first=tx.execute(status->code.genSerialCode(ruleCode,"P"));assertNull(AutoCodeUtil.threadLocal.get());
+   assertEquals(first,tx.execute(status->code.genSerialCode(ruleCode,"P")));
+   java.util.concurrent.CountDownLatch gate=new java.util.concurrent.CountDownLatch(1);
+   java.util.concurrent.Future<String> a=pool.submit(()->{gate.await();return tx.execute(status->code.genSerialCode(ruleCode,"P"));});
+   java.util.concurrent.Future<String> b=pool.submit(()->{gate.await();return tx.execute(status->code.genSerialCode(ruleCode,"P"));});gate.countDown();
+   assertEquals(first,a.get(15,java.util.concurrent.TimeUnit.SECONDS));assertEquals(first,b.get(15,java.util.concurrent.TimeUnit.SECONDS));
+   assertEquals(1,db.queryForObject("select count(*) from sys_auto_code_result where rule_id=?",Integer.class,ruleId));
+   assertEquals(4,db.queryForObject("select gen_index from sys_auto_code_result where rule_id=?",Integer.class,ruleId));
+   assertEquals(0,db.queryForObject("select last_serial_no from sys_auto_code_result where rule_id=?",Integer.class,ruleId));
+   tx.execute(status->{code.genSerialCode(ruleCode,"P");status.setRollbackOnly();return null;});
+   assertEquals(4,db.queryForObject("select gen_index from sys_auto_code_result where rule_id=?",Integer.class,ruleId));
+  } finally {pool.shutdownNow();db.update("delete from sys_auto_code_result where rule_id=?",ruleId);db.update("delete from sys_auto_code_rule where rule_id=?",ruleId);}
+ }
 }

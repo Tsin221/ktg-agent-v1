@@ -21,11 +21,11 @@
           <el-button v-if="actions.includes('assign')" :disabled="busy" @click="$emit('assign', task)">分派人员</el-button>
           <el-button v-if="actions.includes('start')" type="primary" :disabled="busy" @click="$emit('start', task)">开工</el-button>
           <el-button v-if="actions.includes('report')" type="primary" :disabled="busy" @click="$emit('report', task)">批量报工</el-button>
-          <el-button v-if="actions.includes('complete')" type="success" :disabled="busy" @click="$emit('complete', task)">完成装配任务</el-button>
+          <el-button v-if="actions.includes('complete')" type="success" :disabled="busy" @click="$emit('complete', task)">{{ task.taskKind === 'REWORK' ? '完成返工任务' : task.stepKind === 'INSPECTION' ? '完成检验任务' : '完成装配任务' }}</el-button>
           <el-button icon="el-icon-refresh" :disabled="busy" @click="reload">刷新详情</el-button>
         </div>
         <el-alert v-if="task.status === 'WAITING'" title="等待前序流转，当前不能开工。" type="info" :closable="false" />
-        <el-alert v-if="task.stepKind !== 'ASSEMBLY'" title="当前阶段仅支持装配操作；质检与包装任务可查看真实流转状态。" type="info" :closable="false" />
+        <rework-panel v-if="task.taskKind === 'REWORK'" />
         <h3>作业指导与 SOP</h3>
         <p v-if="!(task.processContents || []).length && !(task.productSops || []).length" class="muted">暂无既有指导内容，请向工艺管理员确认。</p>
         <div v-for="content in task.processContents || []" :key="'c'+content.contentId" class="instruction"><strong>工序 {{ content.orderNum }}</strong><div class="guidance">{{ content.contentText }}</div><p v-if="content.device || content.material">设备：{{ content.device || '—' }}；物料：{{ content.material || '—' }}</p><a v-if="safeDocumentUrl(content.docUrl)" :href="safeDocumentUrl(content.docUrl)" target="_blank" rel="noopener noreferrer">查看指导附件</a></div>
@@ -33,17 +33,18 @@
         <h3>当前任务 SN</h3>
         <el-form :inline="true" size="small" @submit.native.prevent="searchUnits"><el-form-item label="SN"><el-input v-model="unitQuery.snCode" clearable placeholder="SN 编码" @keyup.enter.native="searchUnits" /></el-form-item><el-form-item><el-button @click="searchUnits">查询</el-button></el-form-item></el-form>
         <el-alert v-if="unitError" :title="unitError" type="error" :closable="false" />
-        <el-table v-loading="unitLoading" :data="units" :row-key="row => row.snId" empty-text="当前没有符合条件的单件"><el-table-column prop="snCode" label="SN" min-width="140" /><el-table-column label="状态"><template slot-scope="{ row }">{{ taskLabel(row.unitState) }}</template></el-table-column></el-table>
+        <el-table v-loading="unitLoading" :data="units" :row-key="row => row.snId" empty-text="当前没有符合条件的单件"><el-table-column prop="snCode" label="SN" min-width="140" /><el-table-column label="状态"><template slot-scope="{ row }">{{ taskLabel(row.unitState) }}</template></el-table-column><el-table-column v-if="task.stepKind === 'INSPECTION' || task.taskKind === 'REWORK'" label="质量记录" width="140"><template slot-scope="{ row }"><el-button type="text" :disabled="busy" @click="$emit('quality', task, row)">检验 / 历史 / 处置</el-button></template></el-table-column></el-table>
         <pagination v-show="unitTotal > 0" :total="unitTotal" :page.sync="unitQuery.pageNum" :limit.sync="unitQuery.pageSize" @pagination="loadUnits" />
       </template>
     </div>
   </section>
 </template>
 <script>
+import ReworkPanel from './ReworkPanel.vue'
 import { getExecutionTask, listExecutionTaskUnits } from '@/api/mes/pro/execution'
 import { taskLabel, stepLabel, elapsedSeconds, formatDuration, availableActions, safeDocumentUrl } from './taskPresentation'
 export default {
-  name: 'ExecutionTaskDetail',
+  name: 'ExecutionTaskDetail', components: { ReworkPanel },
   props: { taskId: Number, busy: Boolean },
   data: () => ({ task: null, loading: false, error: '', readAt: 0, now: 0, timer: null, units: [], unitQuery: { pageNum: 1, pageSize: 10, snCode: '' }, unitTotal: 0, unitLoading: false, unitError: '', serial: 0, unitSerial: 0 }),
   computed: {
@@ -72,7 +73,7 @@ export default {
       const serial = ++this.unitSerial, id = this.taskId
       if (!id) return
       this.unitLoading = true; this.unitError = ''
-      try { const res = await listExecutionTaskUnits(id, this.unitQuery); if (serial === this.unitSerial && id === this.taskId) { this.units = res.rows; this.unitTotal = res.total } }
+      try { const res = await listExecutionTaskUnits(id, { ...this.unitQuery, includeHistory: this.task && this.task.stepKind === 'INSPECTION' && this.task.taskKind !== 'REWORK' }); if (serial === this.unitSerial && id === this.taskId) { this.units = res.rows; this.unitTotal = res.total } }
       catch (e) { if (serial === this.unitSerial && id === this.taskId) { this.units = []; this.unitTotal = 0; this.unitError = e.message || 'SN 读取失败' } }
       finally { if (serial === this.unitSerial) this.unitLoading = false }
     }

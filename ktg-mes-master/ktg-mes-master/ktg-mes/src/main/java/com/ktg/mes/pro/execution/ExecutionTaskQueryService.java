@@ -22,7 +22,7 @@ public class ExecutionTaskQueryService {
             + "and t.workorder_id=e.workorder_id join pro_execution_order o on o.workorder_id=e.workorder_id "
             + "join pro_workorder w on w.workorder_id=e.workorder_id ";
     private static final String TASK_COLUMNS = "select e.task_id,e.workorder_id,e.normal_step_no,e.process_id,e.process_code,"
-            + "e.process_name,e.step_kind,e.task_kind,e.assigned_user_id,e.started_by,e.actual_started_at,e.ended_by,"
+            + "e.process_name,e.step_kind,e.task_kind,e.source_disposition_id,e.assigned_user_id,e.started_by,e.actual_started_at,e.ended_by,"
             + "e.actual_ended_at,t.task_code,t.task_name,t.status,t.workstation_id,t.workstation_code,t.workstation_name,"
             + "t.item_id,t.item_code,t.item_name,t.specification,t.unit_of_measure,t.quantity,t.quantity_produced,"
             + "t.start_time,t.end_time,t.workorder_code,t.workorder_name,w.status as order_status";
@@ -79,14 +79,26 @@ public class ExecutionTaskQueryService {
 
     @Transactional(readOnly = true)
     public TableDataInfo units(Long taskId, int pageNum, int pageSize, String state,String snCode) {
+        return units(taskId,pageNum,pageSize,state,snCode,false);
+    }
+
+    @Transactional(readOnly = true)
+    public TableDataInfo units(Long taskId, int pageNum, int pageSize, String state, String snCode, boolean includeHistory) {
         checkPage(pageNum,pageSize);
         Map<String,Object> task=authorizedTask(taskId);
         List<String> states=eligibleStates((String)task.get("task_kind"),(String)task.get("step_kind"));
         if(states.isEmpty()) return page(Collections.emptyList(),0);
-        String from=" from pro_execution_unit u join wm_sn s on s.sn_id=u.sn_id where u.current_task_id=? and u.workorder_id=?";
-        List<Object> params=new ArrayList<>(Arrays.asList(taskId,task.get("workorder_id")));
-        StringBuilder where=new StringBuilder(from).append(" and u.unit_state in (").append(placeholders(states.size())).append(")");
-        params.addAll(states);
+        boolean history=includeHistory && "NORMAL".equals(task.get("task_kind")) && "INSPECTION".equals(task.get("step_kind"));
+        String from=" from pro_execution_unit u join wm_sn s on s.sn_id=u.sn_id where " + (history ? "(u.current_task_id=? or exists(select 1 from pro_execution_inspection h where h.sn_id=u.sn_id and h.task_id=?))" : "u.current_task_id=?") + " and u.workorder_id=?";
+        List<Object> params=new ArrayList<>();
+        params.add(taskId);
+        if(history) params.add(taskId);
+        params.add(task.get("workorder_id"));
+        StringBuilder where=new StringBuilder(from);
+        if(!history) {
+            where.append(" and u.unit_state in (").append(placeholders(states.size())).append(")");
+            params.addAll(states);
+        }
         if(state!=null && !state.isEmpty()) {
             try { ExecutionState.valueOf(state); } catch(IllegalArgumentException invalid) { throw ExecutionException.validation("单件状态无效"); }
             where.append(" and u.unit_state=?"); params.add(state);
@@ -138,6 +150,7 @@ public class ExecutionTaskQueryService {
         List<String> states=eligibleStates((String)task.get("task_kind"),(String)task.get("step_kind"));
         if(states.isEmpty()) return 0;
         List<Object> params=new ArrayList<>(Arrays.asList(task.get("task_id"),task.get("workorder_id")));
+        if("INSPECTION".equals(task.get("step_kind"))) states=Arrays.asList("WAIT_INSPECTION","WAIT_REINSPECTION");
         params.addAll(states);
         return db.queryForObject("select count(*) from pro_execution_unit where current_task_id=? and workorder_id=? and unit_state in ("
                 + placeholders(states.size())+")",Integer.class,params.toArray());
@@ -165,7 +178,11 @@ public class ExecutionTaskQueryService {
                 && task.get("actual_started_at")!=null && task.get("actual_ended_at")==null;
         boolean assembly="NORMAL".equals(task.get("task_kind")) && "ASSEMBLY".equals(task.get("step_kind"));
         result.put("canReport",started && assembly && count>0 && allowed(ExecutionAction.REPORT,orderId,taskId));
-        result.put("canComplete",started && assembly && count==0 && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId));
+        boolean rework="REWORK".equals(task.get("task_kind"));
+        boolean inspection="NORMAL".equals(task.get("task_kind")) && "INSPECTION".equals(task.get("step_kind"));
+        result.put("canInspect",started && inspection && count>0 && permissions.hasPermi(PREFIX+"inspect") && SecurityUtils.getUserId().equals(task.get("assigned_user_id")));
+        boolean inspectionDone=inspection && db.queryForObject("select count(*) from pro_execution_unit where workorder_id=? and unit_state not in ('WAIT_PACKING','PACKED','SCRAPPED')",Integer.class,orderId)==0;
+        result.put("canComplete",started && ((assembly && count==0 && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId)) || (rework && count==1 && allowed(ExecutionAction.REWORK_COMPLETE,orderId,taskId)) || (inspectionDone && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId))));
         result.put("serverTime",db.queryForObject("select current_timestamp(3)",java.sql.Timestamp.class));
         return result;
     }
@@ -179,7 +196,7 @@ public class ExecutionTaskQueryService {
         if("REWORK".equals(taskKind)) return Collections.singletonList("REWORK_IN_PROGRESS");
         if(!"NORMAL".equals(taskKind)) return Collections.emptyList();
         if("ASSEMBLY".equals(stepKind)) return Collections.singletonList("WAIT_ASSEMBLY");
-        if("INSPECTION".equals(stepKind)) return Arrays.asList("WAIT_INSPECTION","WAIT_REINSPECTION");
+        if("INSPECTION".equals(stepKind)) return Arrays.asList("WAIT_INSPECTION","WAIT_REINSPECTION","WAIT_DISPOSITION");
         if("PACKING".equals(stepKind)) return Collections.singletonList("WAIT_PACKING");
         return Collections.emptyList();
     }

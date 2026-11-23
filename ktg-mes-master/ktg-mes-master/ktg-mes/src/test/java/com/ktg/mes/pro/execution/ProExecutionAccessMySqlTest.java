@@ -37,7 +37,7 @@ class ProExecutionAccessMySqlTest {
         source.setDriverClassName("com.mysql.cj.jdbc.Driver");
         JdbcTemplate jdbc = new JdbcTemplate(source);
         String database = jdbc.queryForObject("SELECT DATABASE()", String.class);
-        assertTrue(database != null && database.matches("ktg_mes_b01_[a-z0-9_]+"),
+        assertTrue(database != null && database.matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"),
                 "Requires dedicated B01 database");
         assertTrue(jdbc.queryForObject("SELECT VERSION()", String.class).startsWith("5.7."));
         String fixture = "B01-ACCESS-" + UUID.randomUUID();

@@ -21,6 +21,10 @@ public class QcIpqc extends BaseEntity
     /** 检验单ID */
     private Long ipqcId;
 
+    private boolean executionProtected;
+    public boolean isExecutionProtected() { return executionProtected; }
+    public void setExecutionProtected(boolean value) { executionProtected = value; }
+
     /** 检验单编号 */
     @Excel(name = "检验单编号")
     private String ipqcCode;

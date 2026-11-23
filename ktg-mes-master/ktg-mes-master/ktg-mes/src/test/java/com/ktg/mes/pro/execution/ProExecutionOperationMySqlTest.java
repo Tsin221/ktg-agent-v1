@@ -41,7 +41,7 @@ class ProExecutionOperationMySqlTest {
         source.setDriverClassName("com.mysql.cj.jdbc.Driver");
         jdbc = new JdbcTemplate(source);
         String database = jdbc.queryForObject("SELECT DATABASE()", String.class);
-        if (database == null || !database.matches("ktg_mes_b01_[a-z0-9_]+"))
+        if (database == null || !database.matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"))
             throw new IllegalStateException("MES-B01 MySQL tests require a dedicated ktg_mes_b01_* database");
         assertTrue(jdbc.queryForObject("SELECT VERSION()", String.class).startsWith("5.7."));
         safeDatabase = true;

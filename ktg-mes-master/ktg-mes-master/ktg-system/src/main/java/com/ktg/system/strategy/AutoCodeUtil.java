@@ -119,31 +119,24 @@ public class AutoCodeUtil {
         return sb.toString(); //如果不需要补齐，则直接返回
     }
 
-    private void saveAutoCodeResult(SysAutoCodeRule rule,String autoCode,String inputChar,String lastSerialNo){
-        Boolean flag = threadLocal.get(); //针对当前线程的判断 flag = true则数据库中没有当前规则的生成记录
-        if(flag !=null && flag){
-            SysAutoCodeResult rs = new SysAutoCodeResult();
-            rs.setRuleId(rule.getRuleId());
-            rs.setGenDate(DateUtil.format(LocalDateTime.now(),"yyyyMMddHHmmss"));
-            rs.setLastResult(autoCode);
-            rs.setGenIndex(1);
-            rs.setLastSerialNo(Integer.parseInt(lastSerialNo));
-            rs.setLastInputChar(inputChar);
-            iAutoCodeResultService.saveAutoCodeResult(rs);
-        }else{
-            //直接更新对应的记录（我们默认非流水号模式下一个RULE_CODE只有一种方式）
-            SysAutoCodeResult bo = new SysAutoCodeResult();
-            bo.setRuleId(rule.getRuleId());
-            List<SysAutoCodeResult> results = iAutoCodeResultService.list(bo);
-            Assert.notEmpty(results,"未查询到规则{[]}对应的结果记录",rule.getRuleCode());
-            SysAutoCodeResult rs = results.get(0);
-            rs.setLastResult(autoCode);
-            rs.setGenDate(DateUtil.format(LocalDateTime.now(),"yyyyMMddHHmmss"));
-            rs.setGenIndex(rs.getGenIndex()+1);
-            rs.setLastSerialNo(Integer.parseInt(lastSerialNo));
-            rs.setLastInputChar(inputChar);
-            iAutoCodeResultService.updateAutoCodeResult(rs);
+    private void saveAutoCodeResult(SysAutoCodeRule rule,String autoCode,String inputChar,String lastSerialNo) {
+        SysAutoCodeResult filter = new SysAutoCodeResult();
+        filter.setRuleId(rule.getRuleId());
+        List<SysAutoCodeResult> results = iAutoCodeResultService.list(filter);
+        // SERIALNO also requests a fresh row when its configured cycle/input partition resets.
+        // Rules made only of literal/date parts never set the serial handler's ThreadLocal.
+        boolean insert = results.isEmpty() || Boolean.TRUE.equals(threadLocal.get());
+        SysAutoCodeResult result = insert ? new SysAutoCodeResult() : results.get(0);
+        result.setRuleId(rule.getRuleId());
+        result.setGenDate(DateUtil.format(LocalDateTime.now(),"yyyyMMddHHmmss"));
+        result.setLastResult(autoCode);
+        result.setGenIndex(insert ? 1 : result.getGenIndex() + 1);
+        result.setLastSerialNo(lastSerialNo == null ? 0 : Integer.parseInt(lastSerialNo));
+        result.setLastInputChar(inputChar);
+        if (insert) {
+            iAutoCodeResultService.saveAutoCodeResult(result);
+        } else {
+            iAutoCodeResultService.updateAutoCodeResult(result);
         }
-
     }
 }

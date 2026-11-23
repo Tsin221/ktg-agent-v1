@@ -3,7 +3,7 @@ const assert=require('assert'),fs=require('fs'),compiler=require('vue-template-c
 const { chromium }=require(process.env.MES_B03_PLAYWRIGHT || 'C:/Users/Alice/AppData/Local/npm-cache/_npx/1e6cc5b018c8a4f1/node_modules/playwright')
 const dir='src/views/mes/pro/execution/'
 const helpers=['reportContract.js','taskPresentation.js'].map(file=>fs.readFileSync(dir+file,'utf8').replace(/export (function|class|const)/g,'$1')).join('\n')
-const components=['MaterialGroups','ExecutionReportDialog','TaskDetail','TaskList','index'].map(file=>{
+const components=['MaterialGroups','ExecutionReportDialog','ReworkPanel','DispositionPanel','InspectionPanel','TaskDetail','TaskList','index'].map(file=>{
  const sfc=compiler.parseComponent(fs.readFileSync(dir+file+'.vue','utf8'))
  return {script:`const ${file==='index'?'Workbench':file}=(()=>{${sfc.script.content.replace(/^import .*$/mg,'').replace('export default','const component=')};component.template=${JSON.stringify(sfc.template.content)};return component})()`,css:sfc.styles.map(s=>s.content).join('\n')}
 })
@@ -17,7 +17,7 @@ const getExecutionTask=async()=>({data:copy(task)});
 const listExecutionTaskUnits=async()=>({rows:task.availableUnits?units:[],total:task.availableUnits});
 const listExecutionMaterials=async(_,q)=>({rows:stock.filter(s=>s.sourceBatchCode.includes(q.batchCode||'')),total:stock.filter(s=>s.sourceBatchCode.includes(q.batchCode||'')).length});
 const executionAssignmentOptions=async()=>({data:[]});
-const assigned=async()=>({});const assignExecutionTask=assigned;
+const assigned=async()=>({});const assignExecutionTask=assigned;const inspectExecutionUnit=assigned,disposeExecutionUnit=assigned,getIpqc=assigned,inspectionRequirements=assigned,inspectionHistory=assigned;
 const receipt=(payload,actionType,resultRef)=>({code:200,data:{operationId:payload.operationId,actionType,committedAt:task.serverTime,resultRef}});
 const startExecutionTask=async(id,payload)=>{Object.assign(task,{status:'STARTED',canStart:false,canReport:true,actualStartedAt:'2026-11-23 10:00:00'});return receipt(payload,'START',{})};
 let reportCalls=0; let reportPayload;

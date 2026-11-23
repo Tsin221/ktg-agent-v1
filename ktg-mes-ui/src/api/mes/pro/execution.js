@@ -15,3 +15,8 @@ export const assignExecutionTask = (id, data) => taskAction(id, 'assignments', d
 export const startExecutionTask = (id, data) => taskAction(id, 'starts', data)
 export const reportExecutionTask = (id, data) => taskAction(id, 'reports', data)
 export const completeExecutionTask = (id, data) => taskAction(id, 'completions', data)
+
+export const inspectionRequirements = id => request({ url: `${base}/tasks/${id}/inspection-requirements`, method: 'get' })
+export const inspectionHistory = id => request({ url: `${base}/units/${id}/inspections`, method: 'get' })
+export const inspectExecutionUnit = (id, data) => request({ url: `${base}/units/${id}/inspections`, method: 'post', headers: { repeatSubmit: false }, data })
+export const disposeExecutionUnit = (id, data) => request({ url: `${base}/units/${id}/dispositions`, method: 'post', headers: { repeatSubmit: false }, data })

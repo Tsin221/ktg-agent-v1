@@ -19,7 +19,7 @@ class ProExecutionSchemaMySqlTest {
                 System.getenv("MES_B01_MYSQL_USER"), System.getenv("MES_B01_MYSQL_PASSWORD"));
         try (Statement s = connection.createStatement()) {
             String database = scalar(s, "SELECT DATABASE()");
-            assertTrue(database.matches("ktg_mes_b01_[a-z0-9_]+"), "Requires an explicitly isolated B01 database");
+            assertTrue(database.matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"), "Requires an explicitly isolated B01 database");
             assertTrue(scalar(s, "SELECT VERSION()").startsWith("5.7."), "Requires real MySQL 5.7");
         } catch (Throwable t) {
             connection.close();

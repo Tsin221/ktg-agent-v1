@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProExecutionTaskQueryTest {
     @Test void onlyEligibleStatesForStepAndNoFallbackForUnknownStep() {
         assertEquals(Collections.singletonList("WAIT_ASSEMBLY"), ExecutionTaskQueryService.eligibleStates("NORMAL", "ASSEMBLY"));
-        assertEquals(Arrays.asList("WAIT_INSPECTION", "WAIT_REINSPECTION"), ExecutionTaskQueryService.eligibleStates("NORMAL", "INSPECTION"));
+        assertEquals(Arrays.asList("WAIT_INSPECTION", "WAIT_REINSPECTION", "WAIT_DISPOSITION"), ExecutionTaskQueryService.eligibleStates("NORMAL", "INSPECTION"));
         assertEquals(Collections.singletonList("WAIT_PACKING"), ExecutionTaskQueryService.eligibleStates("NORMAL", "PACKING"));
         assertEquals(Collections.singletonList("REWORK_IN_PROGRESS"), ExecutionTaskQueryService.eligibleStates("REWORK", "ASSEMBLY"));
         assertTrue(ExecutionTaskQueryService.eligibleStates("NORMAL", "UNKNOWN").isEmpty());

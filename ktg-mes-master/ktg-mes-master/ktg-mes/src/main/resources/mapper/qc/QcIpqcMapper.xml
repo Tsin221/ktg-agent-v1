@@ -3,7 +3,7 @@
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.ktg.mes.qc.mapper.QcIpqcMapper">
-    
+
     <resultMap type="QcIpqc" id="QcIpqcResult">
         <result property="ipqcId"    column="ipqc_id"    />
         <result property="ipqcCode"    column="ipqc_code"    />
@@ -36,6 +36,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="crQuantity"    column="cr_quantity"    />
         <result property="majQuantity"    column="maj_quantity"    />
         <result property="minQuantity"    column="min_quantity"    />
+        <result property="executionProtected" column="execution_protected" />
         <result property="checkResult"    column="check_result"    />
         <result property="inspectDate"    column="inspect_date"    />
         <result property="inspector"    column="inspector"    />
@@ -52,7 +53,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </resultMap>
 
     <sql id="selectQcIpqcVo">
-        select ipqc_id, ipqc_code, ipqc_name, ipqc_type, template_id, workorder_id, workorder_code, workorder_name, task_id, task_code, task_name, workstation_id, workstation_code, workstation_name, process_id, process_code, process_name, item_id, item_code, item_name, specification, unit_of_measure, quantity_check, quantity_unqualified, quantity_qualified, cr_rate, maj_rate, min_rate, cr_quantity, maj_quantity, min_quantity, check_result, inspect_date, inspector, status, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from qc_ipqc
+        select exists(select 1 from pro_execution_inspection execution_link where execution_link.ipqc_id=qc_ipqc.ipqc_id) as execution_protected, ipqc_id, ipqc_code, ipqc_name, ipqc_type, template_id, workorder_id, workorder_code, workorder_name, task_id, task_code, task_name, workstation_id, workstation_code, workstation_name, process_id, process_code, process_name, item_id, item_code, item_name, specification, unit_of_measure, quantity_check, quantity_unqualified, quantity_qualified, cr_rate, maj_rate, min_rate, cr_quantity, maj_quantity, min_quantity, check_result, inspect_date, inspector, status, remark, attr1, attr2, attr3, attr4, create_by, create_time, update_by, update_time from qc_ipqc
     </sql>
 
     <select id="selectQcIpqcList" parameterType="QcIpqc" resultMap="QcIpqcResult">
@@ -94,7 +95,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="status != null  and status != ''"> and status = #{status}</if>
         </where>
     </select>
-    
+
     <select id="selectQcIpqcByIpqcId" parameterType="Long" resultMap="QcIpqcResult">
         <include refid="selectQcIpqcVo"/>
         where ipqc_id = #{ipqcId}
@@ -103,7 +104,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <select id="checkIpqcCodeUnique" parameterType="QcIpqc" resultMap="QcIpqcResult">
         select * from qc_ipqc where ipqc_code = #{ipqcCode}
     </select>
-        
+
     <insert id="insertQcIpqc" parameterType="QcIpqc" useGeneratedKeys="true" keyProperty="ipqcId">
         insert into qc_ipqc
         <trim prefix="(" suffix=")" suffixOverrides=",">

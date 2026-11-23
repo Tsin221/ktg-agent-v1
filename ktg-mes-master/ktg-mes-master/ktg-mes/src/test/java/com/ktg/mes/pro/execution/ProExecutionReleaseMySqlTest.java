@@ -23,7 +23,7 @@ class ProExecutionReleaseMySqlTest {
     @BeforeEach void setup() throws Exception {
         DriverManagerDataSource source=new DriverManagerDataSource(System.getenv("MES_B01_MYSQL_URL"),System.getenv("MES_B01_MYSQL_USER"),System.getenv("MES_B01_MYSQL_PASSWORD"));
         source.setDriverClassName("com.mysql.cj.jdbc.Driver");db=new JdbcTemplate(source);
-        assertTrue(db.queryForObject("select database()",String.class).matches("ktg_mes_b01_[a-z0-9_]+"));
+        assertTrue(db.queryForObject("select database()",String.class).matches("(ktg_mes_b01_[a-z0-9_]+|ktg_mes_b04_test)"));
         assertTrue(db.queryForObject("select version()",String.class).startsWith("5.7."));safe=true;
         db.update("insert into md_item(item_code,item_name,unit_of_measure,item_or_product,enable_flag) values(?,?,'EA','PRODUCT','Y')",tag,tag);
         product=id("md_item","item_id","item_code");
