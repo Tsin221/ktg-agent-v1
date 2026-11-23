@@ -23,3 +23,6 @@ export const disposeExecutionUnit = (id, data) => request({ url: `${base}/units/
 
 export const packExecutionTask = (id, data) => taskAction(id, 'packages', data)
 export const completeExecutionOrder = (id, data) => request({ url: `${base}/workorders/${id}/completions`, method: 'post', headers: { repeatSubmit: false }, data })
+
+export const traceExecutionUnit = params => request({ url: `${base}/units/trace`, method: 'get', params })
+export const traceExecutionMaterials = params => request({ url: `${base}/materials/trace`, method: 'get', params })
