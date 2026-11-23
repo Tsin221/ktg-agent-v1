@@ -20,3 +20,6 @@ export const inspectionRequirements = id => request({ url: `${base}/tasks/${id}/
 export const inspectionHistory = id => request({ url: `${base}/units/${id}/inspections`, method: 'get' })
 export const inspectExecutionUnit = (id, data) => request({ url: `${base}/units/${id}/inspections`, method: 'post', headers: { repeatSubmit: false }, data })
 export const disposeExecutionUnit = (id, data) => request({ url: `${base}/units/${id}/dispositions`, method: 'post', headers: { repeatSubmit: false }, data })
+
+export const packExecutionTask = (id, data) => taskAction(id, 'packages', data)
+export const completeExecutionOrder = (id, data) => request({ url: `${base}/workorders/${id}/completions`, method: 'post', headers: { repeatSubmit: false }, data })

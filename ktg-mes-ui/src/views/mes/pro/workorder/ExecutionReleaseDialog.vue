@@ -21,7 +21,8 @@
       </template>
       <template v-if="detail">
         <p>固定工艺：{{ detail.order.routeName }} · 计划 {{ detail.order.plannedUnits }} 件</p>
-        <p>待装配 SN 总数 {{ detail.summary.allocated }} · 已装配 {{ detail.summary.assembled }} · 合格 {{ detail.summary.qualified }} · 已包装 {{ detail.summary.packed }} · 报废 {{ detail.summary.scrapped }}</p>
+        <execution-order-progress :detail="detail" @changed="completed" />
+        <p>已分配 SN 总数 {{ detail.summary.allocated }} · 已装配 {{ detail.summary.assembled }} · 合格 {{ detail.summary.qualified }} · 已包装 {{ detail.summary.packed }} · 报废 {{ detail.summary.scrapped }}</p>
         <el-table :data="detail.tasks"><el-table-column label="任务" prop="taskCode" /><el-table-column label="工序" prop="processName" /><el-table-column label="工作站" prop="workstationName" /><el-table-column label="计划量" prop="quantity" /><el-table-column label="执行状态"><template slot-scope="scope">{{ stateLabel(scope.row.status) }}</template></el-table-column></el-table>
         <el-table :data="detail.units" max-height="260"><el-table-column label="SN" prop="snCode" /><el-table-column label="单件状态"><template slot-scope="scope">{{ stateLabel(scope.row.unitState) }}</template></el-table-column></el-table>
       </template>
@@ -37,9 +38,11 @@
   </el-dialog>
 </template>
 <script>
+import ExecutionOrderProgress from '../execution/ExecutionOrderProgress.vue'
+import { taskLabel } from '../execution/taskPresentation'
 import { releaseOptions, releaseOrder, executionOrder, executionOperation } from '@/api/mes/pro/execution'
 export default {
-  name: 'ExecutionReleaseDialog',
+  name: 'ExecutionReleaseDialog', components: { ExecutionOrderProgress },
   data: () => ({ visible: false, loading: false, submitting: false, order: null, routes: [], routeId: null, steps: [], error: '', unknown: false, operationId: null, pendingPayload: null, retryable: false, detail: null }),
   computed: { ready() { return this.steps.length === 3 && this.steps.every(s => s.workstationId && (s.executionKind !== 'INSPECTION' || (s.templateId && s.ipqcType))) } },
   methods: {
@@ -51,7 +54,8 @@ export default {
       return [hex.slice(0,8), hex.slice(8,12), hex.slice(12,16), hex.slice(16,20), hex.slice(20)].join('-')
     },
     kindLabel(kind) { return { ASSEMBLY: '生产', INSPECTION: '质检', PACKING: '包装' }[kind] || '未配置' },
-    stateLabel(state) { return { WAITING: '等待前序', READY: '可开工', STARTED: '已开工', FINISHED: '已完成', WAIT_ASSEMBLY: '待装配' }[state] || state },
+    stateLabel: taskLabel,
+    async completed() { await this.readDetail(); this.$emit('released') },
     templateTypes(step) { const t = (step.templates || []).find(t => t.templateId === step.templateId); return t ? (Array.isArray(t.qcTypes) ? t.qcTypes : String(t.qcTypes || '').split(',')).map(v => v.trim()).filter(v => ['FIRST', 'FINAL', 'PATROL'].includes(v)) : [] },
     storageKey() { return 'mes-release-' + this.order.workorderId },
     async open(order) {

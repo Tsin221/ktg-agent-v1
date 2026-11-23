@@ -11,8 +11,7 @@ import java.math.BigDecimal;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
-@EnabledIfEnvironmentVariable(named="MES_B01_MYSQL_URL",matches=".+") class ProExecutionInspectionMySqlTest extends ExecutionConsumptionFixture  {
-    long inspectionTask,defect,batchRule;
+abstract class ExecutionInspectionFixture extends ExecutionConsumptionFixture {    long inspectionTask,defect,batchRule;
     ExecutionInspectionService inspections;
     boolean fault;
     @BeforeEach void quality() throws Exception {
@@ -82,6 +81,25 @@ import static org.mockito.Mockito.*;
         r.indices=Collections.singletonList(i);
         return r;
     }
+    @AfterEach void qualityCleanup() {
+        if(db==null||!released.safe)return;
+        db.update("delete from sys_auto_code_result where rule_id=?",batchRule);
+        db.update("update pro_execution_task set source_disposition_id=null where workorder_id=? and task_kind='REWORK'",released.order);
+        db.update("update pro_execution_inspection set source_disposition_id=null where task_id=?",inspectionTask);
+        db.update("delete d from pro_execution_disposition d join pro_execution_unit u on u.sn_id=d.sn_id where u.workorder_id=?",released.order);
+        db.update("delete from pro_execution_inspection where task_id=?",inspectionTask);
+        db.update("delete d from qc_defect_record d join qc_ipqc q on q.ipqc_id=d.qc_id where d.qc_type='IPQC' and q.workorder_id=?",released.order);
+        db.update("delete l from qc_ipqc_line l join qc_ipqc q on q.ipqc_id=l.ipqc_id where q.workorder_id=?",released.order);
+        db.update("delete from qc_ipqc where workorder_id=?",released.order);
+        db.update("delete from wm_transaction where workorder_id=? and transaction_type='PRODUCT_PRODUCE'",released.order);
+        db.update("delete from wm_material_stock where item_id=?",released.product);
+        db.update("delete l from wm_product_produce_line l join wm_product_produce p on p.record_id=l.record_id where p.workorder_id=?",released.order);
+        db.update("delete from wm_product_produce where workorder_id=?",released.order);
+        db.update("delete from qc_defect where defect_id=?",defect);
+    }
+}
+
+@EnabledIfEnvironmentVariable(named="MES_B01_MYSQL_URL",matches=".+") class ProExecutionInspectionMySqlTest extends ExecutionInspectionFixture {
     @Test void nineAcceptOneFailureAndReplayProducesExactlyNine() {
         for(int i=0;i<10;i++) {
             ExecutionInspectionRequest r=check(i!=2);
@@ -163,21 +181,5 @@ import static org.mockito.Mockito.*;
         db.update("delete from qc_defect where defect_id=?",defect);
         assertEquals(200,inspections.inspect(sns.get(0),r).get("code"));
         assertEquals(1,db.queryForObject("select count(*) from pro_execution_inspection where sn_id=?",Integer.class,sns.get(0)));
-    }
-    @AfterEach void qualityCleanup() {
-        if(db==null||!released.safe)return;
-        db.update("delete from sys_auto_code_result where rule_id=?",batchRule);
-        db.update("update pro_execution_task set source_disposition_id=null where workorder_id=? and task_kind='REWORK'",released.order);
-        db.update("update pro_execution_inspection set source_disposition_id=null where task_id=?",inspectionTask);
-        db.update("delete d from pro_execution_disposition d join pro_execution_unit u on u.sn_id=d.sn_id where u.workorder_id=?",released.order);
-        db.update("delete from pro_execution_inspection where task_id=?",inspectionTask);
-        db.update("delete d from qc_defect_record d join qc_ipqc q on q.ipqc_id=d.qc_id where d.qc_type='IPQC' and q.workorder_id=?",released.order);
-        db.update("delete l from qc_ipqc_line l join qc_ipqc q on q.ipqc_id=l.ipqc_id where q.workorder_id=?",released.order);
-        db.update("delete from qc_ipqc where workorder_id=?",released.order);
-        db.update("delete from wm_transaction where workorder_id=? and transaction_type='PRODUCT_PRODUCE'",released.order);
-        db.update("delete from wm_material_stock where item_id=?",released.product);
-        db.update("delete l from wm_product_produce_line l join wm_product_produce p on p.record_id=l.record_id where p.workorder_id=?",released.order);
-        db.update("delete from wm_product_produce where workorder_id=?",released.order);
-        db.update("delete from qc_defect where defect_id=?",defect);
     }
 }

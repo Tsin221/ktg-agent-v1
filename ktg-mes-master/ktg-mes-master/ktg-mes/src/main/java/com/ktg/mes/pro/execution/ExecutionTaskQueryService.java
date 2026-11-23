@@ -99,6 +99,7 @@ public class ExecutionTaskQueryService {
             where.append(" and u.unit_state in (").append(placeholders(states.size())).append(")");
             params.addAll(states);
         }
+        if("PACKING".equals(task.get("step_kind"))) where.append(" and exists(select 1 from pro_workorder pw where pw.workorder_id=u.workorder_id and pw.status='CONFIRMED') and exists(select 1 from pro_execution_inspection pi join qc_ipqc pq on pq.ipqc_id=pi.ipqc_id where pi.sn_id=u.sn_id and pi.produce_line_id is not null and pq.check_result='ACCEPT' and pq.workorder_id=u.workorder_id) and not exists(select 1 from pro_execution_pack pp where pp.sn_id=u.sn_id)");
         if(state!=null && !state.isEmpty()) {
             try { ExecutionState.valueOf(state); } catch(IllegalArgumentException invalid) { throw ExecutionException.validation("单件状态无效"); }
             where.append(" and u.unit_state=?"); params.add(state);
@@ -183,6 +184,14 @@ public class ExecutionTaskQueryService {
         result.put("canInspect",started && inspection && count>0 && permissions.hasPermi(PREFIX+"inspect") && SecurityUtils.getUserId().equals(task.get("assigned_user_id")));
         boolean inspectionDone=inspection && db.queryForObject("select count(*) from pro_execution_unit where workorder_id=? and unit_state not in ('WAIT_PACKING','PACKED','SCRAPPED')",Integer.class,orderId)==0;
         result.put("canComplete",started && ((assembly && count==0 && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId)) || (rework && count==1 && allowed(ExecutionAction.REWORK_COMPLETE,orderId,taskId)) || (inspectionDone && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId))));
+        boolean packing="NORMAL".equals(task.get("task_kind")) && "PACKING".equals(task.get("step_kind"));
+        result.put("canPack",started && packing && count>0 && allowed(ExecutionAction.PACK,orderId,taskId));
+        if(packing) {
+            int pending=db.queryForObject("select count(*) from pro_execution_unit where workorder_id=? and unit_state not in ('PACKED','SCRAPPED')",Integer.class,orderId);
+            int nonScrap=db.queryForObject("select count(*) from pro_execution_unit where workorder_id=? and unit_state<>'SCRAPPED'",Integer.class,orderId);
+            boolean zeroPacking=nonScrap==0 && Arrays.asList("WAITING","READY").contains(task.get("status"));
+            result.put("canComplete",legal && "CONFIRMED".equals(task.get("order_status")) && pending==0 && (started||zeroPacking) && allowed(ExecutionAction.TASK_COMPLETE,orderId,taskId));
+        }
         result.put("serverTime",db.queryForObject("select current_timestamp(3)",java.sql.Timestamp.class));
         return result;
     }

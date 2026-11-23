@@ -21,11 +21,13 @@
           <el-button v-if="actions.includes('assign')" :disabled="busy" @click="$emit('assign', task)">分派人员</el-button>
           <el-button v-if="actions.includes('start')" type="primary" :disabled="busy" @click="$emit('start', task)">开工</el-button>
           <el-button v-if="actions.includes('report')" type="primary" :disabled="busy" @click="$emit('report', task)">批量报工</el-button>
-          <el-button v-if="actions.includes('complete')" type="success" :disabled="busy" @click="$emit('complete', task)">{{ task.taskKind === 'REWORK' ? '完成返工任务' : task.stepKind === 'INSPECTION' ? '完成检验任务' : '完成装配任务' }}</el-button>
+          <el-button v-if="actions.includes('complete')" type="success" :disabled="busy" @click="$emit('complete', task)">{{ task.taskKind === 'REWORK' ? '完成返工任务' : task.stepKind === 'INSPECTION' ? '完成检验任务' : task.stepKind === 'PACKING' ? '完成包装任务' : '完成装配任务' }}</el-button>
+          <el-button v-if="actions.includes('pack')" type="primary" :disabled="busy" @click="$emit('pack', task)">登记包装</el-button>
           <el-button icon="el-icon-refresh" :disabled="busy" @click="reload">刷新详情</el-button>
         </div>
         <el-alert v-if="task.status === 'WAITING'" title="等待前序流转，当前不能开工。" type="info" :closable="false" />
         <rework-panel v-if="task.taskKind === 'REWORK'" />
+        <execution-order-progress v-if="orderDetail" :detail="orderDetail" @changed="reload" />
         <h3>作业指导与 SOP</h3>
         <p v-if="!(task.processContents || []).length && !(task.productSops || []).length" class="muted">暂无既有指导内容，请向工艺管理员确认。</p>
         <div v-for="content in task.processContents || []" :key="'c'+content.contentId" class="instruction"><strong>工序 {{ content.orderNum }}</strong><div class="guidance">{{ content.contentText }}</div><p v-if="content.device || content.material">设备：{{ content.device || '—' }}；物料：{{ content.material || '—' }}</p><a v-if="safeDocumentUrl(content.docUrl)" :href="safeDocumentUrl(content.docUrl)" target="_blank" rel="noopener noreferrer">查看指导附件</a></div>
@@ -40,18 +42,19 @@
   </section>
 </template>
 <script>
+import ExecutionOrderProgress from './ExecutionOrderProgress.vue'
 import ReworkPanel from './ReworkPanel.vue'
-import { getExecutionTask, listExecutionTaskUnits } from '@/api/mes/pro/execution'
+import { executionOrder, getExecutionTask, listExecutionTaskUnits } from '@/api/mes/pro/execution'
 import { taskLabel, stepLabel, elapsedSeconds, formatDuration, availableActions, safeDocumentUrl } from './taskPresentation'
 export default {
-  name: 'ExecutionTaskDetail', components: { ReworkPanel },
+  name: 'ExecutionTaskDetail', components: { ReworkPanel, ExecutionOrderProgress },
   props: { taskId: Number, busy: Boolean },
-  data: () => ({ task: null, loading: false, error: '', readAt: 0, now: 0, timer: null, units: [], unitQuery: { pageNum: 1, pageSize: 10, snCode: '' }, unitTotal: 0, unitLoading: false, unitError: '', serial: 0, unitSerial: 0 }),
+  data: () => ({ orderDetail: null, task: null, loading: false, error: '', readAt: 0, now: 0, timer: null, units: [], unitQuery: { pageNum: 1, pageSize: 10, snCode: '' }, unitTotal: 0, unitLoading: false, unitError: '', serial: 0, unitSerial: 0 }),
   computed: {
     actions() { return availableActions(this.task) },
     duration() { return formatDuration(elapsedSeconds(this.task || {}, this.now - this.readAt)) }
   },
-  watch: { taskId: { immediate: true, handler() { this.task = null; this.units = []; this.unitQuery = { pageNum: 1, pageSize: 10, snCode: '' }; this.reload() } } },
+  watch: { taskId: { immediate: true, handler() { this.task = null; this.orderDetail = null; this.units = []; this.unitQuery = { pageNum: 1, pageSize: 10, snCode: '' }; this.reload() } } },
   mounted() { this.timer = setInterval(() => { this.now = Date.now() }, 1000) },
   beforeDestroy() { clearInterval(this.timer) },
   methods: {
@@ -65,7 +68,9 @@ export default {
         if (serial !== this.serial) return
         this.task = response.data; this.readAt = this.now = Date.now()
         await this.loadUnits()
-      } catch (error) { if (serial === this.serial) { this.error = error.message || '详情读取失败'; this.task = null; this.units = []; this.unitTotal = 0 } }
+        const order = await executionOrder(this.task.workorderId)
+        if (serial === this.serial) this.orderDetail = order.data
+      } catch (error) { if (serial === this.serial) { this.error = error.message || '详情读取失败'; this.task = null; this.orderDetail = null; this.units = []; this.unitTotal = 0 } }
       finally { if (serial === this.serial) this.loading = false }
     },
     searchUnits() { this.unitQuery.pageNum = 1; this.loadUnits() },

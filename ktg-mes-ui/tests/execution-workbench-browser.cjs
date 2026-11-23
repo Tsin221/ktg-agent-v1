@@ -3,7 +3,7 @@ const assert=require('assert'),fs=require('fs'),compiler=require('vue-template-c
 const { chromium }=require(process.env.MES_B03_PLAYWRIGHT || 'C:/Users/Alice/AppData/Local/npm-cache/_npx/1e6cc5b018c8a4f1/node_modules/playwright')
 const dir='src/views/mes/pro/execution/'
 const helpers=['reportContract.js','taskPresentation.js'].map(file=>fs.readFileSync(dir+file,'utf8').replace(/export (function|class|const)/g,'$1')).join('\n')
-const components=['MaterialGroups','ExecutionReportDialog','ReworkPanel','DispositionPanel','InspectionPanel','TaskDetail','TaskList','index'].map(file=>{
+const components=['MaterialGroups','ExecutionReportDialog','ReworkPanel','DispositionPanel','InspectionPanel','PackingPanel','ExecutionOrderProgress','TaskDetail','TaskList','index'].map(file=>{
  const sfc=compiler.parseComponent(fs.readFileSync(dir+file+'.vue','utf8'))
  return {script:`const ${file==='index'?'Workbench':file}=(()=>{${sfc.script.content.replace(/^import .*$/mg,'').replace('export default','const component=')};component.template=${JSON.stringify(sfc.template.content)};return component})()`,css:sfc.styles.map(s=>s.content).join('\n')}
 })
@@ -17,14 +17,14 @@ const getExecutionTask=async()=>({data:copy(task)});
 const listExecutionTaskUnits=async()=>({rows:task.availableUnits?units:[],total:task.availableUnits});
 const listExecutionMaterials=async(_,q)=>({rows:stock.filter(s=>s.sourceBatchCode.includes(q.batchCode||'')),total:stock.filter(s=>s.sourceBatchCode.includes(q.batchCode||'')).length});
 const executionAssignmentOptions=async()=>({data:[]});
-const assigned=async()=>({});const assignExecutionTask=assigned;const inspectExecutionUnit=assigned,disposeExecutionUnit=assigned,getIpqc=assigned,inspectionRequirements=assigned,inspectionHistory=assigned;
+const executionOrder=async()=>({data:{order:{workorderId:1},summary:{},progress:{},tasks:[],units:[]}});const completeExecutionOrder=async()=>({});const packExecutionTask=async()=>({});const assigned=async()=>({});const assignExecutionTask=assigned;const inspectExecutionUnit=assigned,disposeExecutionUnit=assigned,getIpqc=assigned,inspectionRequirements=assigned,inspectionHistory=assigned;
 const receipt=(payload,actionType,resultRef)=>({code:200,data:{operationId:payload.operationId,actionType,committedAt:task.serverTime,resultRef}});
 const startExecutionTask=async(id,payload)=>{Object.assign(task,{status:'STARTED',canStart:false,canReport:true,actualStartedAt:'2026-11-23 10:00:00'});return receipt(payload,'START',{})};
 let reportCalls=0; let reportPayload;
 const reportExecutionTask=async(id,payload)=>{reportCalls++;if(reportCalls===1){reportPayload=JSON.stringify(payload);throw Error('模拟网络中断')}if(reportPayload!==JSON.stringify(payload))throw Error('operation changed');Object.assign(task,{availableUnits:0,quantityProduced:10,canReport:false,canComplete:true});return receipt(payload,'REPORT',{feedbackId:501,consumeId:601,snCount:10,assembled:10})};
 const executionOperation=async()=>{throw Object.assign(Error('not found'),{data:{errorCode:'NOT_FOUND'}})};
 const completeExecutionTask=async(id,payload)=>{Object.assign(task,{status:'FINISHED',canComplete:false,actualEndedAt:'2026-11-23 10:01:01'});return receipt(payload,'TASK_COMPLETE',{state:'FINISHED'})};
-Vue.prototype.$store={state:{user:{id:19}},getters:{permissions:['mes:pro:execution:query','mes:pro:execution:start','mes:pro:execution:report']}};
+Vue.directive('hasPermi',{});Vue.prototype.$store={state:{user:{id:19}},getters:{permissions:['mes:pro:execution:query','mes:pro:execution:start','mes:pro:execution:report']}};
 Vue.component('pagination',{props:['total','page','limit'],template:'<div role="status">共 {{total}} 条</div>'});
 `
 const html=`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="/node_modules/element-ui/lib/theme-chalk/index.css"><style>body{font-family:Arial,sans-serif;margin:24px;} ${components.map(c=>c.css).join('\n')}</style></head><body><div id="app"><workbench/></div><script src="/node_modules/vue/dist/vue.js"></script><script src="/node_modules/element-ui/lib/index.js"></script><script>Vue.use(ELEMENT);${helpers}\n${fixture}\n${components.map(c=>c.script).join('\n')}\nVue.component('workbench',Workbench);new Vue({el:'#app'});</script></body></html>`

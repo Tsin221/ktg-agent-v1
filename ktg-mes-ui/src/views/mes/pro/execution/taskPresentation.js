@@ -16,9 +16,10 @@ export function availableActions(task) {
   if (!task) return []
   const actions = []
   if (task.canAssign) actions.push('assign')
-  if (!['ASSEMBLY', 'INSPECTION'].includes(task.stepKind) && task.taskKind !== 'REWORK') return actions
+  if (!['ASSEMBLY', 'INSPECTION', 'PACKING'].includes(task.stepKind) && task.taskKind !== 'REWORK') return actions
   if (task.status === 'READY' && task.canStart && task.availableUnits > 0) actions.push('start')
   if (task.taskKind !== 'REWORK' && task.stepKind === 'ASSEMBLY' && task.status === 'STARTED' && task.availableUnits > 0 && task.canReport) actions.push('report')
+  if (task.stepKind === 'PACKING' && task.status === 'STARTED' && task.canPack && task.availableUnits > 0) actions.push('pack')
   if (task.status === 'STARTED' && task.canComplete && (task.taskKind === 'REWORK' || task.availableUnits === 0)) actions.push('complete')
   return actions
 }

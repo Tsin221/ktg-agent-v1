@@ -14,7 +14,8 @@
     </div>
     <template v-if="permitted">
       <task-list ref="list" :selected-id="taskId" @select="taskId = $event" />
-      <task-detail ref="detail" :task-id="taskId" :busy="busy || !!pending" @assign="openAssignment" @start="confirmStart" @report="openReport" @complete="confirmComplete" @quality="openQuality" />
+      <task-detail ref="detail" :task-id="taskId" :busy="busy || !!pending" @assign="openAssignment" @start="confirmStart" @report="openReport" @complete="confirmComplete" @quality="openQuality" @pack="openPacking" />
+      <packing-panel ref="packing" :busy="busy || !!pending" @submit="pack" />
       <inspection-panel ref="quality" :busy="busy || !!pending" @inspect="inspect" @dispose="dispose" @ipqc="viewIpqc" />
       <el-dialog title="原过程检验单（只读）" :visible.sync="ipqcVisible" width="min(700px, 94vw)" append-to-body><el-alert v-if="ipqcError" :title="ipqcError" type="error" :closable="false" /><el-descriptions v-if="ipqc" :column="2" border><el-descriptions-item v-for="field in ipqcFields" :key="field[0]" :label="field[1]">{{ ipqc[field[0]] }}</el-descriptions-item></el-descriptions></el-dialog>
       <execution-report-dialog ref="report" :busy="busy || !!pending" :command-error="reportError" @submit="report" />
@@ -29,15 +30,16 @@
   </div>
 </template>
 <script>
+import PackingPanel from './PackingPanel.vue'
 import InspectionPanel from './InspectionPanel.vue'
 import { getIpqc } from '@/api/mes/qc/ipqc'
-import { inspectExecutionUnit, disposeExecutionUnit, assignExecutionTask, startExecutionTask, reportExecutionTask, completeExecutionTask, executionOperation, executionAssignmentOptions } from '@/api/mes/pro/execution'
+import { packExecutionTask, inspectExecutionUnit, disposeExecutionUnit, assignExecutionTask, startExecutionTask, reportExecutionTask, completeExecutionTask, executionOperation, executionAssignmentOptions } from '@/api/mes/pro/execution'
 import { ExecutionCommand, pendingKey } from './reportContract'
 import TaskList from './TaskList.vue'
 import TaskDetail from './TaskDetail.vue'
 import ExecutionReportDialog from './ExecutionReportDialog.vue'
 export default {
-  name: 'ExecutionWorkbench', components: { InspectionPanel, TaskList, TaskDetail, ExecutionReportDialog },
+  name: 'ExecutionWorkbench', components: { PackingPanel, InspectionPanel, TaskList, TaskDetail, ExecutionReportDialog },
   data: () => ({ ipqcVisible: false, ipqc: null, ipqcError: '', ipqcFields: [['ipqcId', '单据ID'], ['ipqcCode', '单据编号'], ['ipqcName', '单据名称'], ['ipqcType', '类型'], ['quantityCheck', '检验数量'], ['quantityQualified', '合格数量'], ['checkResult', '结论'], ['inspectDate', '检验日期']], taskId: null, command: null, busy: false, error: '', reportError: '', pending: null, retryable: false, receipt: null, assignmentVisible: false, assignmentTask: null, assignmentOptions: [], assignedUserId: null, assignmentLoading: false, assignmentError: '' }),
   computed: {
     permitted() { const perms = this.$store.getters.permissions || []; return perms.includes('*:*:*') || perms.includes('mes:pro:execution:query') },
@@ -48,15 +50,17 @@ export default {
     try {
       const actor = this.$store.state.user.id
       if (!actor) throw Error('未确认当前登录用户，请重新登录。')
-      this.command = new ExecutionCommand(localStorage, pendingKey(actor), { assign: assignExecutionTask, start: startExecutionTask, report: reportExecutionTask, complete: completeExecutionTask, inspect: inspectExecutionUnit, dispose: disposeExecutionUnit }, executionOperation)
+      this.command = new ExecutionCommand(localStorage, pendingKey(actor), { assign: assignExecutionTask, start: startExecutionTask, report: reportExecutionTask, complete: completeExecutionTask, inspect: inspectExecutionUnit, dispose: disposeExecutionUnit, pack: packExecutionTask }, executionOperation)
       this.pending = this.command.pending()
       if (this.pending) this.taskId = ['inspect', 'dispose'].includes(this.pending.action) ? (this.pending.payload.taskId || null) : this.pending.taskId
     } catch (e) { this.error = e.message || '操作恢复存储不可用' }
   },
   activated() { this.refresh() },
   methods: {
-    actionLabel(action) { return { assign: '分派', start: '开工', report: '报工', complete: '完成任务', inspect: '单件检验', dispose: '质量处置' }[action] || action },
+    actionLabel(action) { return { assign: '分派', start: '开工', report: '报工', complete: '完成任务', inspect: '单件检验', dispose: '质量处置', pack: '登记包装' }[action] || action },
     refresh() { if (this.$refs.list) this.$refs.list.load(); if (this.$refs.detail) this.$refs.detail.reload() },
+    openPacking(task) { this.$refs.packing.open(task) },
+    async pack(id, payload) { await this.run(() => this.command.begin('pack', id, payload)) },
     openQuality(task, unit) { this.$refs.quality.open(task, unit) },
     async inspect(id, payload) { await this.run(() => this.command.begin('inspect', id, payload)) },
     async dispose(id, payload) { await this.run(() => this.command.begin('dispose', id, payload)) },
@@ -87,9 +91,10 @@ export default {
           if (this.$refs.report && this.$refs.report.visible) this.reportError = this.error
           if (this.$refs.quality && this.$refs.quality.visible) this.$refs.quality.error = this.error
           if (this.assignmentVisible) this.assignmentError = this.error
+          if (this.$refs.packing && this.$refs.packing.visible) this.$refs.packing.error = this.error
         }
         // Retain the form on a definite validation error; close only when result is known committed or needs receipt recovery.
-        if (result.response || result.pending) { this.assignmentVisible = false; if (this.$refs.quality) this.$refs.quality.visible = false; if (this.$refs.report) this.$refs.report.visible = false }
+        if (result.response || result.pending) { this.assignmentVisible = false; if (this.$refs.packing) this.$refs.packing.visible = false; if (this.$refs.quality) this.$refs.quality.visible = false; if (this.$refs.report) this.$refs.report.visible = false }
         if (!result.response && !result.pending) this.refresh()
       } catch (e) { this.error = e.message || '操作无法处理，未确认结果前请勿重试新操作'; try { this.pending = this.command.pending() } catch (_) { /* storage unavailable */ } }
       finally { this.busy = false }

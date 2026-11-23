@@ -11,8 +11,8 @@ public class ExecutionReportController {
     private final ExecutionReportService service;
     private final ExecutionReworkService rework;
     private final ExecutionInspectionService inspections;
-    private final ExecutionTaskQueryService tasks;
-    public ExecutionReportController(ExecutionReportService service, ExecutionReworkService rework, ExecutionInspectionService inspections, ExecutionTaskQueryService tasks) { this.service = service; this.rework=rework; this.inspections=inspections; this.tasks=tasks; }
+    private final ExecutionTaskQueryService tasks; private final ExecutionCompletionService completion;
+    public ExecutionReportController(ExecutionReportService service, ExecutionReworkService rework, ExecutionInspectionService inspections, ExecutionTaskQueryService tasks,ExecutionCompletionService completion) { this.service = service; this.rework=rework; this.inspections=inspections; this.tasks=tasks;this.completion=completion; }
 
     @PostMapping("/reports")
     public AjaxResult report(@PathVariable Long taskId, @RequestBody ExecutionReportRequest request) {
@@ -25,6 +25,7 @@ public class ExecutionReportController {
         java.util.Map<String,Object> task=tasks.taskRow(taskId,false);
         if("REWORK".equals(task.get("task_kind")))return rework.complete(taskId,request.operationId);
         if("INSPECTION".equals(task.get("step_kind")))return inspections.complete(taskId,request.operationId);
+        if("PACKING".equals(task.get("step_kind")))return completion.completePacking(taskId,request.operationId);
         return service.complete(taskId, request.operationId);
     }
 
