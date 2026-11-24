@@ -27,4 +27,14 @@ class ProExecutionReleaseControllerTest {
   mvc.perform(get("/mes/pro/execution/workorders/19/release-options"))
    .andExpect(jsonPath("$.code").value(403)).andExpect(jsonPath("$.errorCode").value("FORBIDDEN"));
  }
+ @Test void productOptionsAreReadOnlyAndUseDedicatedProductPermission() throws Exception {
+  ExecutionReleaseService service=mock(ExecutionReleaseService.class);
+  when(service.optionsForProduct(19L)).thenThrow(ExecutionException.forbidden());
+  MockMvc mvc=MockMvcBuilders.standaloneSetup(new ExecutionOrderController(service,mock(ExecutionOrderProgressService.class),mock(ExecutionCompletionService.class)))
+    .setControllerAdvice(new ExecutionExceptionAdvice()).build();
+  mvc.perform(get("/mes/pro/execution/products/19/release-options"))
+   .andExpect(jsonPath("$.code").value(403)).andExpect(jsonPath("$.errorCode").value("FORBIDDEN"));
+  verify(service).optionsForProduct(19L);
+  verifyNoMoreInteractions(service);
+ }
 }

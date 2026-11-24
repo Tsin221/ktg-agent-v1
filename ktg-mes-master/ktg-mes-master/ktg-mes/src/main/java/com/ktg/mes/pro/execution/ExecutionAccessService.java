@@ -24,6 +24,15 @@ public class ExecutionAccessService {
         authorize(action, workorderId, taskId, snId, false);
     }
 
+    /** Master-data choices for a future draft; cannot expose an existing order or authorize a write. */
+    public void requireProductReleaseOptions() {
+        requirePermission("release");
+        if (SecurityUtils.getUserId() == null || !permissions.hasPermi("mes:md:mditem:list")
+                || (!permissions.hasPermi("mes:pro:workorder:add") && !permissions.hasPermi("mes:pro:workorder:edit"))) {
+            throw ExecutionException.forbidden();
+        }
+    }
+
     /** Batch report/pack callers check every selected SN before any business write. */
     public void requireTaskUnits(ExecutionAction action, Long workorderId, Long taskId, Collection<Long> snIds) {
         if ((action != ExecutionAction.REPORT && action != ExecutionAction.PACK)

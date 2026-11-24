@@ -96,7 +96,16 @@ public class ExecutionReleaseService {
     public Map<String,Object> options(Long id) {
         access.requireOperation(ExecutionAction.RELEASE,id,null,null);
         Map<String,Object> w=one("select * from pro_workorder where workorder_id=?",id);
-        List<Map<String,Object>> routes=camel(db.queryForList("select r.route_id,r.route_code,r.route_name from pro_route r where r.enable_flag='Y' and exists(select 1 from pro_route_product p where p.route_id=r.route_id and p.item_id=?) order by r.route_id",w.get("product_id")));
+        return productOptions(w.get("product_id"));
+    }
+    public Map<String,Object> optionsForProduct(Long productId) {
+        access.requireProductReleaseOptions();
+        if(productId==null || productId<=0) throw ExecutionException.validation("产品 ID 无效");
+        one("select item_id from md_item where item_id=? and enable_flag='Y' and item_or_product='PRODUCT'",productId);
+        return productOptions(productId);
+    }
+    private Map<String,Object> productOptions(Object productId) {
+        List<Map<String,Object>> routes=camel(db.queryForList("select r.route_id,r.route_code,r.route_name from pro_route r where r.enable_flag='Y' and exists(select 1 from pro_route_product p where p.route_id=r.route_id and p.item_id=?) order by r.route_id",productId));
         List<Map<String,Object>> valid=new ArrayList<>();
         for(Map<String,Object> route:routes) {
             List<Map<String,Object>> raw=routeSteps(((Number)route.get("routeId")).longValue(),false);
@@ -105,7 +114,7 @@ public class ExecutionReleaseService {
             for(Map<String,Object> step:steps) {
                 step.put("routeProcessId",step.get("recordId"));
                 step.put("workstations",camel(db.queryForList("select workstation_id,workstation_code,workstation_name from md_workstation where process_id=? and enable_flag='Y' order by workstation_id",step.get("processId"))));
-                step.put("templates", "INSPECTION".equals(step.get("executionKind")) ? camel(db.queryForList("select t.template_id,t.template_code,t.template_name,t.qc_types from qc_template t where t.enable_flag='Y' and exists(select 1 from qc_template_product p where p.template_id=t.template_id and p.item_id=?) and exists(select 1 from qc_template_index i where i.template_id=t.template_id) order by t.template_id",w.get("product_id"))) : Collections.emptyList());
+                step.put("templates", "INSPECTION".equals(step.get("executionKind")) ? camel(db.queryForList("select t.template_id,t.template_code,t.template_name,t.qc_types from qc_template t where t.enable_flag='Y' and exists(select 1 from qc_template_product p where p.template_id=t.template_id and p.item_id=?) and exists(select 1 from qc_template_index i where i.template_id=t.template_id) order by t.template_id",productId)) : Collections.emptyList());
             }
             for(Map<String,Object> step:steps) { if("INSPECTION".equals(step.get("executionKind"))) { for(Map<String,Object> t:(List<Map<String,Object>>)step.get("templates")) { t.put("qcTypes",Arrays.asList(String.valueOf(t.get("qcTypes")).replace(" ","").split(","))); } } }
             route.put("steps",steps);valid.add(route);

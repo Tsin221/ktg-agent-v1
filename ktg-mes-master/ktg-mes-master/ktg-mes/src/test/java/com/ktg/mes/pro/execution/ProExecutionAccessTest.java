@@ -73,6 +73,20 @@ class ProExecutionAccessTest {
                 () -> access.requireOperation(ExecutionAction.RELEASE, 3L, null, null));
     }
 
+    @Test void productOptionsRequireReleaseAndDraftCreationAndProductList() {
+        login(10, "creator", "release");
+        assertThrows(ExecutionException.class, () -> access.requireProductReleaseOptions());
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
+        com.ktg.common.core.domain.entity.SysUser user = new com.ktg.common.core.domain.entity.SysUser();
+        user.setUserId(10L); user.setUserName("creator");
+        LoginUser actor = new LoginUser(10L, 1L, user, new HashSet<>(Arrays.asList(
+                "mes:pro:execution:release", "mes:pro:workorder:add", "mes:md:mditem:list")));
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(actor, null, Collections.emptyList()));
+        assertDoesNotThrow(() -> access.requireProductReleaseOptions());
+        actor.setPermissions(new HashSet<>(Arrays.asList("mes:pro:workorder:add", "mes:md:mditem:list")));
+        assertThrows(ExecutionException.class, () -> access.requireProductReleaseOptions());
+    }
+
     @Test void workerNeedsAssignedTaskAndMatchingWorkorderAndUnit() {
         login(30, "producer", "report");
         assertDoesNotThrow(() -> access.requireOperation(ExecutionAction.REPORT, 1L, 11L, 100L));

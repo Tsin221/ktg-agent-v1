@@ -14,6 +14,8 @@ public class ExecutionOrderController {
     public AjaxResult release(@PathVariable Long workorderId,@RequestBody ExecutionReleaseRequest request) {return service.release(workorderId,request);}
     @GetMapping("/workorders/{workorderId}/release-options")
     public AjaxResult options(@PathVariable Long workorderId) {return AjaxResult.success(service.options(workorderId));}
+    @GetMapping("/products/{productId}/release-options")
+    public AjaxResult productOptions(@PathVariable Long productId) {return AjaxResult.success(service.optionsForProduct(productId));}
     @PostMapping("/workorders/{workorderId}/completions")
     public AjaxResult complete(@PathVariable Long workorderId,@RequestBody ExecutionCompletionRequest request) {return completion.complete(workorderId,request);}
     @GetMapping("/workorders/{workorderId}")
