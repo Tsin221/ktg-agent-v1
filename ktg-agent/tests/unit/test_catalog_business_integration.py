@@ -19,6 +19,7 @@ from ktg_agent.tools.registry import ToolDefinitionError
 RETAINED = {"ktg_count_products", "ktg_query_stock_summary"}
 WORKORDER = "ktg_query_workorder_overview"
 MATERIALS = "ktg_query_workorder_materials"
+QUALITY = "ktg_query_workorder_quality"
 
 
 def test_tools_import_in_fresh_process() -> None:
@@ -67,8 +68,8 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS}
-    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS}
+    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS, QUALITY}
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS, QUALITY}
     assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
 
     definition = service._catalog.resolve_definition(WORKORDER, service._catalog.manifest(WORKORDER).version)
@@ -78,7 +79,11 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
     for granted in ({*permissions}, *({permission} for permission in permissions), set()):
         identity = CatalogIdentity(frozenset(granted), "run")
         candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
-        assert set(candidates) == ({WORKORDER} if granted == permissions else set())
+        assert set(candidates) == ({WORKORDER, QUALITY} if granted == permissions else set())
+
+    quality_definition = service._catalog.resolve_definition(QUALITY, service._catalog.manifest(QUALITY).version)
+    assert quality_definition.effect is ToolEffect.READ
+    assert set(quality_definition.required_permissions) == permissions
 
     material_permissions = permissions | {"mes:pro:workorderbom:list", "mes:wm:wmstock:list"}
     materials_definition = service._catalog.resolve_definition(MATERIALS, service._catalog.manifest(MATERIALS).version)

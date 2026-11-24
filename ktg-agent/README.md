@@ -2,7 +2,7 @@
 
 KTG Agent 的 Python 核心包，提供模型事件流、工具发现及受控执行、会话与任务持久化、上下文管理、运行限额和 HTTP/SSE 服务。
 
-2026-11-24：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`）。沿用产品总数及分仓现存量两个已验证工具，新增工单概览与生产进度、工单备料与剩余用料分析，只开放这四个业务只读工具。旧业务写入、探索、设备、维修、点检、工装等工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
+2026-11-24：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`）。沿用产品总数及分仓现存量两个已验证工具，新增工单概览与生产进度、工单备料与剩余用料分析、工单质量异常与检验历史，只开放这五个业务只读工具。旧业务写入、探索、设备、维修、点检、工装等工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
 
 ## 环境和开发验证
 
@@ -47,12 +47,15 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 | `ktg_query_stock_summary` | `GET /mes/wm/wmstock/summary`，按物料和仓库/单位的现存数量 | `mes:wm:wmstock:list` |
 | `ktg_query_workorder_overview` | `GET /mes/pro/workorder/list` 和 `GET /mes/pro/execution/workorders/{id}`；筛选工单及按需读取单件执行摘要 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
 | `ktg_query_workorder_materials` | 工单列表、草稿工单 BOM 和库存明细；已下达工单冻结 BOM、执行摘要和本工单装配任务可耗料 | `mes:pro:workorder:list`、`mes:pro:workorderbom:list`、`mes:pro:execution:query`、`mes:wm:wmstock:list` 同时具备 |
+| `ktg_query_workorder_quality` | 工单列表、全单执行摘要、检验任务当前及历史可访问 SN、单件各轮检验记录 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
 
 分仓**现存量**不是本工单可消耗量、预留量或齐套结论。没有匹配的库存记录时明确说明，不编造零数量。工单概览支持名称片段、多编号、多状态、需求日期和分页；执行进度按需读取，未获取的进度不能视为零，部分覆盖不能视为全量。其他生产事实尚未提供 Agent 工具，不得用历史输出推断。
 
 工单用料查询接收 1–5 个准确工单编号，可选批次详情；名称片段先由工单概览定位。草稿比较工单 BOM 总需求与未绑定工单的非虚拟仓账面现存量，仅作原仓备料参考；已下达则使用冻结 BOM 与待装配件数计算剩余需求，对比本工单真实可耗线边库存。不跨工单分配库存，不执行领料或采购。正式数据只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-materials.py`。
 
-`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录只包含上述四项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
+工单质量查询接收 1–5 个准确工单编号，可选 1–10 个准确 SN 编码；默认展示当前或历史异常单件及对应检验历史。全单统计与明细范围分开，首检不合格不等于最终不合格，未检不等于失败；未匹配或不完整的历史不得作为全部无异常的依据。只读取真实检验项、实测、阈值及缺陷记录，不推定根因，不提供处置或双向追溯。默认每单核实至多 50 个检验成员，明细超限、版本变化等情况显式标明部分覆盖或待核实。正式库只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-quality.py`。
+
+`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录只包含上述五项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
 
 ## HTTP 与会话
 
