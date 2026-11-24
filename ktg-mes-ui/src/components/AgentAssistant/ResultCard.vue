@@ -100,6 +100,7 @@
       </details>
       <p v-if="result.queried_at" class="result-card__meta">查询时间 {{ result.queried_at }}</p>
     </template>
+    <agent-workorder-materials-card v-else-if="result.kind === 'workorder_materials'" :result="result" />
     <details v-else class="result-card__history">
       <summary>历史结果（仅供查看，不可执行）</summary>
       <pre>{{ historyText }}</pre>
@@ -109,15 +110,18 @@
 
 <script>
 import { queryScope, workorderStatusLabel } from './sessionPresentation'
+import AgentWorkorderMaterialsCard from './WorkorderMaterialsCard.vue'
 
 export default {
   name: 'AgentResultCard',
+  components: { AgentWorkorderMaterialsCard },
   props: {
     result: { type: Object, required: true }
   },
   computed: {
     title() {
-      return { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览' }[this.result.kind] || '历史结果'
+      return { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览',
+        workorder_materials: '工单用料' }[this.result.kind] || '历史结果'
     },
     historyText() {
       return JSON.stringify(this.result, null, 2)

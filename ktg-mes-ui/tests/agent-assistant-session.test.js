@@ -90,6 +90,7 @@ const orderDetails = queryCardPresentation(presentMessages(overviewQueries)).at(
 assert.strictEqual(orderDetails.count, 2)
 assert.strictEqual(orderDetails.failed, 1)
 assert.strictEqual(orderDetails.groups[0].title, '工单概览')
+assert.strictEqual(orderDetails.groups[0].id, 'workorders')
 assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /产品编码 LAMP-BATT-MODULE/)
 assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /工单编号 WO-LAMP-RETAIL、WO-LAMP-HOME/)
 assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /工单状态 审批中、已审批/)
@@ -100,6 +101,31 @@ assert.match(orderDetails.groups[0].queries[1].attempts[0].scope, /仅未完工 
 assert.match(orderDetails.groups[0].queries[1].attempts[0].scope, /查询执行进度 否/)
 assert.strictEqual(orderDetails.groups[0].queries[1].attempts[0].error, '工单查询失败')
 assert.strictEqual(toolProgressText({ workorder: { name: 'ktg_query_workorder_overview', status: 'running' } }), '正在查询工单概览')
+const materials = { kind: 'workorder_materials', filters: { workorder_codes: ['WO-LAMP-WINTER'], include_batches: true },
+  orders: [], missing_codes: [], coverage: 'complete', queried_at: '2026-11-24T07:05:00Z' }
+const materialsQueries = [chat('materials', 'user', '查询工单用料'),
+  ...query('materials', 'ktg_query_workorder_materials', { workorder_codes: ['WO-LAMP-WINTER'], include_batches: true }, materials),
+  ...query('materials', 'ktg_query_workorder_materials', { workorder_codes: ['WO-LAMP-OFFICE'], include_batches: false }, null, '用料查询失败'),
+  chat('materials', 'assistant', '工单用料已核实部分。')]
+const materialDetails = queryCardPresentation(presentMessages(materialsQueries)).at(-1).queryDetails
+assert.strictEqual(materialDetails.count, 2)
+assert.strictEqual(materialDetails.failed, 1)
+assert.strictEqual(materialDetails.groups[0].title, '工单用料')
+assert.match(materialDetails.groups[0].queries[0].attempts[0].scope, /包含批次 是/)
+assert.match(materialDetails.groups[0].queries[1].attempts[0].scope, /包含批次 否/)
+assert.match(materialDetails.groups[0].queries[1].attempts[0].scope, /工单编号 WO-LAMP-OFFICE/)
+assert.strictEqual(toolProgressText({ material: { name: 'ktg_query_workorder_materials', status: 'running' } }), '正在查询工单用料')
+const singleMaterialPreface = [
+  chat('material-preface', 'user', '看冬季用料'),
+  message('material-preface', 'assistant', [{ type: 'text', text: '我先查询准确用料。' },
+    { type: 'tool_call', id: 'single-material', name: 'ktg_query_workorder_materials', arguments: materials.filters }]),
+  message('material-preface', 'tool', [], { tool_call_id: 'single-material', details: materials }),
+  chat('material-preface', 'assistant', '结论：保护板有缺口。')]
+const singleMaterialPresentation = compactResultPresentation(queryCardPresentation(presentMessages(singleMaterialPreface)))
+assert.strictEqual(singleMaterialPresentation.length, 2, '单次材料查完，前言不应把结果卡与结论分开')
+assert.strictEqual(singleMaterialPresentation[1].textPreview, '结论：保护板有缺口。')
+assert.deepStrictEqual(singleMaterialPresentation[1].results.map(item => item.kind), ['workorder_materials'])
+assert.strictEqual(singleMaterialPresentation[1].queryDetails, undefined)
 const resumed = [...multi, chat('resume', 'user', '继续此任务'),
   ...query('resume', 'update_task', {}, { task_id: 'task-a', version: 2 }),
   ...query('resume', 'ktg_query_stock_summary', { item_code: 'CELL-18650-2200' }, stock),
@@ -150,6 +176,29 @@ assert.strictEqual(comparisonPreview.textDetails, scope)
 const withResultCard = compactResultPresentation([{ role: 'assistant', text: ['结论：办公灯进度更慢。', answerTable, scope].join('\n\n'), results: [{ kind: 'workorder_overview' }] }])[0]
 assert.strictEqual(withResultCard.textTables, '', '已有权威数据卡时，避免默认重复展示模型表格')
 assert.ok(withResultCard.textDetails.includes(answerTable))
+const materialTable = '| 物料 | 计划需求 | 账面量 | 缺口 |\n|---|---:|---:|---:|\n| 保护板 | 120 | 80 | 40 |'
+const officeMaterials = { ...materials, filters: { workorder_codes: ['WO-LAMP-OFFICE'], include_batches: true },
+  queried_at: '2026-11-24T07:07:00Z' }
+const materialMulti = [chat('material-multi', 'user', '对照冬季和办公工单用料'),
+  ...query('material-multi', 'ktg_query_workorder_overview', { workorder_name: '冬季' }, overview),
+  ...query('material-multi', 'ktg_query_workorder_materials', materials.filters, materials),
+  ...query('material-multi', 'ktg_query_workorder_materials', materials.filters,
+    { ...materials, queried_at: '2026-11-24T07:06:00Z' }),
+  ...query('material-multi', 'ktg_query_workorder_materials', officeMaterials.filters, officeMaterials),
+  ...query('material-multi', 'ktg_query_workorder_materials', { workorder_codes: ['WO-MISSING'] }, null, '未核实'),
+  chat('material-multi', 'assistant', ['结论：冬季保护板有缺口，办公工单另有独立线边用料。', materialTable, scope].join('\n\n'))]
+const materialMultiPresentation = compactResultPresentation(queryCardPresentation(presentMessages(materialMulti))).at(-1)
+assert.strictEqual(materialMultiPresentation.textPreview, '结论：冬季保护板有缺口，办公工单另有独立线边用料。')
+assert.strictEqual(materialMultiPresentation.results.length, 2, '不同材料查询分别展示；相同查询保留最新结果')
+assert.deepStrictEqual(materialMultiPresentation.results.map(item => item.kind), ['workorder_materials', 'workorder_materials'])
+assert.strictEqual(materialMultiPresentation.results[0].queried_at, '2026-11-24T07:06:00Z')
+assert.strictEqual(materialMultiPresentation.textTables, '', '权威材料卡直接展示后不重复默认展示模型表格')
+assert.strictEqual(materialMultiPresentation.queryDetails.count, 5)
+assert.strictEqual(materialMultiPresentation.queryDetails.failed, 1)
+const materialAudits = materialMultiPresentation.queryDetails.groups.find(group => group.title === '工单用料').queries.flatMap(q => q.attempts)
+assert.strictEqual(materialAudits.filter(item => item.resultShown && !item.result).length, 3)
+assert.strictEqual(materialAudits.filter(item => item.error).length, 1)
+assert.ok(materialMultiPresentation.queryDetails.groups.find(group => group.title === '工单概览').queries[0].attempts[0].result)
 assert.deepStrictEqual(answerBlocks(['查询结果', answerTable, '还有1件待处置。'].join('\n\n')), [
   { type: 'text', text: '查询结果' },
   { type: 'table', headers: ['工单', '状态', '数量'], rows: [['阅读灯', '已下达', '**10**'], ['办公灯', '待装配', '4']] },

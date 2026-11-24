@@ -5,22 +5,26 @@ const Vue = require('vue')
 const babel = require('@babel/core')
 const compiler = require('vue-template-compiler')
 
-const source = fs.readFileSync(path.resolve(__dirname, '../src/components/AgentAssistant/ResultCard.vue'), 'utf8')
-const component = compiler.parseComponent(source)
-const script = babel.transformSync(component.script.content, { babelrc: false, configFile: false,
-  plugins: ['@babel/plugin-transform-modules-commonjs'] }).code
 const presentation = babel.transformFileSync(path.resolve(__dirname, '../src/components/AgentAssistant/sessionPresentation.js'),
   { babelrc: false, configFile: false, plugins: ['@babel/plugin-transform-modules-commonjs'] }).code
 const presentationModule = { exports: {} }
 new Function('exports', 'module', 'require', presentation)(presentationModule.exports, presentationModule, require)
-const componentModule = { exports: {} }
-new Function('exports', 'module', 'require', script)(componentModule.exports, componentModule,
-  name => name === './sessionPresentation' ? presentationModule.exports : require(name))
-const options = componentModule.exports.default || componentModule.exports
-const compiled = compiler.compileToFunctions(component.template.content)
-function render(result) {
-  const vm = new Vue({ ...options, propsData: { result }, render: compiled.render,
-    staticRenderFns: compiled.staticRenderFns })
+function loadVue(filename) {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/components/AgentAssistant', filename), 'utf8')
+  const component = compiler.parseComponent(source)
+  const script = babel.transformSync(component.script.content, { babelrc: false, configFile: false,
+    plugins: ['@babel/plugin-transform-modules-commonjs'] }).code
+  const componentModule = { exports: {} }
+  new Function('exports', 'module', 'require', script)(componentModule.exports, componentModule,
+    name => name === './sessionPresentation' ? presentationModule.exports
+      : name.endsWith('.vue') ? loadVue(name) : require(name))
+  assert.deepStrictEqual(compiler.compile(component.template.content).errors, [])
+  const compiled = compiler.compileToFunctions(component.template.content)
+  return { ...(componentModule.exports.default || componentModule.exports), render: compiled.render,
+    staticRenderFns: compiled.staticRenderFns }
+}
+function render(result, filename = 'ResultCard.vue') {
+  const vm = new Vue({ ...loadVue(filename), propsData: { result } })
   const vnode = vm._render()
   vm.$destroy()
   return vnode
@@ -33,6 +37,11 @@ function text(node) {
 function tags(node) {
   if (!node || typeof node !== 'object') return []
   return [node.tag, ...(node.children || []).flatMap(tags)].filter(Boolean)
+}
+function findComponent(node, name) {
+  if (!node || typeof node !== 'object') return undefined
+  if (node.componentOptions && node.componentOptions.Ctor.options.name === name) return node
+  return (node.children || []).map(child => findComponent(child, name)).find(Boolean)
 }
 
 const countText = text(render({ kind: 'product_count', total: 1 }))
@@ -121,6 +130,70 @@ assert.match(approvedOrders, /审批中/)
 assert.match(approvedOrders, /已审批/)
 assert.match(approvedOrders, /仅未完工 是/)
 assert.match(approvedOrders, /查询执行进度 否/)
+
+const rawCell = { itemId: '38', itemCode: 'CELL-18650-2200', itemName: '电芯', unitOfMeasure: 'PCS',
+  planned_required: '120', remaining_required: null, stock_quantity: '160', shortage_quantity: '0',
+  stock_state: 'verified', warehouses: [{ warehouseId: '1', warehouseCode: 'WH-LAMP-RM', warehouseName: '原料仓',
+    quantity: '160' }], batches: [{ batchCode: 'CELL-01', quantity: '160', warehouseCode: 'WH-LAMP-RM' }] }
+const rawBoard = { ...rawCell, itemId: '39', itemCode: 'PCB-BMS-1S', itemName: '保护板',
+  stock_quantity: '80', shortage_quantity: '40', warehouses: [], batches: [] }
+const draftMaterials = { workorderId: '1', workorderCode: 'WO-LAMP-WINTER', workorderName: '冬季新品',
+  status: 'PREPARE', quantity: '120', unitOfMeasure: 'PCS', waitingAssembly: null, material_scope: 'warehouse_reference',
+  assessment: 'reference_shortage', materials: [rawCell, rawBoard] }
+const lineMaterials = { ...draftMaterials, workorderId: '2', workorderCode: 'WO-LAMP-OFFICE',
+  workorderName: '办公订单', status: 'CONFIRMED', quantity: '10', waitingAssembly: 6,
+  material_scope: 'line_side', assessment: 'line_side_sufficient',
+  materials: [rawCell, rawBoard].map(item => ({ ...item, planned_required: '10', remaining_required: '6',
+    stock_quantity: '6', shortage_quantity: '0', warehouses: undefined,
+    batches: [{ batchCode: 'LINE-01', quantity: '6', warehouseCode: 'XBK_VIRTUAL' }] })) }
+const unavailable = { ...lineMaterials, workorderId: '3', workorderCode: 'WO-LAMP-UNKNOWN',
+  assessment: 'unavailable', material_scope: 'unavailable', waitingAssembly: null,
+  materials: [{ ...rawBoard, remaining_required: null, stock_quantity: null, shortage_quantity: null,
+    stock_state: 'unavailable', warnings: ['物料可用量待核实'] }], warnings: ['当前身份无法核实用料'] }
+const finished = { ...lineMaterials, workorderId: '4', workorderCode: 'WO-LAMP-DONE',
+  status: 'FINISHED', waitingAssembly: 0, assessment: 'no_remaining',
+  materials: [{ ...rawBoard, remaining_required: '0', stock_quantity: null, shortage_quantity: '0',
+    stock_state: 'unavailable', warehouses: [], batches: [] }] }
+const materialsResult = { kind: 'workorder_materials', filters: {
+  workorder_codes: ['WO-LAMP-WINTER', 'WO-LAMP-OFFICE'], include_batches: true },
+orders: [draftMaterials, lineMaterials, unavailable, finished], missing_codes: ['WO-LAMP-MISSING'],
+coverage: 'partial', queried_at: '2026-11-24T08:00:00Z', warnings: ['库存读取并非同一事务快照'] }
+const parentMaterialsCard = render(materialsResult)
+assert.strictEqual(parentMaterialsCard.data.attrs['aria-label'], '工单用料')
+assert.strictEqual(findComponent(parentMaterialsCard, 'AgentWorkorderMaterialsCard').componentOptions.propsData.result, materialsResult)
+const materialsCard = render(materialsResult, 'WorkorderMaterialsCard.vue')
+const materialsText = text(materialsCard)
+assert.match(materialsText, /本次仅获得部分数据/)
+assert.match(materialsText, /WO-LAMP-MISSING/)
+assert.match(materialsText, /库存读取并非同一事务快照/)
+assert.match(materialsText, /包含批次 是/)
+assert.match(materialsText, /冬季新品/)
+assert.match(materialsText, /原料仓账面参考/)
+assert.match(materialsText, /不代表已齐套或已领料/)
+assert.match(materialsText, /保护板.*缺口 40 PCS/)
+assert.match(materialsText, /电芯.*120.*160.*0/)
+assert.match(materialsText, /办公订单/)
+assert.match(materialsText, /待装配 6 PCS/)
+assert.match(materialsText, /本工单线边可耗/)
+assert.match(materialsText, /剩余需求/)
+assert.match(materialsText, /无剩余装配需求/)
+assert.match(materialsText, /不代表当前库存齐套/)
+assert.match(materialsText, /0（无需求）/)
+assert.match(materialsText, /用料结论待核实/)
+assert.match(materialsText, /物料可用量待核实/)
+assert.match(materialsText, /当前身份无法核实用料/)
+assert.match(materialsText, /原料仓.*160/)
+assert.match(materialsText, /LINE-01.*XBK_VIRTUAL.*6/)
+assert.ok(tags(materialsCard).includes('table'))
+assert.ok(tags(materialsCard).includes('details'))
+assert.ok(!tags(materialsCard).some(tag => ['button', 'a', 'iframe', 'script', 'form'].includes(tag)))
+const unknownOnly = text(render({ ...materialsResult, orders: [unavailable] }, 'WorkorderMaterialsCard.vue'))
+assert.match(unknownOnly, /未核实/)
+assert.doesNotMatch(unknownOnly, /缺口 0|库存 0/)
+const emptyMaterials = text(render({ ...materialsResult, orders: [], missing_codes: [], coverage: 'complete',
+  filters: { workorder_codes: ['WO-NONE'], include_batches: false } }, 'WorkorderMaterialsCard.vue'))
+assert.match(emptyMaterials, /未返回工单用料记录/)
+assert.match(emptyMaterials, /包含批次 否/)
 
 for (const kind of ['workorder_draft_preview', 'inventory_preview', 'exploration_search', 'workorder_progress']) {
   const historical = render({ kind, url: 'https://example.invalid', label: '<script>test</script>' })

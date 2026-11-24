@@ -154,7 +154,7 @@
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
           <h3>今天想查询什么？</h3>
-          <p>目前可查询产品总数、分仓现存量、工单与生产进度。</p>
+          <p>目前可查询产品总数、分仓现存量、工单与生产进度，以及工单用料和缺口。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"
@@ -205,6 +205,7 @@
                       </p>
                       <p v-if="attempt.error" class="agent-query-error">{{ query.title }}失败 · {{ attempt.error }}</p>
                       <agent-result-card v-else-if="attempt.result" class="agent-result-surface" :result="attempt.result" />
+                      <p v-else-if="attempt.resultShown" class="agent-query-attempt__meta">结果已在上方展示。</p>
                     </div>
                   </component>
                 </div>
@@ -274,7 +275,7 @@
           v-model="draft"
           rows="2"
           maxlength="2000"
-          placeholder="例如：查询 CELL-18650-2200 的分仓现存量"
+          placeholder="例如：冬季新品120件的用料够吗？"
           :disabled="composerBusy"
           @keydown.enter.exact.prevent="send"
         />
@@ -371,7 +372,7 @@ export default {
       unsubscribeStore: null,
       messages: [],
       openQueryDetails: {},
-      examples: ['有哪些工单尚未完工？', '床头阅读灯为什么还没完工？', '查询 CELL-18650-2200 的分仓库存']
+      examples: ['有哪些工单尚未完工？', '床头阅读灯为什么还没完工？', '冬季新品120件的用料够吗？', '查询 CELL-18650-2200 的分仓库存']
     }
   },
   computed: {
