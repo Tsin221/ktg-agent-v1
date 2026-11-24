@@ -146,6 +146,7 @@ async def natural_conversation(authorization: str) -> dict[str, Any]:
     """One opted-in real conversation. No submission retries, fixed tool calls or DB changes."""
     session = request_json(GATEWAY + "/agent-api/v1/sessions", authorization, {"title": "正式演示验收：质量异常多轮"})
     session_id = session["session_id"]
+    print(f"Quality verification session: {session_id}", flush=True)
     prompts = (("床头阅读灯怎么还没全部合格？", RETAIL),
                ("具体哪件，哪项不合格，差了多少？", RETAIL),
                ("办公台灯也有这种问题吗？", OFFICE))
