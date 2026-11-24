@@ -195,6 +195,75 @@ const emptyMaterials = text(render({ ...materialsResult, orders: [], missing_cod
 assert.match(emptyMaterials, /未返回工单用料记录/)
 assert.match(emptyMaterials, /包含批次 否/)
 
+const failedIndex = { indexCode: 'VOLT', indexName: '电压', indexType: 'QUANTITATIVE', value: '2.98', passed: false,
+  thresholdMin: '3.2', thresholdMax: '4.2', unitOfMeasure: 'V', defectName: '电压偏低', defectLevel: 'MAJ', reason: '实测值偏低' }
+const firstInspection = { inspectionId: '9007199254740301', round_no: 1, result: 'REJECT', inspect_date: '2026-11-24T02:00:00Z',
+  failed_indices: [failedIndex] }
+const pending = { snId: '9007199254740302', snCode: 'SN-1', unitState: 'WAIT_DISPOSITION', inspection_count: 1,
+  first_result: 'REJECT', latest_result: 'REJECT', ever_rejected: true, history_state: 'verified', inspections: [firstInspection] }
+const recovered = { ...pending, snId: '9007199254740303', snCode: 'SN-2', unitState: 'PACKED', inspection_count: 2,
+  latest_result: 'ACCEPT', inspections: [firstInspection,
+    { inspectionId: '9007199254740304', round_no: 2, result: 'ACCEPT', inspect_date: '2026-11-24T03:00:00Z', failed_indices: [] }] }
+const uninspected = { ...pending, snId: '4', snCode: 'SN-3', unitState: 'WAIT_INSPECTION', inspection_count: 0, first_result: null,
+  latest_result: null, ever_rejected: false, inspections: [] }
+const unknownUnit = { ...uninspected, snId: '5', snCode: 'SN-4', inspection_count: null, ever_rejected: null,
+  history_state: 'unavailable', warnings: ['无权读取检验历史'] }
+const qualityOrder = { workorderId: '1', workorderCode: 'WO-LAMP-RETAIL', workorderName: '阅读灯补单', status: 'CONFIRMED',
+  summary: { planned: 10, allocated: 10, waitingAssembly: 4, waitingInspection: 2, pendingDisposition: 1, reworkInProgress: 0,
+    waitingReinspection: 1, qualified: 1, scrapped: 1, firstInspectionRejected: 3, reinspectionCount: 2 },
+  units: [pending, recovered, uninspected, unknownUnit], history_coverage: 'partial', scanned_units: 4, total_units: 10,
+  missing_sn_codes: ['SN-MISSING'], warnings: ['部分历史待核实'] }
+const qualityResult = { kind: 'workorder_quality', filters: { workorder_codes: ['WO-LAMP-RETAIL'], sn_codes: ['SN-1', 'SN-2'] },
+  orders: [qualityOrder], missing_codes: ['WO-MISSING'], coverage: 'partial', queried_at: '2026-11-24T08:00:00Z', warnings: ['质检记录不能证明根因'] }
+const parentQualityCard = render(qualityResult)
+assert.strictEqual(parentQualityCard.data.attrs['aria-label'], '工单质量')
+assert.strictEqual(findComponent(parentQualityCard, 'AgentWorkorderQualityCard').componentOptions.propsData.result, qualityResult)
+const qualityCard = render(qualityResult, 'WorkorderQualityCard.vue')
+const qualityText = text(qualityCard).replace(/\s+/g, ' ')
+assert.match(qualityText, /本次仅获得部分数据/)
+assert.match(qualityText, /WO-MISSING/)
+assert.match(qualityText, /SN-MISSING/)
+assert.match(qualityText, /SN SN-1、SN-2/)
+assert.match(qualityText, /质检记录不能证明根因/)
+assert.match(qualityText, /首检不合格件数\s+3/)
+assert.match(qualityText, /复检次数\s+2/)
+assert.match(qualityText, /待处置\s+1/)
+assert.match(qualityText, /SN-1.*待处置/)
+assert.match(qualityText, /SN-2.*已包装.*不合格.*合格/)
+assert.match(qualityText, /SN-3.*待检.*尚未检验/)
+assert.match(qualityText, /SN-4.*待检.*未核实/)
+assert.match(qualityText, /第 1 轮.*电压.*2\.98 V.*3\.2.*4\.2.*电压偏低.*实测值偏低/)
+assert.match(qualityText, /电压偏低 · 严重缺陷/)
+assert.match(qualityText, /全单检验历史统计/)
+assert.match(qualityText, /已匹配指定 SN/)
+assert.match(qualityText, /第 2 轮.*合格/)
+assert.match(qualityText, /已核实.*4.*10/)
+assert.ok(tags(qualityCard).includes('table'))
+assert.ok(tags(qualityCard).includes('dl'))
+assert.ok(tags(qualityCard).includes('details'))
+assert.ok(!tags(qualityCard).some(tag => ['button', 'a', 'iframe', 'script', 'form'].includes(tag)))
+const onlyUnknown = text(render({ ...qualityResult, filters: { workorder_codes: ['WO-LAMP-RETAIL'] }, orders: [{ ...qualityOrder, summary: null, units: [], scanned_units: 0,
+  total_units: null, history_coverage: 'partial' }] }, 'WorkorderQualityCard.vue'))
+assert.match(onlyUnknown, /质量汇总未核实/)
+assert.match(onlyUnknown, /尚不能判断/)
+assert.doesNotMatch(onlyUnknown, /无质量异常/)
+const unstarted = text(render({ ...qualityResult, orders: [{ ...qualityOrder, status: 'PREPARE', summary: null, units: [],
+  history_coverage: 'not_applicable', scanned_units: 0, total_units: null }] }, 'WorkorderQualityCard.vue'))
+assert.match(unstarted, /草稿，尚未下达/)
+const noExceptions = text(render({ ...qualityResult, filters: { workorder_codes: ['WO-LAMP-RETAIL'] }, coverage: 'complete',
+  orders: [{ ...qualityOrder, units: [], scanned_units: 10, total_units: 10, history_coverage: 'complete', missing_sn_codes: [] }] }, 'WorkorderQualityCard.vue'))
+assert.match(noExceptions, /本次查询范围内未发现已记录的质量异常/)
+assert.match(noExceptions, /检验任务可见历史成员/)
+assert.match(noExceptions, /未检验不代表合格/)
+const noInspectedMembers = text(render({ ...qualityResult, filters: { workorder_codes: ['WO-LAMP-STOCK'] }, coverage: 'complete',
+  orders: [{ ...qualityOrder, units: [], scanned_units: 0, total_units: 0, history_coverage: 'complete' }] }, 'WorkorderQualityCard.vue'))
+assert.match(noInspectedMembers, /当前无可见检验任务成员；未检验不代表合格/)
+assert.doesNotMatch(noInspectedMembers, /未发现已记录的质量异常/)
+const noMatches = text(render({ ...qualityResult, coverage: 'complete', orders: [{ ...qualityOrder, units: [], scanned_units: 0,
+  total_units: 0, history_coverage: 'complete' }] }, 'WorkorderQualityCard.vue'))
+assert.match(noMatches, /未返回指定单件/)
+assert.doesNotMatch(noMatches, /本次查询范围内未发现已记录的质量异常/)
+
 for (const kind of ['workorder_draft_preview', 'inventory_preview', 'exploration_search', 'workorder_progress']) {
   const historical = render({ kind, url: 'https://example.invalid', label: '<script>test</script>' })
   assert.match(text(historical), /历史结果（仅供查看，不可执行）/)

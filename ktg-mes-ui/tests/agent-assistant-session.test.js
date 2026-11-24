@@ -199,6 +199,40 @@ const materialAudits = materialMultiPresentation.queryDetails.groups.find(group 
 assert.strictEqual(materialAudits.filter(item => item.resultShown && !item.result).length, 3)
 assert.strictEqual(materialAudits.filter(item => item.error).length, 1)
 assert.ok(materialMultiPresentation.queryDetails.groups.find(group => group.title === '工单概览').queries[0].attempts[0].result)
+const quality = { kind: 'workorder_quality', filters: { workorder_codes: ['WO-LAMP-RETAIL'], sn_codes: ['SN-1'] },
+  orders: [], missing_codes: [], coverage: 'complete', queried_at: '2026-11-24T08:00:00Z' }
+const qualityPreface = [chat('quality-preface', 'user', '哪个质量不合格？'),
+  message('quality-preface', 'assistant', [{ type: 'text', text: '先查质量。' },
+    { type: 'tool_call', id: 'single-quality', name: 'ktg_query_workorder_quality', arguments: quality.filters }]),
+  message('quality-preface', 'tool', [], { tool_call_id: 'single-quality', details: quality }),
+  chat('quality-preface', 'assistant', '结论：1件待处置。')]
+const singleQualityPresentation = compactResultPresentation(queryCardPresentation(presentMessages(qualityPreface)))
+assert.strictEqual(singleQualityPresentation.length, 2)
+assert.strictEqual(singleQualityPresentation[1].textPreview, '结论：1件待处置。')
+assert.deepStrictEqual(singleQualityPresentation[1].results, [quality])
+assert.strictEqual(singleQualityPresentation[1].queryDetails, undefined)
+const qualityTable = '| SN | 状态 |\n|---|---|\n| SN-1 | 待处置 |'
+const qualityMulti = [chat('quality-multi', 'user', '看看工单质量与材料'),
+  ...query('quality-multi', 'ktg_query_workorder_overview', { workorder_name: '床头阅读灯' }, overview),
+  ...query('quality-multi', 'ktg_query_workorder_quality', quality.filters, quality),
+  ...query('quality-multi', 'ktg_query_workorder_quality', quality.filters, { ...quality, queried_at: '2026-11-24T08:01:00Z' }),
+  ...query('quality-multi', 'ktg_query_workorder_quality', { workorder_codes: ['WO-MISSING'] }, null, '质量查询失败'),
+  ...query('quality-multi', 'ktg_query_workorder_materials', materials.filters, materials),
+  chat('quality-multi', 'assistant', ['结论：有一件待处置。', qualityTable, scope].join('\n\n'))]
+const qualityPresentation = compactResultPresentation(queryCardPresentation(presentMessages(qualityMulti))).at(-1)
+assert.deepStrictEqual(qualityPresentation.results.map(item => item.kind), ['workorder_quality', 'workorder_materials'])
+assert.strictEqual(qualityPresentation.results[0].queried_at, '2026-11-24T08:01:00Z')
+assert.strictEqual(qualityPresentation.textPreview, '结论：有一件待处置。')
+assert.strictEqual(qualityPresentation.textTables, '')
+assert.ok(qualityPresentation.textDetails.includes(qualityTable))
+assert.strictEqual(qualityPresentation.queryDetails.count, 5)
+assert.strictEqual(qualityPresentation.queryDetails.failed, 1)
+const qualityAudits = qualityPresentation.queryDetails.groups.find(group => group.title === '工单质量').queries.flatMap(q => q.attempts)
+assert.strictEqual(qualityAudits.filter(item => item.resultShown && !item.result).length, 2)
+assert.strictEqual(qualityAudits.filter(item => item.error).length, 1)
+assert.match(qualityAudits[0].scope, /工单编号 WO-LAMP-RETAIL/)
+assert.match(qualityAudits[0].scope, /SN SN-1/)
+assert.strictEqual(toolProgressText({ quality: { name: 'ktg_query_workorder_quality', status: 'running' } }), '正在查询工单质量')
 assert.deepStrictEqual(answerBlocks(['查询结果', answerTable, '还有1件待处置。'].join('\n\n')), [
   { type: 'text', text: '查询结果' },
   { type: 'table', headers: ['工单', '状态', '数量'], rows: [['阅读灯', '已下达', '**10**'], ['办公灯', '待装配', '4']] },

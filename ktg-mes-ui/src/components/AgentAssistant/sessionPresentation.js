@@ -22,9 +22,11 @@ const textOf = message => (message.content || []).filter(block => block.type ===
   .map(block => block.text).join('')
 
 const queryLabels = { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览',
-  workorder_materials: '工单用料' }
+  workorder_materials: '工单用料', workorder_quality: '工单质量' }
 const queryTools = { ktg_count_products: 'product_count', ktg_query_stock_summary: 'stock_summary',
-  ktg_query_workorder_overview: 'workorder_overview', ktg_query_workorder_materials: 'workorder_materials' }
+  ktg_query_workorder_overview: 'workorder_overview', ktg_query_workorder_materials: 'workorder_materials',
+  ktg_query_workorder_quality: 'workorder_quality' }
+const isDirectQueryKind = kind => ['workorder_materials', 'workorder_quality'].includes(kind)
 const taskTools = ['create_task', 'update_task']
 const progressTools = [...taskTools, 'search_tools', 'load_tools']
 const toolKind = name => Object.prototype.hasOwnProperty.call(queryTools, name) ? queryTools[name] : undefined
@@ -140,6 +142,7 @@ export function workorderStatusLabel(status) {
 export function queryScope(args, includePagination = true) {
   const labels = { item_code: '物料编码', warehouse_id: '仓库 ID',
     workorder_id: '工单 ID', workorder_code: '工单编号', workorder_codes: '工单编号', workorder_name: '工单名称',
+    sn_codes: 'SN',
     product_code: '产品编码', product_name: '产品名称', status: '工单状态', statuses: '工单状态', request_date: '需求日期',
     request_date_from: '需求日期起', request_date_to: '需求日期止',
     unfinished_only: '仅未完工', include_progress: '查询执行进度', include_batches: '包含批次' }
@@ -161,7 +164,7 @@ function queryGroups(queries) {
     const args = (call && call.arguments) || {}
     const product = kind === 'stock_summary' && (args.item_code || (result && result.filters && result.filters.item_code))
     const key = product ? `product:${product}` : kind === 'workorder_overview' ? 'workorders'
-      : kind === 'workorder_materials' ? 'workorder_materials' : 'general'
+      : isDirectQueryKind(kind) ? kind : 'general'
     const title = product ? `物料 ${product}` : key === 'general' ? '通用查询' : queryLabels[kind]
     if (!groups.has(key)) groups.set(key, { id: key, title, queries: [], duplicates: new Map() })
     const group = groups.get(key)
@@ -175,7 +178,8 @@ function queryGroups(queries) {
     const prior = signature && group.duplicates.get(signature)
     const scopeArgs = kind === 'workorder_overview'
       ? { unfinished_only: false, include_progress: false, ...args, ...(result && result.filters || {}) }
-      : kind === 'workorder_materials' ? { include_batches: false, ...args, ...(result && result.filters || {}) } : args
+      : kind === 'workorder_materials' ? { include_batches: false, ...args, ...(result && result.filters || {}) }
+        : kind === 'workorder_quality' ? { ...args, ...(result && result.filters || {}) } : args
     const attempt = { ...item, scope: queryScope(scopeArgs) }
     if (prior) prior.attempts.push(attempt)
     else {
@@ -187,15 +191,15 @@ function queryGroups(queries) {
   return [...groups.values()].map(({ id, title, queries }) => ({ id, title, queries }))
 }
 
-// Material facts remain visible under the conclusion even when earlier queries
+// Material and quality facts remain visible under the conclusion even when earlier queries
 // were needed to resolve the workorder. Preserve independent observations and
 // keep only their query metadata in the expandable audit, avoiding duplicate cards.
-function materialCards(groups) {
+function directQueryCards(groups) {
   const cards = []
   for (const group of groups) {
     for (const query of group.queries) {
       const successful = query.attempts.filter(attempt => !attempt.error &&
-        attempt.result && attempt.result.kind === 'workorder_materials')
+        attempt.result && isDirectQueryKind(attempt.result.kind))
       if (!successful.length) continue
       const latest = successful[successful.length - 1]
       cards.push({ id: latest.id, result: latest.result })
@@ -223,21 +227,21 @@ export function queryCardPresentation(messages) {
     const run = entry.role === 'assistant' && runs.get(entry.runId)
     if (!run || !run.queries.length) return entry
     const single = !run.taskIds.size && run.queries.length === 1 && run.queries[0]
-    const singleMaterial = single && !single.error && single.result && single.result.kind === 'workorder_materials'
-    if (single && !single.error && !singleMaterial) return entry
+    const singleDirect = single && !single.error && single.result && isDirectQueryKind(single.result.kind)
+    if (single && !single.error && !singleDirect) return entry
     const retained = (entry.results || []).map((result, index) => ({ result, id: entry.resultIds[index] }))
       .filter(item => !(entry.queries || []).some(query => query.id === item.id))
     const output = { ...entry, results: retained.map(item => item.result), resultIds: retained.map(item => item.id) }
     if (entry.queryPreface && run.answer) output.text = ''
     if (entry === run.last) {
       if (single) {
-        if (singleMaterial) {
+        if (singleDirect) {
           output.results.push(single.result)
           output.resultIds.push(single.id)
         } else output.queryError = single.error
       } else {
         const groups = queryGroups(run.queries)
-        for (const card of materialCards(groups)) {
+        for (const card of directQueryCards(groups)) {
           output.results.push(card.result)
           output.resultIds.push(card.id)
         }
