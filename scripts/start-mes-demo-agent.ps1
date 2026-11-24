@@ -146,13 +146,13 @@ if ($Action -eq 'Agent') {
     $envFile = Join-Path $projectRoot '.env'
     if (!(Test-Path -LiteralPath $envFile)) { throw 'Local model configuration file was not found.' }
     foreach ($name in $allowed) {
-        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     foreach ($line in Get-Content -LiteralPath $envFile) {
         if ($line.TrimStart().StartsWith('#') -or !$line.Contains('=')) { continue }
         $parts = $line -split '=', 2
         $name = $parts[0].Trim()
-        if ($name -in $allowed) {
+        if ($name -in $allowed -and ![string]::IsNullOrWhiteSpace($parts[1])) {
             [Environment]::SetEnvironmentVariable($name, $parts[1].Trim(), 'Process')
         }
     }
@@ -172,8 +172,8 @@ if ($Action -eq 'Agent') {
     if (!(Test-Path -LiteralPath $pythonExe)) { throw 'The local Agent Python environment is missing.' }
     Push-Location (Join-Path $projectRoot 'ktg-agent')
     try {
-        & $pythonExe -B -c "import ktg_agent.server"
-        if ($LASTEXITCODE -ne 0) { throw 'The new Agent source could not be imported; no running Agent was stopped.' }
+        & $pythonExe -B -c "from ktg_agent.server import Settings; Settings.from_env()"
+        if ($LASTEXITCODE -ne 0) { throw 'The new Agent source or settings could not be validated; no running Agent was stopped.' }
     } finally {
         Pop-Location
     }
