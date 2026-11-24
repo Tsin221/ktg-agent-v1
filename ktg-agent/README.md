@@ -2,7 +2,7 @@
 
 KTG Agent 的 Python 核心包，提供模型事件流、工具发现及受控执行、会话与任务持久化、上下文管理、运行限额和 HTTP/SSE 服务。
 
-2026-11-24：旧业务工具已进入源码移除阶段，预删除 Git 检查点为 `80122c5`。现阶段仅保留产品总数及分仓现存量两项只读业务工具，其他生产能力须按新的 MES 主线另行建设。旧业务写入、探索、设备、维修、点检、工装等工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
+2026-11-24：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`）。沿用产品总数及分仓现存量两个已验证工具，新增工单概览与生产进度，只开放这三个业务只读工具。旧业务写入、探索、设备、维修、点检、工装等工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
 
 ## 环境和开发验证
 
@@ -35,6 +35,8 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 
 从项目根目录启动 `scripts/start-agent.ps1`，或在本目录加载环境变量后运行 `uv run --locked python -m ktg_agent.server`。Agent 的 `KTG_BASE_URL` 必须明确对应希望访问的 MES 后端，正式演示环境另需独立状态文件和同源代理；不要将旧演示环境会话文件与新环境混用。模型凭据始终由 Python 服务持有，不进入浏览器。
 
+正式演示（`ktg_mes_demo`）使用项目根目录的 `scripts/start-mes-demo-agent.ps1`：MES `18090`、Agent `18091`、演示 UI `18854`，会话与日志独立存放在 `.runtime/mes-demo/agent/`。该命令仅在正式演示后端已运行时启动 Agent；验证工具目录和实际业务数据可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-agent.py`，不调用真实模型。
+
 可选运行总 token、模型轮次、工具数和上下文窗口配置遵循 `server.py` 的 Settings；未启用窗口时不作上下文裁切和压缩。所有口径必须按当前授权重新读事实，历史摘要或旧工具结果不能视作实时业务状态。
 
 ## 当前业务工具
@@ -43,10 +45,11 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 | --- | --- | --- |
 | `ktg_count_products` | `GET /mes/md/mditem/list`，仅 PRODUCT 的真实总数 | `mes:md:mditem:list` |
 | `ktg_query_stock_summary` | `GET /mes/wm/wmstock/summary`，按物料和仓库/单位的现存数量 | `mes:wm:wmstock:list` |
+| `ktg_query_workorder_overview` | `GET /mes/pro/workorder/list` 和 `GET /mes/pro/execution/workorders/{id}`；筛选工单及按需读取单件执行摘要 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
 
-分仓**现存量**不是本工单可消耗量、预留量或齐套结论。没有匹配的库存记录时明确说明，不编造零数量。其他生产事实尚未提供 Agent 工具，不得用历史输出推断。
+分仓**现存量**不是本工单可消耗量、预留量或齐套结论。没有匹配的库存记录时明确说明，不编造零数量。工单概览支持名称片段、多编号、多状态、需求日期和分页；执行进度按需读取，未获取的进度不能视为零，部分覆盖不能视为全量。其他生产事实尚未提供 Agent 工具，不得用历史输出推断。
 
-`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务字典只加载上述两项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
+`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录只包含上述三项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
 
 ## HTTP 与会话
 
@@ -62,7 +65,7 @@ src/ktg_agent/
   providers/  假模型与 OpenAI 兼容适配器
   context/    上下文窗口、摘要、计量和结果收纳
   tools/      定义、目录、运行时发现和权限执行
-  ktg/        MES 客户端及两项保留业务查询
+  ktg/        MES 客户端及当前业务查询
   sessions/   会话/任务仓储，运行调度及恢复
   service.py  组件装配与授权查询
   server.py   HTTP/SSE 服务和启动配置
