@@ -20,6 +20,7 @@ RETAINED = {"ktg_count_products", "ktg_query_stock_summary"}
 WORKORDER = "ktg_query_workorder_overview"
 MATERIALS = "ktg_query_workorder_materials"
 QUALITY = "ktg_query_workorder_quality"
+TRACE = "ktg_query_production_trace"
 
 
 def test_tools_import_in_fresh_process() -> None:
@@ -68,8 +69,8 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS, QUALITY}
-    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS, QUALITY}
+    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE}
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE}
     assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
 
     definition = service._catalog.resolve_definition(WORKORDER, service._catalog.manifest(WORKORDER).version)
@@ -94,6 +95,16 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         identity = CatalogIdentity(frozenset(granted), "run")
         candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
         assert (MATERIALS in candidates) is (omitted is None)
+
+    trace_permissions = {"mes:pro:execution:trace", "mes:pro:execution:query", "mes:md:mditem:list"}
+    trace_definition = service._catalog.resolve_definition(TRACE, service._catalog.manifest(TRACE).version)
+    assert trace_definition.effect is ToolEffect.READ
+    assert set(trace_definition.required_permissions) == trace_permissions
+    for omitted in [None, *sorted(trace_permissions)]:
+        granted = trace_permissions if omitted is None else trace_permissions - {omitted}
+        identity = CatalogIdentity(frozenset(granted), "run")
+        candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
+        assert (TRACE in candidates) is (omitted is None)
 
 
 @pytest.mark.parametrize(("method", "path"), [

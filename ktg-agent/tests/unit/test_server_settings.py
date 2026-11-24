@@ -105,5 +105,5 @@ def test_retired_configuration_cannot_restore_business_tools(monkeypatch: pytest
         CatalogIdentity(frozenset({"*:*:*"}), "run"), service._switches_provider())
     assert set(candidate.candidates) == {
         "ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview",
-        "ktg_query_workorder_materials", "ktg_query_workorder_quality",
+        "ktg_query_workorder_materials", "ktg_query_workorder_quality", "ktg_query_production_trace",
     }

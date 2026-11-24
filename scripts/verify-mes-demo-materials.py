@@ -23,7 +23,7 @@ GATEWAY = "http://127.0.0.1:18854"
 TOOL = "ktg_query_workorder_materials"
 EXPECTED_TOOLS = {
     "ktg_count_products", "ktg_query_stock_summary",
-    "ktg_query_workorder_overview", TOOL, "ktg_query_workorder_quality",
+    "ktg_query_workorder_overview", TOOL, "ktg_query_workorder_quality", "ktg_query_production_trace",
 }
 WINTER = "WO-LAMP-20261130-WINTER"
 OFFICE = "WO-LAMP-20261124-OFFICE"

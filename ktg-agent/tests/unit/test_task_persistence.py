@@ -520,6 +520,19 @@ def test_quality_evidence_preserves_history_scope_and_unknown_results() -> None:
     assert evidence == {key: value for key, value in details.items() if key != "kind"}
 
 
+def test_trace_evidence_preserves_direction_and_scoped_batch_counts() -> None:
+    details: JsonObject = {
+        "kind": "production_trace", "direction": "material_to_unit",
+        "filters": {"direction": "material_to_unit", "batches": [{"item_code": "CELL", "batch_code": "LOT"}]},
+        "queried_at": "now", "coverage": "partial", "units": [],
+        "batches": [{"itemCode": "CELL", "batchCode": "LOT", "total_units": 60, "returned_units": 50,
+                     "coverage": "partial", "rows": []}], "warnings": ["页内结果"],
+    }
+    evidence = _read_evidence("ktg_query_production_trace", details, {})
+    assert evidence is not None
+    assert evidence == {key: value for key, value in details.items() if key != "kind"}
+
+
 def test_task_product_and_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
     repo, _, run = setup_run(tmp_path / "chain.sqlite")
     requests: list[tuple[str, Mapping[str, object]]] = []

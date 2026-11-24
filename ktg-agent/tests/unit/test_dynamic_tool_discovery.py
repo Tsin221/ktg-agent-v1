@@ -233,6 +233,50 @@ def test_quality_tool_is_discoverable_loadable_and_read_only() -> None:
     asyncio.run(scenario())
 
 
+def test_production_trace_is_discoverable_loadable_and_read_only() -> None:
+    name = "ktg_query_production_trace"
+
+    async def scenario() -> None:
+        requests: list[tuple[str, Mapping[str, object]]] = []
+
+        async def transport(url: str, _headers: Mapping[str, str],
+                            params: Mapping[str, object], _timeout: float) -> object:
+            requests.append((url, params))
+            if url.endswith("/getInfo"):
+                return {"code": 200, "user": {"userId": 7, "userName": "leader"},
+                        "permissions": ["mes:md:mditem:list", "mes:pro:execution:query", "mes:pro:execution:trace"]}
+            if url.endswith("/mes/pro/execution/units/trace"):
+                return {"code": 404, "msg": "not found"}
+            raise AssertionError(url)
+
+        provider = FakeProvider((
+            turn(ToolCall("search", "search_tools", {"query": "异常那件用的哪批原料"})),
+            turn(ToolCall("load", "load_tools", {"tools": [{"name": name, "version": "1.0"}]})),
+            turn(ToolCall("query", name, {"direction": "unit_to_material", "sn_codes": ["SN-MISSING"]})),
+            turn(answer="结论：该SN追溯待核实。"),
+        ))
+        service = QueryService(
+            provider=provider, model_config=ModelConfig("fake", 128),
+            ktg_client_factory=lambda token: KTGClient(
+                base_url="http://127.0.0.1:8080", authorization=token, transport=transport),
+        )
+        result = await service.run_session(
+            run_id="trace-run", message="那件产品实际用了哪批料？", history=(),
+            authorization="Bearer test", event_sink=lambda _event: None)
+        events = [event.payload for event in result.events if event.type is AgentEventType.TOOL_EXECUTION_END]
+        search = next(payload for payload in events if payload.get("tool_call_id") == "search")
+        assert name in json.dumps(search.get("result"))
+        assert name in {schema.name for schema in provider.requests[2].tools}
+        query = next(payload for payload in events if payload.get("tool_call_id") == "query")
+        assert query.get("status") == "succeeded"
+        details = cast(dict[str, object], query.get("result"))
+        assert details["kind"] == "production_trace" and details["coverage"] == "partial"
+        assert any(url.endswith("/mes/pro/execution/units/trace") and params.get("snCode") == "SN-MISSING"
+                   for url, params in requests)
+
+    asyncio.run(scenario())
+
+
 def test_loaded_stock_summary_constraint_reaches_model_http_request() -> None:
     name = "ktg_query_stock_summary"
     requests = []
