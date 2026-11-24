@@ -119,6 +119,7 @@ if ($Action -eq 'Status') {
 New-Item -ItemType Directory -Path $agentRoot -Force | Out-Null
 
 if ($Action -eq 'Agent') {
+    $existing = $null
     $currentPid = ListenerPid $agentPort
     if ($currentPid) {
         $record = Read-State $agentFile
@@ -130,9 +131,6 @@ if ($Action -eq 'Agent') {
             Write-Output "Formal MES demo Agent already healthy: 18091 (PID $currentPid)."
             return
         }
-        Stop-Process -Id $existing.Id
-        $existing.WaitForExit(5000) | Out-Null
-        if (ListenerPid $agentPort) { throw 'Agent port did not become available.' }
     }
 
     # Load only model and resource-limit settings, never unrelated database,
@@ -147,6 +145,9 @@ if ($Action -eq 'Agent') {
     )
     $envFile = Join-Path $projectRoot '.env'
     if (!(Test-Path -LiteralPath $envFile)) { throw 'Local model configuration file was not found.' }
+    foreach ($name in $allowed) {
+        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+    }
     foreach ($line in Get-Content -LiteralPath $envFile) {
         if ($line.TrimStart().StartsWith('#') -or !$line.Contains('=')) { continue }
         $parts = $line -split '=', 2
@@ -169,6 +170,18 @@ if ($Action -eq 'Agent') {
     $env:AGENT_SPILL_DIR = Join-Path $agentRoot 'spill'
     $pythonExe = Join-Path $projectRoot 'ktg-agent/.venv/Scripts/python.exe'
     if (!(Test-Path -LiteralPath $pythonExe)) { throw 'The local Agent Python environment is missing.' }
+    Push-Location (Join-Path $projectRoot 'ktg-agent')
+    try {
+        & $pythonExe -B -c "import ktg_agent.server"
+        if ($LASTEXITCODE -ne 0) { throw 'The new Agent source could not be imported; no running Agent was stopped.' }
+    } finally {
+        Pop-Location
+    }
+    if ($existing) {
+        Stop-Process -Id $existing.Id
+        $existing.WaitForExit(5000) | Out-Null
+        if (ListenerPid $agentPort) { throw 'Agent port did not become available.' }
+    }
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
     $outPath = Join-Path $agentRoot "agent-$stamp.out.log"
     $errPath = Join-Path $agentRoot "agent-$stamp.err.log"
@@ -212,24 +225,27 @@ if (!(Test-Path -LiteralPath $nodeExe) -or !(Test-Path -LiteralPath $oldUiScript
 if ($LASTEXITCODE -ne 0) { throw 'UI gateway validation failed.' }
 
 $oldPid = ListenerPid $uiPort
-if (!$oldPid -or $oldPid -ne [int]$demoState.uiPid) { throw 'Current UI listener does not match the demo PID.' }
-$oldProcess = Get-Process -Id $oldPid -ErrorAction Stop
-if ($oldProcess.ProcessName -ne 'node') { throw 'Current UI process is not the expected Node process.' }
-$oldCommand = (Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid").CommandLine
 $rollbackScript = $oldUiScript
 $rollbackBuild = ''
+$priorUi = $null
 if (Test-Path -LiteralPath $uiFile) {
     $priorUi = Read-State $uiFile
-    $oldProcess = Assert-RecordedProcess $priorUi $oldPid 'node'
     $rollbackScript = $gatewayScript
     $rollbackBuild = [string]$priorUi.buildPath
 }
-if (!$oldCommand -or !$oldCommand.Contains($rollbackScript)) {
-    throw 'Current UI command does not match the expected dedicated gateway.'
+if ($oldPid) {
+    if ($oldPid -ne [int]$demoState.uiPid) { throw 'Current UI listener does not match the demo PID.' }
+    $oldProcess = Get-Process -Id $oldPid -ErrorAction Stop
+    if ($oldProcess.ProcessName -ne 'node') { throw 'Current UI process is not the expected Node process.' }
+    if ($priorUi) { $oldProcess = Assert-RecordedProcess $priorUi $oldPid 'node' }
+    $oldCommand = (Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid").CommandLine
+    if (!$oldCommand -or !$oldCommand.Contains($rollbackScript)) {
+        throw 'Current UI command does not match the expected dedicated gateway.'
+    }
+    Stop-Process -Id $oldProcess.Id
+    $oldProcess.WaitForExit(5000) | Out-Null
+    if (ListenerPid $uiPort) { throw 'Dedicated UI port did not become available.' }
 }
-Stop-Process -Id $oldProcess.Id
-$oldProcess.WaitForExit(5000) | Out-Null
-if (ListenerPid $uiPort) { throw 'Dedicated UI port did not become available.' }
 $newProcess = $null
 try {
     $newLauncher = Start-Ui $gatewayScript $buildPath 'ui'
