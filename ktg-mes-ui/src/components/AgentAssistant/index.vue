@@ -154,7 +154,7 @@
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
           <h3>今天想查询什么？</h3>
-          <p>目前可查询产品总数、分仓现存量、工单与生产进度、工单用料和缺口，以及质量异常和检验记录。</p>
+          <p>目前可查询产品总数、分仓现存量、工单与生产进度、工单用料和缺口、质量异常和检验记录，以及成品与原料批次双向追溯。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"

@@ -102,6 +102,7 @@
     </template>
     <agent-workorder-materials-card v-else-if="result.kind === 'workorder_materials'" :result="result" />
     <agent-workorder-quality-card v-else-if="result.kind === 'workorder_quality'" :result="result" />
+    <agent-production-trace-card v-else-if="result.kind === 'production_trace'" :result="result" />
     <details v-else class="result-card__history">
       <summary>历史结果（仅供查看，不可执行）</summary>
       <pre>{{ historyText }}</pre>
@@ -113,17 +114,18 @@
 import { queryScope, workorderStatusLabel } from './sessionPresentation'
 import AgentWorkorderMaterialsCard from './WorkorderMaterialsCard.vue'
 import AgentWorkorderQualityCard from './WorkorderQualityCard.vue'
+import AgentProductionTraceCard from './ProductionTraceCard.vue'
 
 export default {
   name: 'AgentResultCard',
-  components: { AgentWorkorderMaterialsCard, AgentWorkorderQualityCard },
+  components: { AgentWorkorderMaterialsCard, AgentWorkorderQualityCard, AgentProductionTraceCard },
   props: {
     result: { type: Object, required: true }
   },
   computed: {
     title() {
       return { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览',
-        workorder_materials: '工单用料', workorder_quality: '工单质量' }[this.result.kind] || '历史结果'
+        workorder_materials: '工单用料', workorder_quality: '工单质量', production_trace: '生产追溯' }[this.result.kind] || '历史结果'
     },
     historyText() {
       return JSON.stringify(this.result, null, 2)

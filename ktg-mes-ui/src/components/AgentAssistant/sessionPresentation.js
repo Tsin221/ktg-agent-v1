@@ -22,11 +22,11 @@ const textOf = message => (message.content || []).filter(block => block.type ===
   .map(block => block.text).join('')
 
 const queryLabels = { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览',
-  workorder_materials: '工单用料', workorder_quality: '工单质量' }
+  workorder_materials: '工单用料', workorder_quality: '工单质量', production_trace: '生产追溯' }
 const queryTools = { ktg_count_products: 'product_count', ktg_query_stock_summary: 'stock_summary',
   ktg_query_workorder_overview: 'workorder_overview', ktg_query_workorder_materials: 'workorder_materials',
-  ktg_query_workorder_quality: 'workorder_quality' }
-const isDirectQueryKind = kind => ['workorder_materials', 'workorder_quality'].includes(kind)
+  ktg_query_workorder_quality: 'workorder_quality', ktg_query_production_trace: 'production_trace' }
+const isDirectQueryKind = kind => ['workorder_materials', 'workorder_quality', 'production_trace'].includes(kind)
 const taskTools = ['create_task', 'update_task']
 const progressTools = [...taskTools, 'search_tools', 'load_tools']
 const toolKind = name => Object.prototype.hasOwnProperty.call(queryTools, name) ? queryTools[name] : undefined
@@ -142,7 +142,7 @@ export function workorderStatusLabel(status) {
 export function queryScope(args, includePagination = true) {
   const labels = { item_code: '物料编码', warehouse_id: '仓库 ID',
     workorder_id: '工单 ID', workorder_code: '工单编号', workorder_codes: '工单编号', workorder_name: '工单名称',
-    sn_codes: 'SN',
+    sn_codes: 'SN', direction: '追溯方向', batches: '物料及批次',
     product_code: '产品编码', product_name: '产品名称', status: '工单状态', statuses: '工单状态', request_date: '需求日期',
     request_date_from: '需求日期起', request_date_to: '需求日期止',
     unfinished_only: '仅未完工', include_progress: '查询执行进度', include_batches: '包含批次' }
@@ -152,6 +152,8 @@ export function queryScope(args, includePagination = true) {
     let value = args[key]
     if (key === 'status') value = workorderStatusLabel(value)
     if (key === 'statuses' && Array.isArray(value)) value = value.map(workorderStatusLabel)
+    if (key === 'direction') value = { unit_to_material: '成品 → 原料', material_to_unit: '原料 → 成品' }[value] || '未核实'
+    if (key === 'batches' && Array.isArray(value)) value = value.map(batch => `${(batch && batch.item_code) || '物料未核实'} / ${(batch && batch.batch_code) || '批次未核实'}`)
     const displayed = Array.isArray(value) ? value.join('、') : typeof value === 'boolean' ? (value ? '是' : '否') : value
     return `${labels[key]} ${displayed}`
   }).join(' · ')
@@ -179,7 +181,7 @@ function queryGroups(queries) {
     const scopeArgs = kind === 'workorder_overview'
       ? { unfinished_only: false, include_progress: false, ...args, ...(result && result.filters || {}) }
       : kind === 'workorder_materials' ? { include_batches: false, ...args, ...(result && result.filters || {}) }
-        : kind === 'workorder_quality' ? { ...args, ...(result && result.filters || {}) } : args
+        : ['workorder_quality', 'production_trace'].includes(kind) ? { ...args, ...(result && result.filters || {}) } : args
     const attempt = { ...item, scope: queryScope(scopeArgs) }
     if (prior) prior.attempts.push(attempt)
     else {
@@ -191,7 +193,7 @@ function queryGroups(queries) {
   return [...groups.values()].map(({ id, title, queries }) => ({ id, title, queries }))
 }
 
-// Material and quality facts remain visible under the conclusion even when earlier queries
+// Material, quality and trace facts remain visible under the conclusion even when earlier queries
 // were needed to resolve the workorder. Preserve independent observations and
 // keep only their query metadata in the expandable audit, avoiding duplicate cards.
 function directQueryCards(groups) {

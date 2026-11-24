@@ -273,6 +273,63 @@ const noMatches = text(render({ ...qualityResult, coverage: 'complete', orders: 
 assert.match(noMatches, /未返回指定单件/)
 assert.doesNotMatch(noMatches, /本次查询范围内未发现已记录的质量异常/)
 
+const tracedUnit = { snId: '9007199254740997', snCode: 'LAMPBAT-00000023', itemCode: 'LAMP-BATT-MODULE', itemName: '电池模组',
+  workorderId: '3', workorderCode: 'WO-LAMP-RETAIL', workorderName: '阅读灯补单', orderStatus: 'CONFIRMED', unitState: 'WAIT_DISPOSITION' }
+const trace = { kind: 'production_trace', direction: 'unit_to_material', filters: { direction: 'unit_to_material', sn_codes: [tracedUnit.snCode] },
+  units: [{ ...tracedUnit, trace_state: 'tracked', input_state: 'recorded', inputs: [
+    { inputId: '9007199254740999', itemId: '7', itemCode: 'CELL-18650', itemName: '电芯', sourceBatchCode: 'CELL-RETAIL-MORNING', quantity: '1', unitOfMeasure: 'PCS', usedAt: '2026-11-24 15:01:00' },
+    { inputId: '2', itemId: '8', itemCode: 'BMS', itemName: '保护板', sourceBatchCode: 'BMS-RETAIL', quantity: '1', unitOfMeasure: 'PCS' }
+  ] }], batches: [], coverage: 'complete', queried_at: '2026-11-24T08:00:00Z', warnings: [] }
+const traceParent = render(trace)
+assert.strictEqual(traceParent.data.attrs['aria-label'], '生产追溯')
+assert.strictEqual(findComponent(traceParent, 'AgentProductionTraceCard').componentOptions.propsData.result, trace)
+const traceCard = render(trace, 'ProductionTraceCard.vue')
+const traceText = text(traceCard).replace(/\s+/g, ' ')
+assert.match(traceText, /成品.*原料.*LAMPBAT-00000023/)
+assert.match(traceText, /WO-LAMP-RETAIL.*待处置/)
+assert.match(traceText, /CELL-18650.*CELL-RETAIL-MORNING.*1 PCS/)
+assert.match(traceText, /BMS.*BMS-RETAIL.*1 PCS/)
+assert.match(traceText, /实际投入.*不等于计划用料或领料/)
+assert.ok(tags(traceCard).includes('table'))
+assert.ok(!tags(traceCard).some(tag => ['button', 'a', 'iframe', 'script', 'form'].includes(tag)))
+const noTrace = text(render({ ...trace, coverage: 'partial', units: [
+  { snCode: 'SN-WAIT', unitState: 'WAIT_ASSEMBLY', trace_state: 'tracked', input_state: 'waiting_assembly', inputs: [] },
+  { snCode: 'SN-LEGACY', trace_state: 'legacy', input_state: 'legacy', inputs: [] },
+  { snCode: 'SN-UNKNOWN', trace_state: 'unavailable', input_state: 'unavailable', inputs: [] }
+] }, 'ProductionTraceCard.vue')).replace(/\s+/g, ' ')
+assert.match(noTrace, /SN-WAIT.*待装配.*尚无实际投入记录/)
+assert.match(noTrace, /SN-LEGACY.*历史 SN.*未建立追溯/)
+assert.match(noTrace, /SN-UNKNOWN.*未核实/)
+assert.doesNotMatch(noTrace, /投入量\s*0/)
+const traceBatch = { itemId: '7', itemCode: 'CELL-18650', itemName: '电芯', batchCode: 'CELL-RETAIL-MORNING', total_units: 4,
+  returned_units: 2, rows: [{ ...tracedUnit, firstUsedAt: '2026-11-24 15:01:00', inputCount: 1 },
+    { ...tracedUnit, snId: '2', snCode: 'LAMPBAT-00000024', unitState: 'PACKED', inputCount: 1 }],
+  state_counts: { waitingInspection: 0, pendingDisposition: 1, reworkInProgress: 0, waitingReinspection: 0, waitingPacking: 0, packed: 1, scrapped: 0, qualified: 1 },
+  page: 1, page_size: 2, coverage: 'partial' }
+const reverseTrace = { kind: 'production_trace', direction: 'material_to_unit', filters: { direction: 'material_to_unit', batches: [{ item_code: 'CELL-18650', batch_code: 'CELL-RETAIL-MORNING' }] },
+  units: [], batches: [traceBatch], coverage: 'partial', queried_at: '2026-11-24T08:00:00Z', warnings: [] }
+const reverseText = text(render(reverseTrace, 'ProductionTraceCard.vue')).replace(/\s+/g, ' ')
+assert.match(reverseText, /原料.*成品.*CELL-18650.*CELL-RETAIL-MORNING/)
+assert.match(reverseText, /可见.*去重 SN 总数.*4/)
+assert.match(reverseText, /第 1 页.*本页.*2/)
+assert.match(reverseText, /本页.*状态统计/)
+assert.match(reverseText, /当前合格\s+1/)
+assert.match(reverseText, /待包装\s+0/)
+assert.match(reverseText, /已包装\s+1/)
+assert.match(reverseText, /影响范围不等于不合格/)
+assert.match(reverseText, /LAMPBAT-00000023.*待处置/)
+assert.match(reverseText, /LAMPBAT-00000024.*已包装/)
+assert.match(reverseText, /未完整/)
+const failedReverse = text(render({ ...reverseTrace, batches: [{ ...traceBatch, total_units: null, returned_units: 0,
+  rows: [], coverage: 'unavailable', state_counts: null }] }, 'ProductionTraceCard.vue')).replace(/\s+/g, ' ')
+assert.match(failedReverse, /总数未核实/)
+assert.match(failedReverse, /状态统计未核实/)
+assert.doesNotMatch(failedReverse, /去重 SN 总数\s+0|当前合格\s+0/)
+const zeroReverse = text(render({ ...reverseTrace, coverage: 'complete', batches: [{ ...traceBatch, total_units: 0, returned_units: 0,
+  rows: [], coverage: 'complete', state_counts: { waitingInspection: 0, pendingDisposition: 0, reworkInProgress: 0, waitingReinspection: 0, waitingPacking: 0, packed: 0, scrapped: 0, qualified: 0 } }] }, 'ProductionTraceCard.vue'))
+assert.match(zeroReverse, /无可见实际投入记录/)
+assert.match(zeroReverse, /不代表未发生历史业务/)
+
 for (const kind of ['workorder_draft_preview', 'inventory_preview', 'exploration_search', 'workorder_progress']) {
   const historical = render({ kind, url: 'https://example.invalid', label: '<script>test</script>' })
   assert.match(text(historical), /历史结果（仅供查看，不可执行）/)

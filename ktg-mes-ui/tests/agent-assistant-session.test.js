@@ -233,6 +233,42 @@ assert.strictEqual(qualityAudits.filter(item => item.error).length, 1)
 assert.match(qualityAudits[0].scope, /工单编号 WO-LAMP-RETAIL/)
 assert.match(qualityAudits[0].scope, /SN SN-1/)
 assert.strictEqual(toolProgressText({ quality: { name: 'ktg_query_workorder_quality', status: 'running' } }), '正在查询工单质量')
+const unitTrace = { kind: 'production_trace', direction: 'unit_to_material', filters: { direction: 'unit_to_material', sn_codes: ['SN-1'] },
+  units: [], batches: [], coverage: 'complete', queried_at: '2026-11-24T08:00:00Z' }
+const batchTrace = { kind: 'production_trace', direction: 'material_to_unit', filters: { direction: 'material_to_unit',
+  batches: [{ item_code: 'CELL-18650', batch_code: 'CELL-BATCH-A' }], page: 1, page_size: 20 },
+  units: [], batches: [], coverage: 'complete', queried_at: '2026-11-24T08:01:00Z' }
+const singleTrace = [chat('trace-single', 'user', '这个 SN 用什么原料？'),
+  message('trace-single', 'assistant', [{ type: 'text', text: '先追溯。' },
+    { type: 'tool_call', id: 'single-trace', name: 'ktg_query_production_trace', arguments: unitTrace.filters }]),
+  message('trace-single', 'tool', [], { tool_call_id: 'single-trace', details: unitTrace }),
+  chat('trace-single', 'assistant', '结论：实际使用两种原料。\n\n请确认是否继续追溯？')]
+const tracePresentation = compactResultPresentation(queryCardPresentation(presentMessages(singleTrace)))
+assert.strictEqual(tracePresentation.length, 2)
+assert.strictEqual(tracePresentation[1].textPreview, '结论：实际使用两种原料。')
+assert.strictEqual(tracePresentation[1].followUp, '请确认是否继续追溯？')
+assert.deepStrictEqual(tracePresentation[1].results, [unitTrace])
+const traceMulti = [chat('trace-multi', 'user', '看同批原料质量情况'),
+  ...query('trace-multi', 'ktg_query_production_trace', unitTrace.filters, unitTrace),
+  ...query('trace-multi', 'ktg_query_production_trace', batchTrace.filters, batchTrace),
+  ...query('trace-multi', 'ktg_query_production_trace', batchTrace.filters, { ...batchTrace, queried_at: '2026-11-24T08:02:00Z' }),
+  ...query('trace-multi', 'ktg_query_production_trace', { direction: 'material_to_unit', batches: [{ item_code: 'X', batch_code: 'B' }] }, null, '追溯失败'),
+  ...query('trace-multi', 'ktg_query_workorder_quality', quality.filters, quality),
+  chat('trace-multi', 'assistant', ['结论：同批有多个 SN。', qualityTable, '请提供另一个批次？'].join('\n\n'))]
+const tracedMulti = compactResultPresentation(queryCardPresentation(presentMessages(traceMulti))).at(-1)
+assert.deepStrictEqual(tracedMulti.results.map(result => result.direction || result.kind), ['unit_to_material', 'material_to_unit', 'workorder_quality'])
+assert.strictEqual(tracedMulti.results[1].queried_at, '2026-11-24T08:02:00Z')
+assert.strictEqual(tracedMulti.textTables, '')
+assert.ok(tracedMulti.textDetails.includes(qualityTable))
+assert.strictEqual(tracedMulti.followUp, '请提供另一个批次？')
+assert.strictEqual(tracedMulti.queryDetails.count, 5)
+assert.strictEqual(tracedMulti.queryDetails.failed, 1)
+const traceAudits = tracedMulti.queryDetails.groups.find(group => group.title === '生产追溯').queries.flatMap(q => q.attempts)
+assert.strictEqual(traceAudits.filter(item => item.resultShown && !item.result).length, 3)
+assert.match(traceAudits[0].scope, /SN SN-1/)
+assert.match(traceAudits[1].scope, /CELL-18650.*CELL-BATCH-A/)
+assert.doesNotMatch(traceAudits[1].scope, /\[object Object\]/)
+assert.strictEqual(toolProgressText({ trace: { name: 'ktg_query_production_trace', status: 'running' } }), '正在查询生产追溯')
 assert.deepStrictEqual(answerBlocks(['查询结果', answerTable, '还有1件待处置。'].join('\n\n')), [
   { type: 'text', text: '查询结果' },
   { type: 'table', headers: ['工单', '状态', '数量'], rows: [['阅读灯', '已下达', '**10**'], ['办公灯', '待装配', '4']] },
