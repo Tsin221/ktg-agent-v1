@@ -18,7 +18,7 @@ import static org.mockito.Mockito.*;
 @EnabledIfEnvironmentVariable(named="MES_B01_MYSQL_URL", matches=".+")
 class ProExecutionReleaseMySqlTest {
     JdbcTemplate db; ExecutionReleaseService service; AutoCodeUtil codes;
-    long order, product, route, template; List<Long> processes=new ArrayList<>(); List<Long> stations=new ArrayList<>(), steps=new ArrayList<>();
+    long order, product, material, route, template; List<Long> processes=new ArrayList<>(); List<Long> stations=new ArrayList<>(), steps=new ArrayList<>();
     String tag="B02-"+UUID.randomUUID(); boolean safe;
     @BeforeEach void setup() throws Exception {
         DriverManagerDataSource source=new DriverManagerDataSource(System.getenv("MES_B01_MYSQL_URL"),System.getenv("MES_B01_MYSQL_USER"),System.getenv("MES_B01_MYSQL_PASSWORD"));
@@ -29,7 +29,9 @@ class ProExecutionReleaseMySqlTest {
         product=id("md_item","item_id","item_code");
         db.update("insert into pro_workorder(workorder_code,workorder_name,order_source,product_id,product_code,product_name,unit_of_measure,quantity,request_date,ancestors,status,version,create_by) values(?,?,'MANUAL',?,?,?,'EA',10,NOW(),'0','PREPARE',0,'B02-test')",tag,tag,product,tag,tag);
         order=id("pro_workorder","workorder_id","workorder_code");
-        db.update("insert into pro_workorder_bom(workorder_id,item_id,item_code,item_name,unit_of_measure,item_or_product) values(?,?,?,?,'EA','ITEM')",order,product,tag,tag);
+        db.update("insert into md_item(item_code,item_name,unit_of_measure,item_or_product,enable_flag) values(?,?,'EA','ITEM','Y')",tag+"-bom-item",tag+"-bom-item");
+        material=db.queryForObject("select item_id from md_item where item_code=?",Long.class,tag+"-bom-item");
+        db.update("insert into pro_workorder_bom(workorder_id,item_id,item_code,item_name,unit_of_measure,item_or_product,quantity) values(?,?,?,?,'EA','ITEM',10)",order,material,tag+"-bom-item",tag+"-bom-item");
         db.update("insert into pro_route(route_code,route_name,enable_flag) values(?,?,'Y')",tag,tag);route=id("pro_route","route_id","route_code");
         db.update("insert into pro_route_product(route_id,item_id,item_code,item_name,unit_of_measure) values(?,?,?,?,'EA')",route,product,tag,tag);
         String[] kinds={"ASSEMBLY","INSPECTION","PACKING"};
@@ -76,6 +78,56 @@ class ProExecutionReleaseMySqlTest {
         ExecutionReleaseRequest r=request();r.steps.get(1).ipqcType="IQC";assertEquals(400,service.release(order,r).get("code"));
         assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_operation"));
     }
+    @Test void missingOrNonPositiveBomQuantityCannotFreezeOrder() {
+        db.update("update pro_workorder_bom set quantity=default where workorder_id=?",order);
+        assertInvalidBomLeavesDraft("预计使用量");
+        db.update("update pro_workorder_bom set quantity=-1 where workorder_id=?",order);
+        assertInvalidBomLeavesDraft("预计使用量");
+    }
+    @Test void emptyBomCannotFreezeOrder() {
+        db.update("delete from pro_workorder_bom where workorder_id=?",order);
+        assertInvalidBomLeavesDraft("至少需要一条用料明细");
+    }
+    @Test void unsupportedBomItemOrUnitCannotFreezeOrder() {
+        db.update("update pro_workorder_bom set item_or_product='PRODUCT' where workorder_id=?",order);
+        assertInvalidBomLeavesDraft("必须为原材料");
+        db.update("update pro_workorder_bom set item_or_product='ITEM',unit_of_measure='' where workorder_id=?",order);
+        assertInvalidBomLeavesDraft("单位不能为空");
+        db.update("update pro_workorder_bom set unit_of_measure='EA' where workorder_id=?",order);
+        db.update("insert into pro_workorder_bom(workorder_id,item_id,item_code,item_name,unit_of_measure,item_or_product,quantity) values(?,?,?,?,'KG','ITEM',10)",order,material,tag+"-bom-item",tag+"-bom-item");
+        assertInvalidBomLeavesDraft("单位不一致");
+    }
+    @Test void bomNotExactlyDivisibleAtStockPrecisionCanBeCorrectedAndReleased() {
+        db.update("update pro_workorder_bom set quantity=10.01 where workorder_id=?",order);
+        ExecutionReleaseRequest r=assertInvalidBomLeavesDraft("精确分摊");
+        db.update("update pro_workorder_bom set quantity=10.20 where workorder_id=?",order);
+        assertEquals(200,service.release(order,r).get("code"));
+        assertEquals(200,service.release(order,r).get("code"));
+        assertEquals(3,count("pro_task"));assertEquals(10,count("pro_execution_unit"));assertEquals(1,count("pro_execution_operation"));
+        String snapshot=db.queryForObject("select material_requirements_snapshot from pro_execution_order where workorder_id=?",String.class,order);
+        ExecutionMaterialRequirements requirements=ExecutionMaterialRequirements.parse(new ObjectMapper(),10,snapshot);
+        assertDoesNotThrow(()->requirements.validateUnit(Collections.singletonMap(material,new java.math.BigDecimal("1.02"))));
+    }
+    private ExecutionReleaseRequest assertInvalidBomLeavesDraft(String expectedReason) {
+        Long stockRows=db.queryForObject("select count(*) from wm_material_stock",Long.class);
+        java.math.BigDecimal stockTotal=db.queryForObject("select coalesce(sum(quantity_onhand),0) from wm_material_stock",java.math.BigDecimal.class);
+        Long ledgerRows=db.queryForObject("select count(*) from wm_transaction",Long.class);
+        ExecutionReleaseRequest r=request();
+        AjaxResult result=service.release(order,r);
+        assertEquals(400,result.get("code"));
+        assertEquals("VALIDATION_ERROR",result.get("errorCode"));
+        assertTrue(String.valueOf(result.get("msg")).contains("检查并修改工单 BOM"));
+        assertTrue(String.valueOf(result.get("msg")).contains(expectedReason));
+        assertEquals("PREPARE",db.queryForObject("select status from pro_workorder where workorder_id=?",String.class,order));
+        assertEquals(0L,db.queryForObject("select version from pro_workorder where workorder_id=?",Long.class,order));
+        assertEquals(0,count("pro_execution_order"));assertEquals(0,count("pro_task"));
+        assertEquals(0,count("pro_execution_task"));assertEquals(0,count("pro_execution_unit"));assertEquals(0,count("pro_execution_operation"));
+        assertEquals(0,db.queryForObject("select count(*) from wm_sn where sn_code like ?",Integer.class,tag+"-%"));
+        assertEquals(stockRows,db.queryForObject("select count(*) from wm_material_stock",Long.class));
+        assertEquals(0,stockTotal.compareTo(db.queryForObject("select coalesce(sum(quantity_onhand),0) from wm_material_stock",java.math.BigDecimal.class)));
+        assertEquals(ledgerRows,db.queryForObject("select count(*) from wm_transaction",Long.class));
+        return r;
+    }
     @Test void optionsAndDetailReadPersistedTaskAndSnIdentities() {
         assertTrue(service.options(order).toString().contains("FINAL"));
         assertEquals(200,service.release(order,request()).get("code"));
@@ -106,5 +158,5 @@ class ProExecutionReleaseMySqlTest {
         assertNull(mapper.selectProRouteProcessByRecordId(steps.get(0)).getExecutionKind());
         step.setExecutionKind("ASSEMBLY");mapper.updateProRouteProcess(step);assertEquals("ASSEMBLY",mapper.selectProRouteProcessByRecordId(steps.get(0)).getExecutionKind());
     }
-    @AfterEach void cleanup(){SecurityContextHolder.clearContext();if(!safe)return;db.update("delete from pro_execution_operation where workorder_id=?",order);db.update("delete from pro_execution_unit where workorder_id=?",order);db.update("delete from wm_sn where sn_code like ?",tag+"-%");db.update("delete from pro_execution_task where workorder_id=?",order);db.update("delete from pro_task where workorder_id=?",order);db.update("delete from pro_execution_order where workorder_id=?",order);db.update("delete from pro_workorder_bom where workorder_id=?",order);db.update("delete from pro_workorder where workorder_id=?",order);db.update("delete from qc_template_index where template_id=?",template);db.update("delete from qc_template_product where template_id=?",template);db.update("delete from qc_template where template_id=?",template);for(Long s:stations)db.update("delete from md_workstation where workstation_id=?",s);db.update("delete from pro_route_process where route_id=?",route);db.update("delete from pro_route_product where route_id=?",route);db.update("delete from pro_route where route_id=?",route);for(Long p:processes)db.update("delete from pro_process where process_id=?",p);db.update("delete from md_item where item_id=?",product);}
+    @AfterEach void cleanup(){SecurityContextHolder.clearContext();if(!safe)return;db.update("delete from pro_execution_operation where workorder_id=?",order);db.update("delete from pro_execution_unit where workorder_id=?",order);db.update("delete from wm_sn where sn_code like ?",tag+"-%");db.update("delete from pro_execution_task where workorder_id=?",order);db.update("delete from pro_task where workorder_id=?",order);db.update("delete from pro_execution_order where workorder_id=?",order);db.update("delete from pro_workorder_bom where workorder_id=?",order);db.update("delete from pro_workorder where workorder_id=?",order);db.update("delete from qc_template_index where template_id=?",template);db.update("delete from qc_template_product where template_id=?",template);db.update("delete from qc_template where template_id=?",template);for(Long s:stations)db.update("delete from md_workstation where workstation_id=?",s);db.update("delete from pro_route_process where route_id=?",route);db.update("delete from pro_route_product where route_id=?",route);db.update("delete from pro_route where route_id=?",route);for(Long p:processes)db.update("delete from pro_process where process_id=?",p);db.update("delete from md_item where item_id in (?,?)",product,material);}
 }

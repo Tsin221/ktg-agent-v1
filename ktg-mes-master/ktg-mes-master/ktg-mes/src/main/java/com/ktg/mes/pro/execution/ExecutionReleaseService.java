@@ -66,8 +66,13 @@ public class ExecutionReleaseService {
             else { if(choice.templateId!=null || choice.ipqcType!=null) throw ExecutionException.validation("仅检测步骤可选择模板"); snapshots.add(null); }
         }
         List<Map<String,Object>> bom=db.queryForList("select * from pro_workorder_bom where workorder_id=? order by line_id for update",id);
-        if(bom.isEmpty()) throw ExecutionException.validation("工单没有用料要求");
-        db.update("insert into pro_execution_order(workorder_id,route_id,route_code,route_name,planned_units,release_user_id,released_at,material_requirements_snapshot) values(?,?,?,?,?,?,current_timestamp(3),?)",id,r.routeId,route.get("route_code"),route.get("route_name"),count,SecurityUtils.getUserId(),encode(bom));
+        String bomSnapshot=encode(bom);
+        try {
+            ExecutionMaterialRequirements.parse(json,count,bomSnapshot);
+        } catch (ExecutionException invalid) {
+            throw ExecutionException.validation("请检查并修改工单 BOM："+invalid.getMessage());
+        }
+        db.update("insert into pro_execution_order(workorder_id,route_id,route_code,route_name,planned_units,release_user_id,released_at,material_requirements_snapshot) values(?,?,?,?,?,?,current_timestamp(3),?)",id,r.routeId,route.get("route_code"),route.get("route_name"),count,SecurityUtils.getUserId(),bomSnapshot);
         List<Long> tasks=new ArrayList<>();
         for(int i=0;i<3;i++) {
             Map<String,Object> s=steps.get(i), station=stations.get(i);
