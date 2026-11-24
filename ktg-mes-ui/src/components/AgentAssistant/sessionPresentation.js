@@ -21,8 +21,9 @@ export function pageContext(route) {
 const textOf = message => (message.content || []).filter(block => block.type === 'text' && block.model_visible !== false)
   .map(block => block.text).join('')
 
-const queryLabels = { product_count: '产品总数', stock_summary: '分仓库存汇总' }
-const queryTools = { ktg_count_products: 'product_count', ktg_query_stock_summary: 'stock_summary' }
+const queryLabels = { product_count: '产品总数', stock_summary: '分仓库存汇总', workorder_overview: '工单概览' }
+const queryTools = { ktg_count_products: 'product_count', ktg_query_stock_summary: 'stock_summary',
+  ktg_query_workorder_overview: 'workorder_overview' }
 const taskTools = ['create_task', 'update_task']
 const progressTools = [...taskTools, 'search_tools', 'load_tools']
 const toolKind = name => Object.prototype.hasOwnProperty.call(queryTools, name) ? queryTools[name] : undefined
@@ -104,9 +105,25 @@ export function compactResultPresentation(messages) {
   })
 }
 
-function queryScope(args) {
-  const labels = { item_code: '物料编码', warehouse_id: '仓库 ID' }
-  return Object.keys(labels).filter(key => args[key] != null).map(key => `${labels[key]} ${args[key]}`).join(' · ')
+export function workorderStatusLabel(status) {
+  return { PREPARE: '草稿', APPROVING: '审批中', APPROVED: '已审批', CONFIRMED: '已下达', FINISHED: '已完工' }[status] || status || '状态未获取'
+}
+
+export function queryScope(args, includePagination = true) {
+  const labels = { item_code: '物料编码', warehouse_id: '仓库 ID',
+    workorder_id: '工单 ID', workorder_code: '工单编号', workorder_codes: '工单编号', workorder_name: '工单名称',
+    product_code: '产品编码', product_name: '产品名称', status: '工单状态', statuses: '工单状态', request_date: '需求日期',
+    request_date_from: '需求日期起', request_date_to: '需求日期止',
+    unfinished_only: '仅未完工', include_progress: '查询执行进度' }
+  if (includePagination) Object.assign(labels, { page: '页码', page_size: '每页' })
+  return Object.keys(labels).filter(key => args[key] != null && args[key] !== '' &&
+    (!Array.isArray(args[key]) || args[key].length)).map(key => {
+    let value = args[key]
+    if (key === 'status') value = workorderStatusLabel(value)
+    if (key === 'statuses' && Array.isArray(value)) value = value.map(workorderStatusLabel)
+    const displayed = Array.isArray(value) ? value.join('、') : typeof value === 'boolean' ? (value ? '是' : '否') : value
+    return `${labels[key]} ${displayed}`
+  }).join(' · ')
 }
 
 function queryGroups(queries) {
@@ -115,8 +132,9 @@ function queryGroups(queries) {
     const { kind, result, call, error } = item
     const args = (call && call.arguments) || {}
     const product = kind === 'stock_summary' && (args.item_code || (result && result.filters && result.filters.item_code))
-    const key = product ? `product:${product}` : 'general'
-    if (!groups.has(key)) groups.set(key, { id: key, title: product ? `物料 ${product}` : '通用查询', queries: [], duplicates: new Map() })
+    const key = product ? `product:${product}` : kind === 'workorder_overview' ? 'workorders' : 'general'
+    const title = product ? `物料 ${product}` : kind === 'workorder_overview' ? '工单概览' : '通用查询'
+    if (!groups.has(key)) groups.set(key, { id: key, title, queries: [], duplicates: new Map() })
     const group = groups.get(key)
     let signature
     if (!error && call && call.arguments && result) {
@@ -126,7 +144,10 @@ function queryGroups(queries) {
       signature = JSON.stringify(canonical([call.name, call.arguments, businessResult]))
     }
     const prior = signature && group.duplicates.get(signature)
-    const attempt = { ...item, scope: queryScope(args) }
+    const scopeArgs = kind === 'workorder_overview'
+      ? { unfinished_only: false, include_progress: false, ...args, ...(result && result.filters || {}) }
+      : args
+    const attempt = { ...item, scope: queryScope(scopeArgs) }
     if (prior) prior.attempts.push(attempt)
     else {
       const query = { id: item.id, title: queryLabels[kind], attempts: [attempt] }

@@ -24,6 +24,7 @@ from ktg_agent.core.messages import (
 )
 from ktg_agent.ktg import KTGClient, build_query_tools
 from ktg_agent.ktg.client import KTGError
+from ktg_agent.ktg.workorder_overview import build_workorder_overview_tool
 from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
 from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches
@@ -37,11 +38,13 @@ from ktg_agent.core.task_budget import TASK_CLOSEOUT_TURNS, TASK_SAVE_LIMIT, Tas
 type KTGClientFactory = Callable[[str], KTGClient]
 
 SYSTEM_PROMPT = """你是 KTG MES 的生产主管助手。
-当前只开放产品总数及分仓现存量两项业务查询，不支持任何业务写入、预览确认或未开放的查询。用户问“你能做什么”时，用 search_tools(query="") 查看当前授权能力，不执行实际业务查询。
+当前开放产品总数、分仓现存量、工单概览与生产进度三项业务查询，不支持任何业务写入、预览确认或未开放的查询。用户问“你能做什么”时，用 search_tools(query="") 查看当前授权能力，不执行实际业务查询。
 只复制搜索返回的准确工具名和版本，使用 load_tools 加载后依照下一次请求中的 Schema 调用。搜索的备选能力不表示原请求受支持。
 所有事实必须基于当前登录用户权限下的真实工具结果。没有工具覆盖或数据不足时明确说明，不猜业务编号、数量、状态或其他事实；不扩大用户范围。
 询问产品总数时使用 ktg_count_products 的总数，产品与物料分别统计，不得混为一谈。总数结果不包含产品明细。
 查询分仓现存量时使用 ktg_query_stock_summary，按 MES 返回的分仓数量、单位和 queried_at 报告，不自行推算跨仓合计。需要明确物料编码；未提供时请用户补充。不将无匹配记录等同于数量为零；仅实际有效分组为零时报告零。查询失败或未执行标为未核实。
+查询或比较工单时使用 ktg_query_workorder_overview，按用户提供的工单名称片段、编号、产品、状态及日期筛选；查询进度、未完工原因或比较生产情况时请求 include_progress=true。可自主选择筛选条件并组合多次查询；不擅自限定今天或某一工单。根据分页、total 和 coverage 判断覆盖范围，未覆盖完整时不得声称已查全。
+区分已完工、草稿、未请求及未获取进度；仅依据真实进度字段和 completionReasons 解释已下达工单当前的完结条件，不把缺失数据当作零或凭空归因缺料、报废。已完工工单不再以完结条件提示为阻塞。不同工单的进度分别说明并附查询时点。
 优先简洁中文结论，说明查询实际范围、时间和结果。用户提供的信息不重复询问，缺失必要信息时及时请用户补充。"""
 
 class QueryService:
@@ -69,10 +72,10 @@ class QueryService:
             max_model_turns=8, max_tool_calls=12,
             max_run_seconds=90, max_parallel_reads=3,
         )
-        definitions = build_query_tools()
+        definitions = (*build_query_tools(), build_workorder_overview_tool())
         self._registry = ToolRegistry(definitions)
         self._catalog = build_legacy_catalog(definitions)
-        enabled_modules = {"md": True, "wm": True}
+        enabled_modules = {"md": True, "wm": True, "pro": True}
         enabled_tools = {definition.name: True for definition in definitions}
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
         self._max_active_tools = max_active_tools

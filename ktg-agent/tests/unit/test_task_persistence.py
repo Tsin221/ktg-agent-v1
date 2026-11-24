@@ -483,6 +483,18 @@ def test_stock_summary_evidence_distinguishes_zero_and_no_records(groups: list[J
     assert evidence["groups"] == groups
 
 
+def test_workorder_evidence_preserves_scope_and_unavailable_progress() -> None:
+    details: JsonObject = {
+        "kind": "workorder_overview", "filters": {"unfinished_only": True},
+        "queried_at": "now", "page": 1, "page_size": 10, "coverage": "partial", "total": None,
+        "rows": [{"workorderId": "123", "progress_state": "unavailable", "progress": None}],
+        "warnings": ["部分进度待核实"],
+    }
+    evidence = _read_evidence("ktg_query_workorder_overview", details, {})
+    assert evidence is not None
+    assert evidence == {key: value for key, value in details.items() if key != "kind"}
+
+
 def test_task_product_and_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
     repo, _, run = setup_run(tmp_path / "chain.sqlite")
     requests: list[tuple[str, Mapping[str, object]]] = []

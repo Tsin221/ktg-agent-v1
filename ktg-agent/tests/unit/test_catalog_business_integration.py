@@ -17,6 +17,7 @@ from ktg_agent.tools.permissions import PermissionLeaf
 from ktg_agent.tools.registry import ToolDefinitionError
 
 RETAINED = {"ktg_count_products", "ktg_query_stock_summary"}
+WORKORDER = "ktg_query_workorder_overview"
 
 
 def test_tools_import_in_fresh_process() -> None:
@@ -65,9 +66,18 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert set(service._catalog._manifests) == RETAINED
-    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED
+    assert set(service._catalog._manifests) == RETAINED | {WORKORDER}
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER}
     assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
+
+    definition = service._catalog.resolve_definition(WORKORDER, service._catalog.manifest(WORKORDER).version)
+    assert definition.effect is ToolEffect.READ
+    permissions = {"mes:pro:workorder:list", "mes:pro:execution:query"}
+    assert set(definition.required_permissions) == permissions
+    for granted in ({*permissions}, *({permission} for permission in permissions), set()):
+        identity = CatalogIdentity(frozenset(granted), "run")
+        candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
+        assert set(candidates) == ({WORKORDER} if granted == permissions else set())
 
 
 @pytest.mark.parametrize(("method", "path"), [

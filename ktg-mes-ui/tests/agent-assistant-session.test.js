@@ -77,6 +77,29 @@ assert.strictEqual(groups['物料 PCB-BMS-1S'][0].attempts[0].error, '读取超�
 const single = [chat('single', 'user', '产品总数'),
   ...query('single', 'ktg_count_products', {}, count), chat('single', 'assistant', '当前 1 条产品记录')]
 assert.strictEqual(queryCardPresentation(presentMessages(single))[1].results[0].kind, 'product_count')
+const overview = { kind: 'workorder_overview', filters: { product_code: 'LAMP-BATT-MODULE' },
+  rows: [], total: 0, coverage: 'complete', page: 1, page_size: 10, queried_at: '2026-11-24T04:00:00Z' }
+const overviewQueries = [chat('orders', 'user', '查询工单'),
+  ...query('orders', 'ktg_query_workorder_overview', { product_code: 'LAMP-BATT-MODULE', page: 1,
+    workorder_codes: ['WO-LAMP-RETAIL', 'WO-LAMP-HOME'], statuses: ['APPROVING', 'APPROVED'],
+    unfinished_only: false, include_progress: true }, overview),
+  ...query('orders', 'ktg_query_workorder_overview', { product_code: 'LAMP-BATT-MODULE', page: 2,
+    unfinished_only: true, include_progress: false }, null, '工单查询失败'),
+  chat('orders', 'assistant', '工单查询待核实')]
+const orderDetails = queryCardPresentation(presentMessages(overviewQueries)).at(-1).queryDetails
+assert.strictEqual(orderDetails.count, 2)
+assert.strictEqual(orderDetails.failed, 1)
+assert.strictEqual(orderDetails.groups[0].title, '工单概览')
+assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /产品编码 LAMP-BATT-MODULE/)
+assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /工单编号 WO-LAMP-RETAIL、WO-LAMP-HOME/)
+assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /工单状态 审批中、已审批/)
+assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /仅未完工 否/)
+assert.match(orderDetails.groups[0].queries[0].attempts[0].scope, /查询执行进度 是/)
+assert.match(orderDetails.groups[0].queries[1].attempts[0].scope, /页码 2/)
+assert.match(orderDetails.groups[0].queries[1].attempts[0].scope, /仅未完工 是/)
+assert.match(orderDetails.groups[0].queries[1].attempts[0].scope, /查询执行进度 否/)
+assert.strictEqual(orderDetails.groups[0].queries[1].attempts[0].error, '工单查询失败')
+assert.strictEqual(toolProgressText({ workorder: { name: 'ktg_query_workorder_overview', status: 'running' } }), '正在查询工单概览')
 const resumed = [...multi, chat('resume', 'user', '继续此任务'),
   ...query('resume', 'update_task', {}, { task_id: 'task-a', version: 2 }),
   ...query('resume', 'ktg_query_stock_summary', { item_code: 'CELL-18650-2200' }, stock),

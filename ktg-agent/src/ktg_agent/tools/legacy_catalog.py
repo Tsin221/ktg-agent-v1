@@ -1,15 +1,18 @@
-"""Explicit catalog adapter for the two unchanged reviewed MES read tools."""
+"""Explicit catalog adapter for reviewed MES read tools."""
 
 from collections.abc import Iterable
 
 from ktg_agent.tools.catalog import ToolCatalog, ToolFactory, ToolManifest
-from ktg_agent.tools.permissions import PermissionLeaf
+from ktg_agent.tools.permissions import PermissionAll, PermissionLeaf, PermissionPolicy
 from ktg_agent.tools.registry import ToolDefinition, ToolDefinitionError
 
 
-_DOMAINS = {
-    "ktg_count_products": ("md", "items", "mes:md:mditem:list"),
-    "ktg_query_stock_summary": ("wm", "stock", "mes:wm:wmstock:list"),
+_DOMAINS: dict[str, tuple[str, str, PermissionPolicy]] = {
+    "ktg_count_products": ("md", "items", PermissionLeaf("mes:md:mditem:list")),
+    "ktg_query_stock_summary": ("wm", "stock", PermissionLeaf("mes:wm:wmstock:list")),
+    "ktg_query_workorder_overview": ("pro", "workorder", PermissionAll((
+        PermissionLeaf("mes:pro:workorder:list"), PermissionLeaf("mes:pro:execution:query"),
+    ))),
 }
 
 
@@ -18,7 +21,7 @@ def _factory(definition: ToolDefinition) -> ToolFactory:
 
 
 def build_legacy_catalog(definitions: Iterable[ToolDefinition]) -> ToolCatalog:
-    """Register only the retained, reviewed definitions; do not activate them."""
+    """Register only the reviewed definitions; do not activate them."""
     manifests: list[ToolManifest] = []
     factories: dict[str, ToolFactory] = {}
     for definition in definitions:
@@ -33,7 +36,7 @@ def build_legacy_catalog(definitions: Iterable[ToolDefinition]) -> ToolCatalog:
             name=definition.name, version=definition.version,
             module=module, domain=domain, label=definition.label,
             description=definition.description,
-            permission_policy=PermissionLeaf(permission),
+            permission_policy=permission,
             effect=definition.effect, execution_mode=definition.execution_mode,
             retry_policy=definition.retry_policy, timeout_seconds=definition.timeout_seconds,
             expose_to_model=definition.expose_to_model,

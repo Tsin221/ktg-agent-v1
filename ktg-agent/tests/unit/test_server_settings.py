@@ -103,4 +103,6 @@ def test_retired_configuration_cannot_restore_business_tools(monkeypatch: pytest
     service = create_service(settings)
     candidate = service._catalog.candidate_snapshot(
         CatalogIdentity(frozenset({"*:*:*"}), "run"), service._switches_provider())
-    assert set(candidate.candidates) == {"ktg_count_products", "ktg_query_stock_summary"}
+    assert set(candidate.candidates) == {
+        "ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview",
+    }
