@@ -144,6 +144,51 @@ def test_workorder_overview_is_discoverable_loadable_and_executable() -> None:
     asyncio.run(scenario())
 
 
+def test_materials_tool_is_discoverable_loadable_and_read_only() -> None:
+    name = "ktg_query_workorder_materials"
+
+    async def scenario() -> None:
+        requests: list[tuple[str, Mapping[str, object]]] = []
+
+        async def transport(url: str, _headers: Mapping[str, str],
+                            params: Mapping[str, object], _timeout: float) -> object:
+            requests.append((url, params))
+            if url.endswith("/getInfo"):
+                return {"code": 200, "user": {"userId": 7, "userName": "leader"},
+                        "permissions": ["mes:pro:workorder:list", "mes:pro:workorderbom:list",
+                                        "mes:pro:execution:query", "mes:wm:wmstock:list"]}
+            if url.endswith("/mes/pro/workorder/list"):
+                return {"code": 200, "total": 0, "rows": []}
+            raise AssertionError(url)
+
+        provider = FakeProvider((
+            turn(ToolCall("search", "search_tools", {"query": "那它的料够吗"})),
+            turn(ToolCall("load", "load_tools", {"tools": [{"name": name, "version": "1.0"}]})),
+            turn(ToolCall("query", name, {"workorder_codes": ["WO-NOT-FOUND"]})),
+            turn(answer="结论：所给工单未找到，不能判断缺料。"),
+        ))
+        service = QueryService(
+            provider=provider, model_config=ModelConfig("fake", 128),
+            ktg_client_factory=lambda token: KTGClient(
+                base_url="http://127.0.0.1:8080", authorization=token, transport=transport),
+        )
+        result = await service.run_session(
+            run_id="materials-run", message="这个工单料够不够？", history=(),
+            authorization="Bearer test", event_sink=lambda _event: None)
+        events = [event.payload for event in result.events if event.type is AgentEventType.TOOL_EXECUTION_END]
+        search = next(payload for payload in events if payload.get("tool_call_id") == "search")
+        assert name in json.dumps(search.get("result"))
+        assert name in {schema.name for schema in provider.requests[2].tools}
+        query = next(payload for payload in events if payload.get("tool_call_id") == "query")
+        assert query.get("status") == "succeeded"
+        details = cast(dict[str, object], query.get("result"))
+        assert details["kind"] == "workorder_materials" and details["missing_codes"] == ["WO-NOT-FOUND"]
+        assert any(url.endswith("/mes/pro/workorder/list") and params.get("workorderCode") == "WO-NOT-FOUND"
+                   for url, params in requests)
+
+    asyncio.run(scenario())
+
+
 def test_loaded_stock_summary_constraint_reaches_model_http_request() -> None:
     name = "ktg_query_stock_summary"
     requests = []

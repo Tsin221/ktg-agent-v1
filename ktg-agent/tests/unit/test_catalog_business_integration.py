@@ -18,6 +18,7 @@ from ktg_agent.tools.registry import ToolDefinitionError
 
 RETAINED = {"ktg_count_products", "ktg_query_stock_summary"}
 WORKORDER = "ktg_query_workorder_overview"
+MATERIALS = "ktg_query_workorder_materials"
 
 
 def test_tools_import_in_fresh_process() -> None:
@@ -66,8 +67,8 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert set(service._catalog._manifests) == RETAINED | {WORKORDER}
-    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER}
+    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS}
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS}
     assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
 
     definition = service._catalog.resolve_definition(WORKORDER, service._catalog.manifest(WORKORDER).version)
@@ -78,6 +79,16 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         identity = CatalogIdentity(frozenset(granted), "run")
         candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
         assert set(candidates) == ({WORKORDER} if granted == permissions else set())
+
+    material_permissions = permissions | {"mes:pro:workorderbom:list", "mes:wm:wmstock:list"}
+    materials_definition = service._catalog.resolve_definition(MATERIALS, service._catalog.manifest(MATERIALS).version)
+    assert materials_definition.effect is ToolEffect.READ
+    assert set(materials_definition.required_permissions) == material_permissions
+    for omitted in [None, *sorted(material_permissions)]:
+        granted = material_permissions if omitted is None else material_permissions - {omitted}
+        identity = CatalogIdentity(frozenset(granted), "run")
+        candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
+        assert (MATERIALS in candidates) is (omitted is None)
 
 
 @pytest.mark.parametrize(("method", "path"), [

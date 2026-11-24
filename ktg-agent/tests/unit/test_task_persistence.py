@@ -495,6 +495,18 @@ def test_workorder_evidence_preserves_scope_and_unavailable_progress() -> None:
     assert evidence == {key: value for key, value in details.items() if key != "kind"}
 
 
+def test_material_evidence_preserves_assessment_scope_and_missing_records() -> None:
+    details: JsonObject = {
+        "kind": "workorder_materials", "filters": {"workorder_codes": ["WO-A", "WO-B"]},
+        "queried_at": "now", "coverage": "partial", "missing_codes": ["WO-B"],
+        "orders": [{"workorderId": "123", "assessment": "unavailable", "material_scope": "line_side"}],
+        "warnings": ["部分材料库存待核实"],
+    }
+    evidence = _read_evidence("ktg_query_workorder_materials", details, {})
+    assert evidence is not None
+    assert evidence == {key: value for key, value in details.items() if key != "kind"}
+
+
 def test_task_product_and_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
     repo, _, run = setup_run(tmp_path / "chain.sqlite")
     requests: list[tuple[str, Mapping[str, object]]] = []

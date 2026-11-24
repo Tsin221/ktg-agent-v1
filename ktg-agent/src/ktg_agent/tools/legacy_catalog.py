@@ -13,6 +13,10 @@ _DOMAINS: dict[str, tuple[str, str, PermissionPolicy]] = {
     "ktg_query_workorder_overview": ("pro", "workorder", PermissionAll((
         PermissionLeaf("mes:pro:workorder:list"), PermissionLeaf("mes:pro:execution:query"),
     ))),
+    "ktg_query_workorder_materials": ("pro", "materials", PermissionAll((
+        PermissionLeaf("mes:pro:workorder:list"), PermissionLeaf("mes:pro:workorderbom:list"),
+        PermissionLeaf("mes:pro:execution:query"), PermissionLeaf("mes:wm:wmstock:list"),
+    ))),
 }
 
 
