@@ -196,6 +196,7 @@
                 class="agent-result-surface"
                 :result="result"
                 :session-id="sessionId"
+                :selection-required="message.resultSelection && message.resultSelection[index] === true"
                 @selected="continueExploration($event, message.sourceText)"
               />
               <agent-workorder-draft-card

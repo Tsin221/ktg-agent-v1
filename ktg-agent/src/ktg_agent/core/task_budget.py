@@ -29,6 +29,18 @@ class TaskBudget:
     operation_status: Callable[[str, str], str] | None = None
     resume_request: JsonObject | None = None
 
+    @property
+    def save_limit(self) -> int:
+        return max(TASK_SAVE_LIMIT, len(self.steps) + 2)
+
+    @property
+    def saves_exhausted(self) -> bool:
+        return self.saves >= self.save_limit - 1
+
+    def settle_save(self, call: ToolCall, succeeded: bool) -> None:
+        if call.name in TASK_TOOLS and not succeeded:
+            self.saves -= 1
+
     def set_task(self, task_id: str, steps: JsonValue, *, version: JsonValue = None) -> None:
         self.task_id = task_id
         self.version = version if type(version) is int else None
@@ -69,7 +81,7 @@ class TaskBudget:
             ):
                 rejected[call.id] = "TASK_CLOSEOUT"
             elif call.name in TASK_TOOLS:
-                save_limit = TASK_SAVE_LIMIT if self.closeout_turns else TASK_SAVE_LIMIT - 1
+                save_limit = self.save_limit if self.closeout_turns else self.save_limit - 1
                 if self.saves >= save_limit:
                     rejected[call.id] = "TASK_SAVE_LIMIT"
                 else:

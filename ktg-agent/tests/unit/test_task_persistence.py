@@ -29,7 +29,7 @@ from ktg_agent.sessions.coordinator import RunCoordinator
 from ktg_agent.sessions.repository import SessionRepository, TaskSelectionRequired, TaskVersionConflict
 from ktg_agent.sessions.service import SessionService
 from ktg_agent.sessions.task_tools import _read_evidence, task_run_configuration
-from ktg_agent.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolStatus
+from ktg_agent.tools.registry import ToolContext, ToolDefinition, ToolRegistry, ToolResult, ToolStatus
 from ktg_agent.tools.runner import ToolRunner
 
 
@@ -184,7 +184,8 @@ def test_session_model_tool_is_advertised_and_emits_after_save(tmp_path: Path) -
         authorization="authorization", event_sink=observe,
         task_configuration=partial(task_run_configuration, repo),
     ))
-    assert result.stop_reason is StopReason.COMPLETED
+    assert result.stop_reason is StopReason.LIMIT
+    assert result.limit_reason == "task_incomplete"
     assert {"create_task", "update_task"} <= {tool.name for tool in provider.requests[0].tools}
     assert saved_versions == [1]
     first, second = [system_text(request.messages) for request in provider.requests]
@@ -270,13 +271,74 @@ def test_step_budget_reallocates_unused_calls_after_saving_progress() -> None:
     assert budget.admit(next_calls, 6) == (next_calls, {})
 
 
+def test_failed_save_refunds_reserved_slot_and_eight_steps_can_checkpoint() -> None:
+    budget = TaskBudget()
+    budget.set_task("task", [step(str(i)) for i in range(8)])
+    invalid = ToolCall("invalid", "update_task", {})
+    assert budget.admit((invalid,), 30) == ((invalid,), {})
+    budget.settle_save(invalid, False)
+    assert budget.saves == 0
+    for i in range(9):
+        call = ToolCall(str(i), "update_task", {})
+        assert budget.admit((call,), 30) == ((call,), {})
+        budget.settle_save(call, True)
+    assert budget.saves_exhausted
+    reserved = ToolCall("reserved", "update_task", {"task_id": "task"})
+    assert budget.admit((reserved,), 30) == ((), {"reserved": "TASK_SAVE_LIMIT"})
+    budget.closeout_turns = 1
+    assert budget.admit((reserved,), 30) == ((reserved,), {})
+
+
+def test_eight_step_task_saves_each_step_after_invalid_update(tmp_path: Path) -> None:
+    repo, session, run = setup_run(tmp_path / "eight.sqlite")
+    created = repo.save_task("id:1", session, run, [step(str(i)) for i in range(8)], title="Eight")
+    task_id = created["task_id"]
+    calls = [ToolCall("invalid", "update_task", {
+        "task_id": task_id, "expected_version": 1,
+        "steps": [{"description": "Missing id", "status": "completed"}],
+    })]
+    for i in range(8):
+        calls.append(ToolCall(str(i), "update_task", {
+            "task_id": task_id, "expected_version": i + 1,
+            "steps": [step(str(j), status="completed" if j <= i else "pending") for j in range(8)],
+        }))
+    provider = FakeProvider((
+        *(ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((call,)), StopReason.TOOL_CALL,
+        )),)) for call in calls),
+        ScriptedTurn((ResponseCompleted(FinalResponse(
+            AssistantMessage((TextBlock("Saved all eight"),)), StopReason.COMPLETED,
+        )),)),
+    ))
+
+    async def get_identity() -> JsonObject:
+        return {"userId": 1}
+
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128),
+        limits=RunLimits(max_model_turns=20),
+        ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
+    )
+    result = asyncio.run(service.run_session(
+        run_id=run, message="Verify and save each step", history=(), authorization="authorization",
+        event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
+    ))
+    assert result.stop_reason is StopReason.COMPLETED
+    saved = repo.get_task("id:1", session, str(task_id), history=True)
+    assert saved["current_version"] == 9
+    versions = saved["versions"]
+    assert isinstance(versions, list) and len(versions) == 9
+    assert repo.unfinished_tasks("id:1", session) == []
+
+
 @pytest.mark.parametrize("limits", [
     RunLimits(max_model_turns=8, max_tool_calls=12),
     RunLimits(max_model_turns=8, max_tool_calls=2),
 ])
 @pytest.mark.parametrize("finished", [True, False])
+@pytest.mark.parametrize("save_exhausted", [False, True])
 def test_task_can_save_and_answer_after_work_budget_runs_out(
-    tmp_path: Path, limits: RunLimits, finished: bool,
+    tmp_path: Path, limits: RunLimits, finished: bool, save_exhausted: bool,
 ) -> None:
     repo, session, previous = setup_run(tmp_path / "closeout.sqlite")
     task_id = repo.save_task("id:1", session, previous, [step(status="in_progress")], title="Stock")["task_id"]
@@ -291,7 +353,7 @@ def test_task_can_save_and_answer_after_work_budget_runs_out(
     def tool_turn(*calls: ToolCall) -> ScriptedTurn:
         return ScriptedTurn((ResponseCompleted(FinalResponse(AssistantMessage(calls), StopReason.TOOL_CALL)),))
 
-    work_turns = min(limits.max_model_turns, limits.max_tool_calls)
+    work_turns = 0 if save_exhausted else min(limits.max_model_turns, limits.max_tool_calls)
     work_calls = tuple(ToolCall(f"work-{i}", "search_tools", {"query": "stock"}) for i in range(work_turns))
     provider = FakeProvider((
         *(tool_turn(call) for call in work_calls),
@@ -308,12 +370,19 @@ def test_task_can_save_and_answer_after_work_budget_runs_out(
         ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
         workorder_store=PreviewStore(),
     )
+    def configure(run_id: str, identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str, TaskBudget]:
+        tools, prompt, budget = task_run_configuration(repo, run_id, identity)
+        if save_exhausted:
+            budget.saves = budget.save_limit - 1
+        return tools, prompt, budget
+
     result = asyncio.run(service.run_session(
         run_id=run.id, message="继续", history=(), authorization="authorization",
-        event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
+        event_sink=lambda _: None, task_configuration=configure,
     ))
     assert result.stop_reason is (StopReason.COMPLETED if finished else StopReason.LIMIT)
-    expected_limit = "max_tool_calls" if work_turns < limits.max_model_turns else "max_model_turns"
+    expected_limit = ("task_save_limit" if save_exhausted else
+                      "max_tool_calls" if work_turns < limits.max_model_turns else "max_model_turns")
     assert result.limit_reason == (None if finished else expected_limit)
     assert result.final_message == AssistantMessage((TextBlock("Saved and summarized"),))
     assert [tool.name for tool in provider.requests[work_turns].tools] == ["update_task"]
@@ -380,7 +449,8 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
         authorization="authorization", event_sink=lambda _: None,
         task_configuration=partial(task_run_configuration, repo),
     ))
-    assert result.stop_reason is StopReason.COMPLETED
+    assert result.stop_reason is StopReason.LIMIT, result.error_code
+    assert result.limit_reason == "task_incomplete"
     messages = provider.requests[0].messages
     system = system_text(messages)
     assert system.count('"current_step_id": "next"') == 1
@@ -468,7 +538,8 @@ def test_task_workorder_to_stock_keeps_tool_activation_and_links_evidence(tmp_pa
         run_id=run, message="Check WO-17 and its stock", history=(), authorization="Bearer test",
         event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
     ))
-    assert result.stop_reason is StopReason.COMPLETED
+    assert result.stop_reason is StopReason.LIMIT
+    assert result.limit_reason == "task_incomplete"
     business_tools = {"ktg_pro_workorder_get", "ktg_query_stock"}
     assert not business_tools.intersection(tool.name for tool in provider.requests[1].tools)
     assert business_tools <= {tool.name for tool in provider.requests[2].tools}

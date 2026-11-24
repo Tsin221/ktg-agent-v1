@@ -311,8 +311,10 @@ class SessionService:
         if value is None:
             return None
         context = _json_object(value, "page_context")
-        if set(context) - {"route_name", "module", "selected_entity", "filters", "captured_at"}:
+        if set(context) - {"route_name", "module", "selected_entity", "filters", "captured_at", "response_style"}:
             raise ValueError("page_context 包含不允许的字段。")
+        if "response_style" in context and context["response_style"] != "brief":
+            raise ValueError("page_context.response_style 无效。")
         for key in ("route_name", "captured_at"):
             item = context.get(key)
             if item is not None and (not isinstance(item, str) or len(item) > 100):

@@ -3,15 +3,20 @@
     <p class="exploration-result__headline">{{ headline }}</p>
     <p v-if="current.coverage !== 'complete'" class="exploration-result__scope">仅已查范围 · 尚未确认全部记录</p>
 
-    <div v-if="records.length" class="exploration-result__table-wrap">
-      <table class="exploration-result__table">
-        <caption class="exploration-result__sr">查询结果，可选择记录查看详情</caption>
-        <thead><tr><th v-for="column in columns" :key="column" scope="col">{{ label(column) }}</th><th v-if="hasCandidates" scope="col">查看</th></tr></thead>
-        <tbody><tr v-for="(row, index) in visibleRecords" :key="row.record_ref || index">
-          <td v-for="column in columns" :key="column">{{ format(row[column], column) }}</td>
-          <td v-if="hasCandidates"><button v-if="canRead(row)" type="button" :disabled="busy" :aria-pressed="selectedRef === row.record_ref ? 'true' : 'false'" @click="readRecord(row)">{{ selectedRef === row.record_ref ? '已选' : '选择' }}</button></td>
-        </tr></tbody>
-      </table>
+    <div v-if="records.length">
+      <section v-for="group in recordGroups" :key="group.entity" class="exploration-result__record-group">
+        <p v-if="group.label && (recordGroups.length > 1 || current.kind === 'exploration_search')" class="exploration-result__section-title">{{ group.label }}</p>
+        <div class="exploration-result__table-wrap">
+          <table class="exploration-result__table">
+            <caption class="exploration-result__sr">{{ group.label || '查询结果' }}，可查看有权限的记录详情</caption>
+            <thead><tr><th v-for="column in group.columns" :key="column" scope="col">{{ label(column, group.entity) }}</th><th v-if="group.hasReferences" scope="col">查看</th></tr></thead>
+            <tbody><tr v-for="(row, index) in group.rows" :key="row.record_ref || index">
+              <td v-for="column in group.columns" :key="column">{{ format(row[column], column) }}</td>
+              <td v-if="group.hasReferences"><button v-if="canRead(row)" type="button" :disabled="busy" :aria-pressed="selectedRef === row.record_ref ? 'true' : 'false'" @click="readRecord(row)">{{ selectedRef === row.record_ref ? '已选' : selectionRequired ? '选择' : '查看' }}</button><span v-else>仅列表摘要</span></td>
+            </tr></tbody>
+          </table>
+        </div>
+      </section>
     </div>
     <p v-else-if="!flow && !detail && !busy && !analysisTables.length && current.kind !== 'exploration_error'" class="exploration-result__scope">{{ emptyText }}</p>
     <p v-if="current.kind === 'exploration_error'" role="alert" class="exploration-result__error">{{ current.message || '本次查询未完成，请调整线索后重试。' }}</p>
@@ -83,7 +88,7 @@
 import { getAgentExplorationView } from '@/api/agent'
 
 const labels = {
-  code: '编号', name: '名称', label: '类型', status: '状态', specification: '型号', machinery_spec: '型号',
+  code: '编号', name: '名称', label: '类型', status: '状态', specification: '规格', machinery_spec: '型号',
   workshop_name: '车间', machinery_name: '设备', product_name: '产品', item_name: '物料', client_name: '客户',
   machinery_code: '设备编号', item_code: '物料编号', workorder_code: '工单编号',
   require_date: '报修日期', finish_date: '完工日期', confirm_date: '验收日期', request_date: '需求日期',
@@ -93,6 +98,7 @@ const labels = {
   warehouse_name: '仓库', location_name: '库区', area_name: '库位', batch_code: '批次',
   feedback_time: '报工时间', accepted_by: '维修人员', confirm_by: '验收人员', enable_flag: '启用状态',
   subject_content: '项目内容', subject_standard: '标准', subject_type: '项目类型', bom_item_name: 'BOM物料',
+  bom_item_code: '物料编号', bom_item_spec: '物料规格', item_type_name: '物料类别', item_or_product: '物料类型',
   machinery_brand: '品牌', brand: '品牌', spec: '规格', tool_type_name: '工装类型', machinery_type_name: '设备类型'
 }
 const stateLabels = { completed: '已完成', in_progress: '进行中', not_found: '未查到记录',
@@ -110,12 +116,31 @@ const routes = {
   'wm.issue': ['/mes/wm/issue', 'issueId']
 }
 const scalar = value => value == null || ['string', 'number', 'boolean'].includes(typeof value)
+const populated = value => scalar(value) && value != null && (typeof value !== 'string' || value.trim() !== '')
+const entityLabels = {
+  'md.item': '产品物料', 'md.workshop': '车间', 'md.item_bom': '产品物料清单',
+  'pro.workorder': '生产工单', 'pro.task': '生产任务', 'pro.feedback': '生产报工', 'pro.workorder_bom': '工单物料需求',
+  'dv.machinery_type': '设备类型', 'dv.machinery': '设备台账', 'dv.subject': '点检保养项目', 'dv.repair': '维修单',
+  'dv.repair_line': '维修内容', 'dv.check_plan': '点检保养计划', 'dv.check_machinery': '计划设备', 'dv.check_subject': '计划项目',
+  'tm.tool_type': '工装类型', 'tm.tool': '工装夹具', 'wm.stock': '现存库存', 'wm.item_receipt': '物料入库',
+  'wm.item_receipt_line': '入库明细', 'wm.issue': '生产领料', 'wm.issue_line': '领料明细'
+}
 const visibleKey = key => !/(?:^|_)(?:ref|id|token|password|owner|scope|permission|permissions|endpoint|tool|session|run|catalog)(?:_|$)/i.test(key) &&
   !['entity', 'source', 'module', 'can_read', 'available_actions', 'match_evidence', 'match_strength', 'requires_confirmation', 'score', 'coverage', 'warnings', 'applied_query', 'path', 'route', 'operators', 'fields'].includes(key)
 
+function columnsFor(rows, entity) {
+  const preferred = entity === 'md.item' ? ['code', 'name', 'specification', 'unit_of_measure', 'item_type_name']
+    : ['code', 'name', 'item_code', 'item_name', 'bom_item_code', 'bom_item_name', 'machinery_code', 'machinery_name',
+      'product_name', 'label', 'workshop_name', 'warehouse_name', 'status', 'malfunction', 'require_date', 'quantity_onhand',
+      'quantity_issued', 'quantity_recived', 'quantity', 'specification', 'bom_item_spec']
+  const keys = new Set()
+  rows.forEach(row => Object.keys(row).filter(key => visibleKey(key) && populated(row[key])).forEach(key => keys.add(key)))
+  return [...preferred.filter(key => keys.has(key)), ...[...keys].filter(key => !preferred.includes(key))].slice(0, 5)
+}
+
 export default {
   name: 'ExplorationResult',
-  props: { result: { type: Object, required: true }, sessionId: { type: String, default: '' } },
+  props: { result: { type: Object, required: true }, sessionId: { type: String, default: '' }, selectionRequired: { type: Boolean, default: false } },
   data: () => ({ detail: null, flowResult: null, pageResult: null, activeNode: null, selectedRef: '', busy: false,
     error: '', requestSequence: 0, alive: true, visibleLimit: 5, lastRequest: null }),
   computed: {
@@ -136,24 +161,23 @@ export default {
         ? Object.fromEntries(columns.map((column, index) => [typeof column === 'string' ? column : column.name, row[index]])) : row)
     },
     visibleRecords() { return this.records.slice(0, this.visibleLimit) },
-    columns() {
-      const keys = new Set()
-      const preferred = ['code', 'name', 'label', 'workshop_name', 'status', 'malfunction', 'require_date', 'quantity_onhand']
-      this.records.forEach(row => Object.keys(row).filter(key => visibleKey(key) && scalar(row[key])).forEach(key => keys.add(key)))
-      return [...preferred.filter(key => keys.has(key)), ...[...keys].filter(key => !preferred.includes(key))].slice(0, 5)
+    recordGroups() {
+      const groups = new Map()
+      for (const row of this.visibleRecords) {
+        const entity = row.entity || ''
+        if (!groups.has(entity)) groups.set(entity, [])
+        groups.get(entity).push(row)
+      }
+      return [...groups].map(([entity, rows]) => ({ entity, rows, label: entity ? entityLabels[entity] || '其他记录' : '',
+        columns: columnsFor(rows, entity), hasReferences: rows.some(row => row.record_ref) }))
     },
-    hasCandidates() { return this.records.some(row => row.record_ref) },
     flow() { return this.flowResult || (this.current.kind === 'exploration_flow' ? this.current : null) },
     arrowId() { return 'exploration-arrow-' + this._uid },
     detailRecord() { return this.detail && (this.detail.records || [])[0] || {} },
     detailFields() { return Object.keys(this.detailRecord).filter(key => visibleKey(key) && scalar(this.detailRecord[key]))
       .map(key => ({ key, value: this.detailRecord[key] })) },
     activeRows() { return this.activeNode && this.activeNode.records || [] },
-    activeColumns() {
-      const keys = new Set()
-      this.activeRows.forEach(row => Object.keys(row).filter(key => visibleKey(key) && scalar(row[key])).forEach(key => keys.add(key)))
-      return [...keys].slice(0, 5)
-    },
+    activeColumns() { return columnsFor(this.activeRows, this.activeRows[0] && this.activeRows[0].entity) },
     hasMore() { return !this.flow && (this.records.length > this.visibleLimit || Number.isInteger(this.current.next_offset)) },
     emptyText() { return this.current.coverage === 'complete' ? '本次查询未返回匹配记录。' : '已查范围暂无匹配，尚未确认全部记录。' },
     warnings() {
@@ -185,8 +209,8 @@ export default {
   beforeDestroy() { this.alive = false; this.requestSequence++ },
   methods: {
     reset() { this.requestSequence++; this.detail = null; this.flowResult = null; this.pageResult = null; this.activeNode = null; this.selectedRef = ''; this.error = ''; this.busy = false; this.lastRequest = null; this.visibleLimit = 5 },
-    label(key) { return labels[key] || key },
-    format(value, key) { return value == null ? '未填写' : key === 'status' || key === 'repair_result' ? valueLabels[value] || value : typeof value === 'boolean' ? value ? '是' : '否' : String(value) },
+    label(key, entity) { return key === 'quantity' && entity && !['pro.workorder', 'pro.task'].includes(entity) ? '数量' : labels[key] || key },
+    format(value, key) { return value === undefined ? '—' : value === null || value === '' ? '未填写' : key === 'status' || key === 'repair_result' ? valueLabels[value] || value : typeof value === 'boolean' ? value ? '是' : '否' : String(value) },
     timeText(value) { const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? '' : parsed.toLocaleString('zh-CN') },
     stateText(value) { return stateLabels[value] || value || '未核实' },
     nodeClass(node) { const state = this.stateText(node.state); return { 'is-complete': state === '已完成', 'is-active': state === '进行中', 'is-unavailable': ['无权限', '本演示未接入', '不适用'].includes(state) } },
@@ -216,7 +240,7 @@ export default {
         this.selectedRef = row.record_ref; this.detail = result
         const record = (result.records || [])[0] || row
         if (!keepNode) this.$emit('selected', { entity: record.entity, name: record.name, code: record.code,
-          resume: this.current.kind === 'exploration_search' })
+          resume: this.selectionRequired && this.current.kind === 'exploration_search' })
       }
     },
     async readFlow(row) {

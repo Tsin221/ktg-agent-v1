@@ -9,7 +9,7 @@ const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
   visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText,
-  queryCardPresentation, toolProgressText } = moduleRef.exports
+  queryCardPresentation, compactResultPresentation, toolProgressText } = moduleRef.exports
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'
@@ -53,6 +53,31 @@ const query = (runId, name, args, details, error = '') => {
       tool_call_id: id, details, is_error: !!error
     })]
 }
+const bearingCandidates = { kind: 'exploration_search', coverage: 'complete', records: [
+  { id: 1, entity: 'md.item', code: 'BRG-6204', name: '深沟球轴承' },
+  { id: 2, entity: 'wm.stock', item_code: 'BRG-6204', quantity_onhand: 200 },
+  { id: 3, entity: 'md.item', code: 'BRG-6205', name: '深沟球轴承' }
+] }
+const resolvedBearing = [chat('bearing', 'user', '那个6204的轴承是什么规格？'),
+  ...query('bearing', 'ktg_search_items', { item_name: '6204轴承' }, { kind: 'items', rows: [], total: 0 }),
+  ...query('bearing', 'ktg_search_business', { query: '6204 轴承' }, bearingCandidates),
+  chat('bearing', 'assistant', '6204 轴承对应物料 BRG-6204，规格为 20×47×14 mm。')]
+const resolvedPresentation = compactResultPresentation(queryCardPresentation(presentMessages(resolvedBearing))).at(-1)
+assert.strictEqual(resolvedPresentation.evidenceStart, 0)
+assert.strictEqual(resolvedPresentation.evidenceCount, 2)
+assert.deepStrictEqual(resolvedPresentation.results.map(result => result.kind), ['items', 'exploration_search'])
+assert.strictEqual(resolvedPresentation.resultSelection[1], false)
+const ambiguousBearing = [chat('ambiguous', 'user', '那个轴承是什么规格？'),
+  ...query('ambiguous', 'ktg_search_business', { query: '轴承' }, bearingCandidates),
+  chat('ambiguous', 'assistant', '有两种轴承，BRG-6204 和 BRG-6205，请选择要查询哪一种。')]
+const ambiguity = compactResultPresentation(queryCardPresentation(presentMessages(ambiguousBearing))).at(-1)
+assert.strictEqual(ambiguity.evidenceCount, 0)
+assert.strictEqual(ambiguity.resultSelection[0], true)
+const listBearing = { ...resolvedPresentation, sourceText: '列出所有6204相关记录', text: 'BRG-6204 相关记录如下。' }
+assert.strictEqual(compactResultPresentation([listBearing])[0].evidenceCount, 0)
+const emptyOnly = [chat('empty', 'user', '查询不存在的轴承'),
+  ...query('empty', 'ktg_search_items', {}, { kind: 'items', rows: [], total: 0 }), chat('empty', 'assistant', '未找到对应物料。')]
+assert.strictEqual(compactResultPresentation(queryCardPresentation(presentMessages(emptyOnly))).at(-1).evidenceCount, 0)
 const orderA = { workorderId: 12, workorderCode: 'WO-A', productCode: 'A-01' }
 const orderB = { workorderId: 31, workorderCode: 'WO-B', productCode: 'A-01' }
 const orderC = { workorderId: 38, workorderCode: 'WO-C', productCode: 'B-01' }

@@ -138,6 +138,14 @@ def run(loop: AgentLoop, *, run_id: str = "run-1") -> AgentRunResult:
     )
 
 
+def test_model_cannot_finish_run_with_unsaved_task_steps() -> None:
+    provider = FakeProvider((ScriptedTurn((ResponseCompleted(response(TextBlock("All done"))),)),))
+    budget = TaskBudget(task_id="task", steps=(("one", "completed"), ("two", "pending")))
+    result = run(make_loop(provider, task_budget=budget))
+    assert result.stop_reason is StopReason.LIMIT
+    assert result.limit_reason == "task_incomplete"
+
+
 def event_types(result: AgentRunResult) -> list[AgentEventType]:
     return [event.type for event in result.events]
 
@@ -325,7 +333,8 @@ def test_consumed_task_steer_remains_in_final_request_after_tools() -> None:
         run_id="run-1", messages=(UserMessage((TextBlock("Report all order details"),)),), input_queue=queue,
     ))
     assert tool.values == [8]
-    assert result.stop_reason is StopReason.COMPLETED
+    assert result.stop_reason is StopReason.LIMIT
+    assert result.limit_reason == "task_incomplete"
     assert latest in replan_instructions(provider, 1)
     final = replan_instructions(provider, 2)
     assert latest in final

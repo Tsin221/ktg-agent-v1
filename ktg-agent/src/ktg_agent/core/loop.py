@@ -284,7 +284,12 @@ class AgentLoop:
                     usage=usage_accumulator.snapshot(),
                     now=checked_at,
                 )
-                if task_budget and task_budget.task_id and limit_reason in {"max_model_turns", "max_tool_calls"}:
+                if (limit_reason is None and task_budget and task_budget.task_id
+                        and (closeout_limit == "task_save_limit" or (
+                            task_budget.saves_exhausted
+                            and any(status != "completed" for _, status in task_budget.steps)))):
+                    limit_reason = "task_save_limit"
+                if task_budget and task_budget.task_id and limit_reason in {"max_model_turns", "max_tool_calls", "task_save_limit"}:
                     usage_limit = self._usage_limit(usage_accumulator.snapshot())
                     if usage_limit is not None:
                         limit_reason = usage_limit
@@ -432,6 +437,9 @@ class AgentLoop:
                         )
                     )
                     tool_calls_started += batch_started
+                    if task_budget:
+                        for call, result in zip(runnable_calls, results, strict=True):
+                            task_budget.settle_save(call, result.status is ToolStatus.SUCCEEDED)
                     results_by_id = dict(zip((call.id for call in runnable_calls), results, strict=True))
                     if task_budget and step is not None and not task_budget.closeout_turns:
                         if "TASK_STEP_LIMIT" in rejected.values() and step not in step_limit_notified:
@@ -604,14 +612,14 @@ class AgentLoop:
                 if close_inputs is not None:
                     close_inputs()
                 if (
-                    closeout_limit is not None
-                    and response.stop_reason is StopReason.COMPLETED
+                    response.stop_reason is StopReason.COMPLETED
                     and task_budget is not None
+                    and task_budget.task_id is not None
                     and any(status != "completed" for _, status in task_budget.steps)
                 ):
                     return await self._limited_result(
                         publisher=publisher, history=history, baseline=baseline,
-                        reason=closeout_limit, turns=turn, tool_calls=tool_calls_started,
+                        reason=closeout_limit or "task_incomplete", turns=turn, tool_calls=tool_calls_started,
                         usage_accumulator=usage_accumulator, message=response.message,
                     )
                 agent_status = self._agent_status(response.stop_reason)

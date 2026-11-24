@@ -24,6 +24,7 @@ from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent, RunPhase
 from ktg_agent.sessions.repository import ControlStateError, RunRecord, SessionRepository
+from ktg_agent.sessions.service import SessionService
 from ktg_agent.tools import (
     ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolRegistry,
     ToolResult, ToolRunner, ToolStatus,
@@ -62,6 +63,27 @@ def query_executor(provider: FakeProvider) -> RunCoordinatorExecutor:
         )
 
     return execute
+
+
+def test_brief_response_preference_only_changes_requested_turn() -> None:
+    provider = FakeProvider((turn("飞书结论"), turn("网页回答")))
+    service = QueryService(
+        provider=provider, model_config=ModelConfig("fake", 128),
+        ktg_client_factory=lambda _: cast(KTGClient, FakeClient()),
+    )
+    context = SessionService._page_context({"response_style": "brief"})
+    for index, page_context in enumerate((context, None)):
+        asyncio.run(service.run_session(
+            run_id=f"run-{index}", message="查询工单", history=(), page_context=page_context,
+            authorization="Bearer test", event_sink=lambda _: None,
+        ))
+    assert len(provider.requests) == 2
+    first, second = ["".join(block.text for message in request.messages
+                         if isinstance(message, SystemMessage) for block in message.content)
+                     for request in provider.requests]
+    assert "简短回答" in first
+    assert "简短回答" not in second
+    assert UserMessage((TextBlock("查询工单"),)) in provider.requests[0].messages
 
 
 def test_coordinator_persists_only_explicit_new_messages_when_prefix_drifts(tmp_path: Path) -> None:

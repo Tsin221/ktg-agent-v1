@@ -1,4 +1,4 @@
-"""Private demo adapter: Feishu p2p text -> existing Agent query -> safe card."""
+"""Private demo adapter: Feishu p2p text -> existing Agent sessions -> safe card."""
 from __future__ import annotations
 
 import hashlib
@@ -59,8 +59,18 @@ class Store:
                     created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS accounts (
                     owner TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    owner TEXT PRIMARY KEY, token_hash TEXT NOT NULL, session_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    mid TEXT PRIMARY KEY, owner TEXT NOT NULL, token_hash TEXT NOT NULL,
+                    session_id TEXT NOT NULL, run_id TEXT, task_id TEXT);
+                CREATE TABLE IF NOT EXISTS agent_task_lists (
+                    owner TEXT PRIMARY KEY, token_hash TEXT NOT NULL,
+                    session_id TEXT NOT NULL, task_ids TEXT NOT NULL);
                 UPDATE jobs SET status='interrupted' WHERE status='processing';
             ''')
+            if 'task_id' not in {row['name'] for row in db.execute('PRAGMA table_info(agent_runs)')}:
+                db.execute('ALTER TABLE agent_runs ADD COLUMN task_id TEXT')
         path.chmod(0o600)
 
     @contextmanager
@@ -109,6 +119,47 @@ class Store:
         with self.connect() as db:
             db.execute('INSERT OR REPLACE INTO accounts VALUES (?,?,?)', (owner, token, time.time()+7*3600))
 
+    @staticmethod
+    def token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def agent_session(self, owner: str, token: str) -> str | None:
+        with self.connect() as db:
+            row = db.execute('SELECT session_id FROM agent_sessions WHERE owner=? AND token_hash=?',
+                             (owner, self.token_hash(token))).fetchone()
+            return row['session_id'] if row else None
+
+    def save_agent_session(self, owner: str, token: str, session_id: str):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO agent_sessions VALUES (?,?,?)',
+                       (owner, self.token_hash(token), session_id))
+
+    def agent_run(self, mid: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM agent_runs WHERE mid=?', (mid,)).fetchone()
+            return dict(row) if row else None
+
+    def save_agent_run(self, mid: str, owner: str, token: str, session_id: str, task_id: str | None = None):
+        with self.connect() as db:
+            db.execute('INSERT INTO agent_runs(mid,owner,token_hash,session_id,task_id) VALUES (?,?,?,?,?)',
+                       (mid, owner, self.token_hash(token), session_id,task_id))
+
+    def set_agent_run_id(self, mid: str, run_id: str):
+        with self.connect() as db:
+            db.execute('UPDATE agent_runs SET run_id=? WHERE mid=?', (run_id, mid))
+
+    def save_task_list(self, owner: str, token: str, session_id: str, task_ids: list[str]):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO agent_task_lists VALUES (?,?,?,?)',
+                       (owner, self.token_hash(token), session_id, json.dumps(task_ids)))
+
+    def numbered_task(self, owner: str, token: str, session_id: str, number: int) -> str | None:
+        with self.connect() as db:
+            row = db.execute('SELECT task_ids FROM agent_task_lists WHERE owner=? AND token_hash=? AND session_id=?',
+                             (owner,self.token_hash(token),session_id)).fetchone()
+            ids = json.loads(row['task_ids']) if row else []
+            return ids[number-1] if 1<=number<=len(ids) else None
+
 
 def process_one(store: Store, query, reply, mes_url: str) -> bool:
     job = store.claim()
@@ -118,10 +169,11 @@ def process_one(store: Store, query, reply, mes_url: str) -> bool:
         card = json.loads(job['card'])
     else:
         try:
-            if job['status'] == 'interrupted':
+            if (job['status'] == 'interrupted' and store.agent_run(job['mid']) is None
+                    and job['text'] != '任务列表'):
                 result = {'answer': '服务重启中断了上一次查询，未自动重复执行。请重新发送问题。'}
             else:
-                result = query(job['owner'], job['text'])
+                result = query(job['owner'], job['text'], job['mid'])
             card = result_card(result, mes_url)
         except Exception as exc:
             LOG.warning('query_failed type=%s', type(exc).__name__)
@@ -180,7 +232,7 @@ class Adapter:
             self.feishu_expiry = time.time()+max(30, int(data.get('expire',7200))-120)
         return self.feishu_token
 
-    def query(self, owner: str, message: str) -> dict:
+    def account_token(self, owner: str) -> str:
         token = self.store.account(owner)
         if token:
             try:
@@ -194,8 +246,105 @@ class Adapter:
                 raise ApiError('DEMO_LOGIN_FAILED')
             token = data['token']
             self.store.save_account(owner, token)
-        # No business confirm or execution endpoint is reachable from this adapter.
-        return http_json(self.agent+'/agent-api/v1/query', {'message': message}, token=token, timeout=240)
+        return token
+
+    @staticmethod
+    def agent_id(value) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value):
+            raise ApiError('INVALID_AGENT_ID')
+        return value
+
+    def session_id(self, owner: str, token: str) -> str:
+        session_id = self.store.agent_session(owner, token)
+        if session_id is None:
+            session = http_json(self.agent+'/agent-api/v1/sessions', {}, token=token)
+            session_id = self.agent_id(session.get('session_id'))
+            self.store.save_agent_session(owner, token, session_id)
+        return self.agent_id(session_id)
+
+    def query(self, owner: str, message: str, mid: str) -> dict:
+        token = self.account_token(owner)
+        saved = self.store.agent_run(mid)
+        if saved:
+            if saved['owner'] != owner or saved['token_hash'] != self.store.token_hash(token):
+                return {'answer':'原登录会话已失效，未重复执行上一次查询。', 'stop_reason':'error'}
+            session_id = self.agent_id(saved['session_id'])
+            run_id = saved['run_id']
+            task_id = saved['task_id']
+        else:
+            session_id = self.session_id(owner, token)
+            if message == '任务列表':
+                return self.task_list(owner,token,session_id)
+            task_id = None
+            numbered = re.fullmatch(r'继续任务\s*(\d+)',message)
+            if numbered:
+                task_id = self.store.numbered_task(owner,token,session_id,int(numbered[1]))
+                if task_id is None:
+                    return {'answer':'请先发送「任务列表」，再根据列表编号发送「继续任务 1」。','stop_reason':'completed'}
+                detail,steps = self.task_detail(token,session_id,task_id)
+                if steps and all(step['status']=='completed' for step in steps):
+                    return {'answer':f'任务「{detail["title"]}」已完成。','stop_reason':'completed'}
+            self.store.save_agent_run(mid, owner, token, session_id, task_id)
+            run_id = None
+        if run_id is None:
+            request_id = 'feishu-'+hashlib.sha256(mid.encode()).hexdigest()
+            payload={'request_id':request_id,'message':message,'page_context':{'response_style':'brief'}}
+            if task_id is not None:
+                payload.update(message='继续此任务',task_id=self.agent_id(task_id))
+            accepted = http_json(self.agent+'/agent-api/v1/sessions/'+session_id+'/runs',
+                                 payload, token=token, timeout=240)
+            run_id = self.agent_id(accepted.get('run_id'))
+            self.store.set_agent_run_id(mid, run_id)
+        return self.wait_run(token, session_id, self.agent_id(run_id))
+
+    def task_detail(self, token: str, session_id: str, task_id: str) -> tuple[dict,list]:
+        url = self.agent+'/agent-api/v1/sessions/'+session_id+'/tasks/'+self.agent_id(task_id)
+        detail = http_json(url,token=token)
+        if detail.get('task_id') != task_id:
+            raise ApiError('INVALID_TASK_DETAIL')
+        version = next(v for v in detail['versions'] if v['version']==detail['current_version'])
+        return detail,version['steps']
+
+    def task_list(self, owner: str, token: str, session_id: str) -> dict:
+        url = self.agent+'/agent-api/v1/sessions/'+session_id+'/tasks'
+        items = http_json(url,token=token).get('items')
+        if not isinstance(items,list):
+            raise ApiError('INVALID_TASK_LIST')
+        ids=[];tasks=[]
+        for item in items[:10]:
+            task_id = self.agent_id(item['task_id'])
+            detail,steps = self.task_detail(token,session_id,task_id)
+            completed = sum(step['status']=='completed' for step in steps)
+            current = next((s for s in steps if s['status']=='in_progress'),None)
+            if current is None:
+                current = next((s for s in steps if s['status']!='completed'),None)
+            ids.append(task_id)
+            tasks.append({'number':len(ids),'title':detail['title'],'completed':completed,'total':len(steps),
+                          'current':current['description'] if current else ('已全部完成' if steps else '暂无步骤')})
+        self.store.save_task_list(owner,token,session_id,ids)
+        if not tasks:
+            return {'answer':'当前会话还没有任务。','stop_reason':'completed','task_list':[]}
+        return {'answer':f'显示最近 {len(tasks)}/{len(items)} 个任务。发送「继续任务 1」可续办对应任务。',
+                'stop_reason':'completed','task_list':tasks}
+
+    def wait_run(self, token: str, session_id: str, run_id: str) -> dict:
+        deadline = time.monotonic()+240
+        while time.monotonic()<deadline:
+            run = http_json(self.agent+'/agent-api/v1/runs/'+run_id, token=token)
+            if run.get('run_id') != run_id or run.get('session_id') != session_id:
+                raise ApiError('INVALID_AGENT_RUN')
+            status = run.get('status')
+            if status in ('queued','running','cancelling'):
+                time.sleep(1)
+                continue
+            if status not in ('completed','failed','cancelled','needs_input','needs_reconciliation'):
+                raise ApiError('INVALID_AGENT_STATUS')
+            summary = run.get('result_summary')
+            result = dict(summary) if isinstance(summary, dict) else {}
+            result['run_status'] = status
+            result.setdefault('stop_reason', run.get('stop_reason') or status)
+            return result
+        return {'answer':'查询仍在运行，请稍后查看任务列表。', 'stop_reason':'limit', 'run_status':'running'}
 
     def reply(self, mid: str, card: dict):
         data = http_json('https://open.feishu.cn/open-apis/im/v1/messages/'+mid+'/reply',

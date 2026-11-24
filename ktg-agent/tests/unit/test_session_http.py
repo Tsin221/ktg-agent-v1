@@ -338,11 +338,14 @@ def test_http_restart_keeps_history_and_does_not_replay_orphaned_run(
         sid = cast(str, request(server, "POST", "/agent-api/v1/sessions", body={})[1]["session_id"])
         completed_ids = [
             submit_and_wait(server, sid, 1, {"route_name": "WmStock",
-                                            "filters": {"itemCode": "A"}}),
+                                            "filters": {"itemCode": "A"},
+                                            "response_style": "brief"}),
             submit_and_wait(server, sid, 2),
         ]
         assert '"itemCode":"A"' in str(first_provider.requests[0].messages[0])
         assert '"itemCode":"A"' not in str(first_provider.requests[1].messages)
+        assert "简短回答" in str(first_provider.requests[0].messages[0])
+        assert "简短回答" not in str(first_provider.requests[1].messages)
         messages = request(server, "GET", f"/agent-api/v1/sessions/{sid}/messages")[1]
         assert [item["role"] for item in cast(list[dict[str, object]], messages["items"])] == [
             "user", "assistant", "user", "assistant",

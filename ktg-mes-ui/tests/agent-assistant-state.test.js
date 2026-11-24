@@ -229,7 +229,7 @@ async function main() {
   resolveInventory({ result: { kind: 'inventory_result', operation_id: 'inventory-1', outcome: 'failed', label: '库存失败' } })
   await Promise.all([workorderConfirmation, inventoryConfirmation])
   assert.ok(view.displayedMessages.some(item => item.text === '工单失败'))
-  assert.ok(view.displayedMessages.some(item => item.results && item.results[0].label === '库存失败'))
+  assert.ok(view.displayedMessages.some(item => item.results && item.results.some(result => result.label === '库存失败')))
   view.activeRun.status = 'running'
   handlers.onConnectionError(new Error('offline'))
   assert.strictEqual(view.streamError, true)

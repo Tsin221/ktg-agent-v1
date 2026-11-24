@@ -121,14 +121,45 @@ const referenceKinds = new Set([
   'tm_tool_list', 'tm_tool_detail', 'tm_tool_options'
 ])
 
+// A search can return evidence from several business entities. Keep it
+// expandable after a specific answer, but never hide an actual choice or list.
+const asksForChoice = text => /(?:请|需要您?|麻烦您?|可以)(?:先|您|你|从中|在下方|在下面|点击|点选|帮我)*\s*(?:选择|选定|确认|指定|告诉我)|(?:选择|选中|确认)(?:一下)?(?:哪|具体|对应)|(?:哪[个台张项种件条]|哪一[个台张项种件条])[^\n。！？!?]{0,20}[？?]/.test(text)
+const asksForList = text => /列出|列一下|罗列|清单|名单|候选|表格|有哪些|哪[些几]|分别|所有|全部/.test(text)
+function resolvedSearch(result, text, detailRecords) {
+  const rows = result.records
+  if (!Array.isArray(rows) || !rows.length) return false
+  const answeredCodes = new Set(text.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]*/g) || [])
+  const matches = new Set()
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue
+    for (const code of [row.code, row.item_code, row.bom_item_code, row.machinery_code, row.workorder_code, row.product_code, row.tool_code]) {
+      if (typeof code === 'string' && code.length >= 3 && answeredCodes.has(code.toUpperCase())) matches.add(code.toUpperCase())
+    }
+  }
+  if (matches.size) return matches.size === 1
+  const resolved = detailRecords.filter(record => record && rows.some(row => row && row.entity === record.entity && row.id === record.id))
+  return resolved.length === 1 || (rows.length === 1 && result.coverage === 'complete')
+}
+
 export function compactResultPresentation(messages) {
   return messages.map(message => {
     if (message.role !== 'assistant') return message
+    const text = message.text || ''
+    const choice = asksForChoice(text)
+    const answered = !!text.trim() && !message.queryPreface && !choice && !asksForList(message.sourceText || '')
     const results = (message.results || []).map((result, index) => ({ result,
       id: message.resultIds && message.resultIds[index] || `${message.id}-${index}`,
       presentation: message.resultPresentation && message.resultPresentation[index] || null,
       reference: referenceKinds.has(result.kind) && !result.error
     }))
+    const detailRecords = results.filter(entry => entry.result.kind === 'exploration_record')
+      .flatMap(entry => Array.isArray(entry.result.records) ? entry.result.records : [])
+    if (answered) {
+      const resolved = results.filter(entry => entry.result.kind === 'exploration_search' && resolvedSearch(entry.result, text, detailRecords))
+      resolved.forEach(entry => { entry.reference = true })
+      if (resolved.length) results.filter(entry => entry.result.kind === 'items' && entry.result.total === 0)
+        .forEach(entry => { entry.reference = true })
+    }
     const candidates = new Set()
     for (let index = results.length - 1; index >= 0; index--) {
       const entry = results[index]
@@ -143,11 +174,11 @@ export function compactResultPresentation(messages) {
     const main = results.filter(item => !item.reference)
     const references = results.filter(item => item.reference)
     const ordered = [...main, ...references]
-    const text = message.text || ''
     const long = text.length > 160 || /\n\s*\|/.test(text)
     const firstParagraph = (text.trim().split(/\n\s*\n/)[0] || '').replace(/^\s*\|.*$/gm, '').trim() || '查询结果见下方。'
     const preview = long ? firstParagraph.slice(0, 120) + (firstParagraph.length > 120 ? '…' : '') : text
     return { ...message, results: ordered.map(item => item.result), resultIds: ordered.map(item => item.id),
+      resultSelection: ordered.map(item => !item.reference && choice && item.result.kind === 'exploration_search'),
       resultPresentation: ordered.map(item => item.presentation), evidenceStart: main.length,
       evidenceCount: references.length, textPreview: preview, hasFullText: long && preview !== text }
   })
