@@ -15,6 +15,7 @@ baseline=(RUNTIME/'baseline.sql').read_bytes()
 if b'CREATE DATABASE' in baseline or b'\nUSE ' in baseline: raise SystemExit('Unexpected database directive in baseline.')
 sql('DROP DATABASE ktg_demo; CREATE DATABASE ktg_demo CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;')
 docker('MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot --default-character-set=utf8mb4 ktg_demo',baseline)
+sql(Path(__file__).with_name('workorder-type-dictionary.sql').read_text(encoding='utf-8'))
 subprocess.run(['python',str(Path(__file__).with_name('sync-permissions.py'))],check=True)
 for p in RUNTIME.iterdir():
     if p.is_file() and ('.sqlite3' in p.name or p.name in ('visitors.json','token-secret.txt')):

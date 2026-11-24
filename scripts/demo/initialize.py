@@ -41,6 +41,7 @@ def initialize():
     config_tables=['sys_menu','sys_dict_type','sys_dict_data','sys_config','sys_auto_code_rule','sys_auto_code_part']
     for table in config_tables:
         sql(f'INSERT INTO {TARGET}.{table} SELECT * FROM {SOURCE}.{table};')
+    sql(Path(__file__).with_name('workorder-type-dictionary.sql').read_text(encoding='utf-8'))
     sql("UPDATE ktg_demo.sys_config SET config_value='false' WHERE config_key='sys.account.captchaEnabled';")
     password=secrets.token_urlsafe(32)
     db_password=secrets.token_urlsafe(32)
