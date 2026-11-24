@@ -3,6 +3,9 @@
 import asyncio
 from collections.abc import Mapping
 from http.client import RemoteDisconnected
+from urllib.error import HTTPError
+from io import BytesIO
+from email.message import Message
 
 import pytest
 
@@ -51,3 +54,16 @@ def test_delete_rejects_non_local_paths(path: str) -> None:
     client = KTGClient(base_url="http://127.0.0.1:8080", authorization="Bearer token")
     with pytest.raises(ValueError):
         asyncio.run(client.delete(path))
+
+
+def test_operation_transport_preserves_structured_rejection_without_claiming_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reject(*_args: object, **_kwargs: object) -> object:
+        raise HTTPError("http://127.0.0.1:8080/mes/pro/workorder/operations", 409, "Conflict", Message(),
+                        BytesIO(b'{"code":409,"errorCode":"WORKORDER_CONFLICT","msg":"stale"}'))
+
+    monkeypatch.setattr("ktg_agent.ktg.client.urlopen", reject)
+    client = KTGClient(base_url="http://127.0.0.1:8080", authorization="Bearer token")
+    result = asyncio.run(client.post_operation("/mes/pro/workorder/operations", {}))
+    assert result == {"code": 409, "errorCode": "WORKORDER_CONFLICT", "msg": "stale"}
+    with pytest.raises(KTGError):
+        asyncio.run(client.post("/mes/pro/workorder/operations", {}))

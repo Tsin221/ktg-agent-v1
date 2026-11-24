@@ -99,6 +99,19 @@ class KTGClient:
     async def post(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
         return await self._write("POST", path, body)
 
+    async def post_operation(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
+        """Receipt-based writes must distinguish explicit rejection from an unknown outcome.
+
+        Only trusted, endpoint-specific business handlers call this method; model output
+        cannot select a URL. Return the actual structured business code for reconciliation.
+        """
+        self._validate_path(path)
+        payload = await self._write_transport("POST", f"{self._base_url}{path}",
+                                              self._headers, body, self._timeout_seconds)
+        if not isinstance(payload, dict) or type(payload.get("code")) is not int:
+            raise KTGError("KTG_INVALID_RESPONSE", "KTG 操作未返回明确结果。")
+        return payload
+
     async def put(self, path: str, body: Mapping[str, object]) -> dict[str, object]:
         return await self._write("PUT", path, body)
 
@@ -218,6 +231,17 @@ class KTGClient:
             with urlopen(request, timeout=timeout_seconds) as response:
                 raw = response.read()
         except HTTPError as exc:
+            if exc.code in {400, 404, 409, 422}:
+                # Java draft operations use real HTTP statuses, while execution endpoints
+                # also return embedded codes. Preserve verified business rejections for
+                # receipt-aware callers; conventional writes still raise below in _write.
+                try:
+                    rejected = KTGClient._decode_payload(exc.read())
+                    if (isinstance(rejected, dict) and rejected.get("code") == exc.code
+                            and isinstance(rejected.get("errorCode"), str)):
+                        return cast(dict[str, object], rejected)
+                except (KTGError, OSError):
+                    pass
             KTGClient._raise_http_error(exc)
         except (OSError, HTTPException) as exc:
             raise KTGError("KTG_CONNECTION_ERROR", "无法连接 KTG 服务。") from exc
