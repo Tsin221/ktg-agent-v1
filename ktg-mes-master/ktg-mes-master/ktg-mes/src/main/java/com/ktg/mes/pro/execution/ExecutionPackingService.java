@@ -29,9 +29,9 @@ public class ExecutionPackingService {
     }
     private ObjectNode record(long order,long taskId,ExecutionPackingRequest request) {
         if(!"CONFIRMED".equals(db.queryForObject("select status from pro_workorder where workorder_id=?",String.class,order)))throw ExecutionException.stateConflict("工单尚未下达或已结束");
-        List<Map<String,Object>> tasks=db.queryForList("select t.*,e.step_kind,e.task_kind,e.started_by,e.actual_started_at,e.actual_ended_at from pro_execution_task e join pro_task t on t.task_id=e.task_id and t.workorder_id=e.workorder_id where e.workorder_id=? order by e.task_id for update",order);
+        List<Map<String,Object>> tasks=db.queryForList("select t.*,e.step_kind,e.task_kind,e.started_by,e.assigned_user_id,e.actual_started_at,e.actual_ended_at from pro_execution_task e join pro_task t on t.task_id=e.task_id and t.workorder_id=e.workorder_id where e.workorder_id=? order by e.task_id for update",order);
         Map<String,Object> task=tasks.stream().filter(t->number(t,"task_id")==taskId).findFirst().orElseThrow(ExecutionException::notFound);
-        if(!"NORMAL".equals(task.get("task_kind"))||!"PACKING".equals(task.get("step_kind"))||!"STARTED".equals(task.get("status"))||task.get("actual_started_at")==null||task.get("actual_ended_at")!=null||!Objects.equals(SecurityUtils.getUserId(),task.get("started_by")))throw ExecutionException.stateConflict("包装任务须由受权人员开工");
+        if(!"NORMAL".equals(task.get("task_kind"))||!"PACKING".equals(task.get("step_kind"))||!"STARTED".equals(task.get("status"))||task.get("actual_started_at")==null||task.get("started_by")==null||task.get("actual_ended_at")!=null||!Objects.equals(SecurityUtils.getUserId(),task.get("assigned_user_id")))throw ExecutionException.stateConflict("包装任务须已开工且由当前指派人员执行");
         if(db.queryForList("select workstation_id from md_workstation where workstation_id=? and process_id=? and enable_flag='Y' for update",task.get("workstation_id"),task.get("process_id")).isEmpty())throw ExecutionException.stateConflict("包装工作站不可用");
         List<Map<String,Object>> units=db.queryForList("select * from pro_execution_unit where workorder_id=? order by sn_id for update",order);
         for(Long sn:request.snIds) {

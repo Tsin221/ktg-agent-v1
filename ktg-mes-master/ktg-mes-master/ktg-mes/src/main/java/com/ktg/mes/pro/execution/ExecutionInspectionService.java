@@ -79,9 +79,9 @@ import java.util.*;
     }
     private Map<String,Object> lockTask(long order,long task) {
         if(!"CONFIRMED".equals(db.queryForObject("select status from pro_workorder where workorder_id=?",String.class,order)))throw ExecutionException.stateConflict("工单未下达或已结束");
-        List<Map<String,Object>> tasks=db.queryForList("select t.*,e.task_kind,e.step_kind,e.inspection_template_id,e.inspection_type,e.inspection_snapshot_json,e.actual_started_at,e.actual_ended_at,e.started_by from pro_execution_task e join pro_task t on t.task_id=e.task_id and t.workorder_id=e.workorder_id where e.workorder_id=? order by e.task_id for update",order);
+        List<Map<String,Object>> tasks=db.queryForList("select t.*,e.task_kind,e.step_kind,e.inspection_template_id,e.inspection_type,e.inspection_snapshot_json,e.actual_started_at,e.actual_ended_at,e.started_by,e.assigned_user_id from pro_execution_task e join pro_task t on t.task_id=e.task_id and t.workorder_id=e.workorder_id where e.workorder_id=? order by e.task_id for update",order);
         Map<String,Object> t=tasks.stream().filter(x->num(x,"task_id")==task).findFirst().orElseThrow(ExecutionException::notFound);
-        if(!"INSPECTION".equals(t.get("step_kind"))||!"NORMAL".equals(t.get("task_kind"))||!"STARTED".equals(t.get("status"))||t.get("actual_started_at")==null||t.get("actual_ended_at")!=null||!Objects.equals(SecurityUtils.getUserId(),t.get("started_by")))throw ExecutionException.stateConflict("检测任务须由受权人员开工");
+        if(!"INSPECTION".equals(t.get("step_kind"))||!"NORMAL".equals(t.get("task_kind"))||!"STARTED".equals(t.get("status"))||t.get("actual_started_at")==null||t.get("started_by")==null||t.get("actual_ended_at")!=null||!Objects.equals(SecurityUtils.getUserId(),t.get("assigned_user_id")))throw ExecutionException.stateConflict("检测任务须已开工且由当前指派人员执行");
         if(db.queryForList("select workstation_id from md_workstation where workstation_id=? and process_id=? and enable_flag='Y' for update",t.get("workstation_id"),t.get("process_id")).isEmpty())throw ExecutionException.stateConflict("工作站不可用");
         return t;
     }

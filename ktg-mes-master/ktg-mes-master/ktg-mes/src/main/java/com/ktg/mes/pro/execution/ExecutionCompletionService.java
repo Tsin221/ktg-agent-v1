@@ -37,7 +37,7 @@ public class ExecutionCompletionService {
             if(!Boolean.TRUE.equals(p.get("terminalFactsValid")))throw ExecutionException.stateConflict("终态缺少合法包装或报废事实");
             if(allocated!=((Number)p.get("planned")).longValue()||allocated==0||packed+scrapped!=allocated)throw ExecutionException.stateConflict("仍有待检、待处置或待包装单件");
             boolean zero=packed==0&&scrapped==allocated&&Arrays.asList("WAITING","READY").contains(task.get("status"));
-            if(!zero&&(!"STARTED".equals(task.get("status"))||task.get("actual_started_at")==null||!SecurityUtils.getUserId().equals(task.get("started_by"))))throw ExecutionException.stateConflict("包装任务尚未合法开工");
+            if(!Objects.equals(SecurityUtils.getUserId(),task.get("assigned_user_id")) || (!zero&&(!"STARTED".equals(task.get("status"))||task.get("actual_started_at")==null||task.get("started_by")==null)))throw ExecutionException.stateConflict("包装任务须由当前指派人员合法执行");
             one(db.update("update pro_execution_task set actual_ended_at=current_timestamp(3),ended_by=? where task_id=? and actual_ended_at is null and (actual_started_at is null or actual_started_at<=current_timestamp(3))",SecurityUtils.getUserId(),taskId));
             one(db.update("update pro_task set status='FINISHED',quantity_produced=? where task_id=? and status=?",packed,taskId,task.get("status")));
             one(db.update("update pro_workorder set version=version+1 where workorder_id=? and status='CONFIRMED'",id));

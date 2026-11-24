@@ -44,7 +44,7 @@ class ProExecutionReleaseMySqlTest {
         }
         db.update("insert into qc_template(template_code,template_name,qc_types,enable_flag) values(?,?,'FINAL','Y')",tag,tag);template=id("qc_template","template_id","template_code");
         db.update("insert into qc_template_product(template_id,item_id) values(?,?)",template,product);
-        db.update("insert into qc_template_index(template_id,index_id,index_code,index_name,index_type) values(?,1,'I','I','QUANTITATIVE')",template);
+        db.update("insert into qc_template_index(template_id,index_id,index_code,index_name,index_type,stander_val,unit_of_measure,threshold_min,threshold_max) values(?,1,'I','I','QUANTITATIVE',10,'mm',9,11)",template);
         codes=mock(AutoCodeUtil.class);AtomicInteger seq=new AtomicInteger();when(codes.genSerialCode(anyString(),anyString())).thenAnswer(x->tag+"-"+seq.incrementAndGet());
         ObjectMapper json=new ObjectMapper();ExecutionAccessService access=new ExecutionAccessService(new ExecutionOwnershipService(source),new com.ktg.framework.web.service.PermissionService());
         ExecutionOperationService ops=new ExecutionOperationService(ProExecutionOperationMapperTest.mapper(source),access,new DataSourceTransactionManager(source),json);
@@ -77,6 +77,72 @@ class ProExecutionReleaseMySqlTest {
         db.update("update pro_route_process set execution_kind='ASSEMBLY' where record_id=?",steps.get(0));
         ExecutionReleaseRequest r=request();r.steps.get(1).ipqcType="IQC";assertEquals(400,service.release(order,r).get("code"));
         assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_operation"));
+    }
+    @Test void missingQuantitativeThresholdCannotFreezeOrderAndCanBeCorrected() {
+        db.update("update qc_template_index set threshold_min=null where template_id=?",template);
+        ExecutionReleaseRequest r=assertInvalidTemplateLeavesDraft("阈值");
+        db.update("update qc_template_index set threshold_min=9,threshold_max=null where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("阈值");
+        db.update("update qc_template_index set threshold_max=11 where template_id=?",template);
+        assertEquals(200,service.release(order,r).get("code"));
+        assertEquals(200,service.release(order,r).get("code"));
+        assertEquals(3,count("pro_task"));assertEquals(10,count("pro_execution_unit"));assertEquals(1,count("pro_execution_operation"));
+    }
+    @Test void invertedQuantitativeThresholdCannotFreezeOrder() {
+        db.update("update qc_template_index set threshold_min=12 where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("阈值");
+    }
+    @Test void unsupportedIndexTypeCannotFreezeOrder() {
+        db.update("update qc_template_index set index_type='UNSUPPORTED' where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("类型");
+    }
+    @Test void duplicateIndexIdentityCannotFreezeOrder() {
+        db.update("insert into qc_template_index(template_id,index_id,index_code,index_name,index_type) values(?,1,'I','I','QUALITATIVE')",template);
+        assertInvalidTemplateLeavesDraft("重复");
+    }
+    @Test void missingIndexIdentityCannotFreezeOrder() {
+        db.update("update qc_template_index set index_id=0 where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("ID");
+        db.update("update qc_template_index set index_id=1,index_name='' where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("名称");
+        db.update("update qc_template_index set index_name='I',index_code='' where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("编码");
+    }
+    @Test void emptyTemplateCannotFreezeOrder() {
+        db.update("delete from qc_template_index where template_id=?",template);
+        assertInvalidTemplateLeavesDraft("指标");
+    }
+    @Test void qualitativeIndexWithoutThresholdAndEqualQuantitativeBoundsAreExecutable() {
+        db.update("update qc_template_index set threshold_min=10,threshold_max=10 where template_id=?",template);
+        db.update("insert into qc_template_index(template_id,index_id,index_code,index_name,index_type) values(?,2,'Q','Q','QUALITATIVE')",template);
+        assertEquals(200,service.release(order,request()).get("code"));
+        String raw=db.queryForObject("select inspection_snapshot_json from pro_execution_task where workorder_id=? and step_kind='INSPECTION'",String.class,order);
+        ExecutionInspectionRecordService records=new ExecutionInspectionRecordService(db.getDataSource(),new ObjectMapper());
+        ExecutionInspectionRequest r=new ExecutionInspectionRequest();
+        r.taskId=1L;
+        ExecutionInspectionRequest.IndexResult quantitative=new ExecutionInspectionRequest.IndexResult();quantitative.indexId=1L;quantitative.value=new java.math.BigDecimal("10");
+        ExecutionInspectionRequest.IndexResult qualitative=new ExecutionInspectionRequest.IndexResult();qualitative.indexId=2L;qualitative.passed=true;
+        r.indices=Arrays.asList(quantitative,qualitative);
+        assertTrue(records.validate(records.snapshot(raw),r));
+    }
+    private ExecutionReleaseRequest assertInvalidTemplateLeavesDraft(String expectedReason) {
+        Long stockRows=db.queryForObject("select count(*) from wm_material_stock",Long.class);
+        java.math.BigDecimal stockTotal=db.queryForObject("select coalesce(sum(quantity_onhand),0) from wm_material_stock",java.math.BigDecimal.class);
+        Long ledgerRows=db.queryForObject("select count(*) from wm_transaction",Long.class);
+        ExecutionReleaseRequest r=request();
+        AjaxResult result=service.release(order,r);
+        assertEquals(400,result.get("code"));
+        assertEquals("VALIDATION_ERROR",result.get("errorCode"));
+        assertTrue(String.valueOf(result.get("msg")).contains("检验模板"));
+        assertTrue(String.valueOf(result.get("msg")).contains(expectedReason),String.valueOf(result.get("msg")));
+        assertEquals("PREPARE",db.queryForObject("select status from pro_workorder where workorder_id=?",String.class,order));
+        assertEquals(0L,db.queryForObject("select version from pro_workorder where workorder_id=?",Long.class,order));
+        assertEquals(0,count("pro_execution_order"));assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_task"));assertEquals(0,count("pro_execution_unit"));assertEquals(0,count("pro_execution_operation"));
+        assertEquals(0,db.queryForObject("select count(*) from wm_sn where sn_code like ?",Integer.class,tag+"-%"));
+        assertEquals(stockRows,db.queryForObject("select count(*) from wm_material_stock",Long.class));
+        assertEquals(0,stockTotal.compareTo(db.queryForObject("select coalesce(sum(quantity_onhand),0) from wm_material_stock",java.math.BigDecimal.class)));
+        assertEquals(ledgerRows,db.queryForObject("select count(*) from wm_transaction",Long.class));
+        return r;
     }
     @Test void missingOrNonPositiveBomQuantityCannotFreezeOrder() {
         db.update("update pro_workorder_bom set quantity=default where workorder_id=?",order);

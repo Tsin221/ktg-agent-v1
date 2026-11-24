@@ -176,7 +176,7 @@ public class ExecutionTaskQueryService {
         result.put("canAssign",legal && ExecutionAssignmentService.assignable(task) && allowed(ExecutionAction.ASSIGN,orderId,taskId));
         result.put("canStart",legal && ExecutionTaskStartService.startable(task,count) && allowed(ExecutionAction.START,orderId,taskId));
         boolean started=legal && "CONFIRMED".equals(task.get("order_status")) && "STARTED".equals(task.get("status"))
-                && task.get("actual_started_at")!=null && task.get("actual_ended_at")==null;
+                && task.get("actual_started_at")!=null && task.get("started_by")!=null && task.get("actual_ended_at")==null;
         boolean assembly="NORMAL".equals(task.get("task_kind")) && "ASSEMBLY".equals(task.get("step_kind"));
         result.put("canReport",started && assembly && count>0 && allowed(ExecutionAction.REPORT,orderId,taskId));
         boolean rework="REWORK".equals(task.get("task_kind"));

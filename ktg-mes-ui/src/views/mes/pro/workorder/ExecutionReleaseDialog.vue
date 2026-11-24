@@ -20,10 +20,9 @@
         </el-form>
       </template>
       <template v-if="detail">
-        <p>固定工艺：{{ detail.order.routeName }} · 计划 {{ detail.order.plannedUnits }} 件</p>
+        <p>固定工艺：{{ detail.order.routeName }}</p>
         <execution-order-progress :detail="detail" @changed="completed" />
-        <p>已分配 SN 总数 {{ detail.summary.allocated }} · 已装配 {{ detail.summary.assembled }} · 合格 {{ detail.summary.qualified }} · 已包装 {{ detail.summary.packed }} · 报废 {{ detail.summary.scrapped }}</p>
-        <el-table :data="detail.tasks"><el-table-column label="任务" prop="taskCode" /><el-table-column label="工序" prop="processName" /><el-table-column label="工作站" prop="workstationName" /><el-table-column label="计划量" prop="quantity" /><el-table-column label="执行状态"><template slot-scope="scope">{{ stateLabel(scope.row.status) }}</template></el-table-column></el-table>
+        <h3>可见 SN 明细</h3>
         <el-table :data="detail.units" max-height="260"><el-table-column label="SN" prop="snCode" /><el-table-column label="单件状态"><template slot-scope="scope">{{ stateLabel(scope.row.unitState) }}</template></el-table-column></el-table>
       </template>
       <el-alert v-if="unknown" title="下达结果待确认，请查询原操作回执。关闭后重新打开仍可恢复查询。" type="warning" :closable="false" />

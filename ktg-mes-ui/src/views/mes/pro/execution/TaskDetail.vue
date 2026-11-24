@@ -18,7 +18,7 @@
           <el-descriptions-item label="实际结束">{{ task.actualEndedAt || '—' }}</el-descriptions-item>
         </el-descriptions>
         <div class="actions">
-          <el-button v-if="actions.includes('assign')" :disabled="busy" @click="$emit('assign', task)">分派人员</el-button>
+          <el-button v-if="actions.includes('assign')" :disabled="busy" @click="$emit('assign', task)">{{ task.status === 'STARTED' ? '交接人员' : '分派人员' }}</el-button>
           <el-button v-if="actions.includes('start')" type="primary" :disabled="busy" @click="$emit('start', task)">开工</el-button>
           <el-button v-if="actions.includes('report')" type="primary" :disabled="busy" @click="$emit('report', task)">批量报工</el-button>
           <el-button v-if="actions.includes('complete')" type="success" :disabled="busy" @click="$emit('complete', task)">{{ task.taskKind === 'REWORK' ? '完成返工任务' : task.stepKind === 'INSPECTION' ? '完成检验任务' : task.stepKind === 'PACKING' ? '完成包装任务' : '完成装配任务' }}</el-button>

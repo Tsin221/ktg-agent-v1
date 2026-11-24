@@ -70,6 +70,20 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         where workstation_id = #{workstationId}
     </select>
 
+    <select id="lockMdWorkstationById" parameterType="Long" resultMap="MdWorkstationResult">
+        <include refid="selectMdWorkstationVo"/>
+        where workstation_id = #{workstationId} for update
+    </select>
+
+    <!-- A finished assembly task still supplies the workstation for future rework until order closure. -->
+    <select id="lockActiveExecutionProcessIds" parameterType="Long" resultType="Long">
+        select e.process_id
+        from pro_task t join pro_execution_task e on e.task_id=t.task_id and e.workorder_id=t.workorder_id
+             join pro_workorder w on w.workorder_id=e.workorder_id
+        where t.workstation_id=#{workstationId} and w.status='CONFIRMED'
+        order by e.task_id for update
+    </select>
+
     <select id="checkWorkStationCodeUnique" parameterType="MdWorkstation" resultMap="MdWorkstationResult">
         <include refid="selectMdWorkstationVo"/>
         where workstation_code = #{workstationCode} limit 1

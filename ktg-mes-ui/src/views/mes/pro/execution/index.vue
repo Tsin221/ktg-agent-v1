@@ -19,11 +19,12 @@
       <inspection-panel ref="quality" :busy="busy || !!pending" @inspect="inspect" @dispose="dispose" @ipqc="viewIpqc" />
       <el-dialog title="原过程检验单（只读）" :visible.sync="ipqcVisible" width="min(700px, 94vw)" append-to-body><el-alert v-if="ipqcError" :title="ipqcError" type="error" :closable="false" /><el-descriptions v-if="ipqc" :column="2" border><el-descriptions-item v-for="field in ipqcFields" :key="field[0]" :label="field[1]">{{ ipqc[field[0]] }}</el-descriptions-item></el-descriptions></el-dialog>
       <execution-report-dialog ref="report" :busy="busy || !!pending" :command-error="reportError" @submit="report" />
-      <el-dialog title="分派任务" :visible.sync="assignmentVisible" append-to-body width="min(540px, 94vw)" :close-on-click-modal="false">
+      <el-dialog :title="assignmentTask && assignmentTask.status === 'STARTED' ? '交接任务' : '分派任务'" :visible.sync="assignmentVisible" append-to-body width="min(540px, 94vw)" :close-on-click-modal="false">
         <p v-if="assignmentTask">任务 {{ assignmentTask.taskCode }} · 工位 {{ assignmentTask.workstationName }}</p>
+        <el-alert v-if="assignmentTask && assignmentTask.status === 'STARTED'" title="任务已开工。交接后由新指派人员继续执行，保留原开工时间和开工人及已有生产记录。" type="info" :closable="false" />
         <el-alert v-if="assignmentError" :title="assignmentError" type="error" :closable="false" />
         <el-form v-loading="assignmentLoading" label-width="90px"><el-form-item label="执行人员" required><el-select v-model="assignedUserId" filterable placeholder="选择已授权人员"><el-option v-for="person in assignmentOptions" :key="person.userId" :value="person.userId" :label="(person.nickName || person.userName) + '（' + person.userName + '）'" /></el-select></el-form-item></el-form>
-        <div slot="footer"><el-button :disabled="busy" @click="assignmentVisible=false">取消</el-button><el-button type="primary" :loading="busy" :disabled="busy || !!pending || assignmentLoading || !assignedUserId" @click="assign">确认分派</el-button></div>
+        <div slot="footer"><el-button :disabled="busy" @click="assignmentVisible=false">取消</el-button><el-button type="primary" :loading="busy" :disabled="busy || !!pending || assignmentLoading || !assignedUserId" @click="assign">{{ assignmentTask && assignmentTask.status === 'STARTED' ? '确认交接' : '确认分派' }}</el-button></div>
       </el-dialog>
     </template>
     <el-alert v-else title="当前账号没有车间工作台查询权限。" type="warning" :closable="false" />
@@ -67,7 +68,7 @@ export default {
     async viewIpqc(id) { this.ipqc = null; this.ipqcError = ''; this.ipqcVisible = true; try { this.ipqc = (await getIpqc(id)).data } catch (e) { this.ipqcError = e.message || '原检验单读取失败' } },
     openReport(task) { this.reportError = ''; this.$refs.report.open(task) },
     async openAssignment(task) {
-      this.assignmentTask = task; this.assignmentVisible = true; this.assignmentOptions = []; this.assignedUserId = task.assignedUserId || null; this.assignmentError = ''; this.assignmentLoading = true
+      this.assignmentTask = task; this.assignmentVisible = true; this.assignmentOptions = []; this.assignedUserId = task.status === 'STARTED' ? null : (task.assignedUserId || null); this.assignmentError = ''; this.assignmentLoading = true
       try { const res = await executionAssignmentOptions(task.taskId); this.assignmentOptions = res.data; if (!this.assignmentOptions.some(p => p.userId === this.assignedUserId)) this.assignedUserId = null }
       catch (e) { this.assignmentError = e.message || '合法执行人员读取失败' }
       finally { this.assignmentLoading = false }

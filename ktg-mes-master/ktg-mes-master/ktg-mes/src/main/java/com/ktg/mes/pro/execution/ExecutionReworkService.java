@@ -23,7 +23,7 @@ public class ExecutionReworkService  {
         return operations.execute(operationId,ExecutionAction.REWORK_COMPLETE,order,taskId,null,json.createObjectNode(),()-> {
             db.queryForList("select task_id from pro_execution_task where workorder_id=? order by task_id for update",order);
             Map<String,Object> task=tasks.taskRow(taskId,true);
-            if(!"REWORK".equals(task.get("task_kind"))||!"STARTED".equals(task.get("status"))||!"CONFIRMED".equals(task.get("order_status"))||task.get("actual_started_at")==null||task.get("actual_ended_at")!=null||!SecurityUtils.getUserId().equals(task.get("started_by"))||!tasks.legalWorkstation(task,true))throw ExecutionException.stateConflict("返工任务尚未合法开工");
+            if(!"REWORK".equals(task.get("task_kind"))||!"STARTED".equals(task.get("status"))||!"CONFIRMED".equals(task.get("order_status"))||task.get("actual_started_at")==null||task.get("started_by")==null||task.get("actual_ended_at")!=null||!SecurityUtils.getUserId().equals(task.get("assigned_user_id"))||!tasks.legalWorkstation(task,true))throw ExecutionException.stateConflict("返工任务须已开工且由当前指派人员执行");
             List<Map<String,Object>> units=db.queryForList("select u.sn_id from pro_execution_unit u join pro_execution_disposition d on d.sn_id=u.sn_id join pro_execution_task e on e.source_disposition_id=d.disposition_id where e.task_id=? and u.current_task_id=e.task_id and u.unit_state='REWORK_IN_PROGRESS' and d.decision='REWORK' for update",taskId);
             if(units.size()!=1)throw ExecutionException.stateConflict("返工来源与单件状态不符");
             Long inspection=db.queryForObject("select task_id from pro_execution_task where workorder_id=? and task_kind='NORMAL' and step_kind='INSPECTION'",Long.class,order);

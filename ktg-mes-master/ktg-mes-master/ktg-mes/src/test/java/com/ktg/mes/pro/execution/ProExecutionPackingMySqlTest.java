@@ -25,6 +25,7 @@ class ProExecutionPackingMySqlTest extends ExecutionInspectionFixture {
         assertEquals(200,packing.pack(packingTask,r).get("code"));assertEquals(200,packing.pack(packingTask,r).get("code"));
         assertEquals(9,countUnits("PACKED"));assertEquals(1,countUnits("WAIT_DISPOSITION"));
         assertEquals(9,db.queryForObject("select count(*) from pro_execution_pack where task_id=? and packed_by=77 and packed_at is not null",Integer.class,packingTask));
+        assertEquals(9,db.queryForObject("select count(*) from pro_execution_pack where task_id=? and package_line_id is null",Integer.class,packingTask));
         assertEquals(ledgerBefore,db.queryForObject("select count(*) from wm_transaction",Long.class));
         assertEquals(409,packing.pack(packingTask,packRequest(ids)).get("code"));
     }

@@ -36,7 +36,8 @@ public class ExecutionAssignmentService {
         if(!assignable(task)||!tasks.legalWorkstation(task,false)) throw ExecutionException.stateConflict("任务当前不可分派");
         String required=ExecutionTaskQueryService.stepPermission(task);
         List<Map<String,Object>> users=db.queryForList(ACTIVE_USERS+" order by user_id");
-        users.removeIf(user->!canExecute(ExecutionTaskQueryService.number(user.get("user_id")),required));
+        users.removeIf(user->("STARTED".equals(task.get("status")) && Objects.equals(user.get("user_id"),task.get("assigned_user_id")))
+                || !canExecute(ExecutionTaskQueryService.number(user.get("user_id")),required));
         return ExecutionTaskQueryService.camelRows(users);
     }
 
@@ -48,14 +49,18 @@ public class ExecutionAssignmentService {
         return operations.execute(request.operationId,ExecutionAction.ASSIGN,orderId,taskId,null,payload,()->{
             Map<String,Object> task=tasks.taskRow(taskId,true);
             if(!orderId.equals(ExecutionTaskQueryService.number(task.get("workorder_id"))) || !assignable(task))
-                throw ExecutionException.stateConflict("仅待开工任务可分派");
+                throw ExecutionException.stateConflict("仅未完成且计时状态有效的任务可分派或交接");
             if(!tasks.legalWorkstation(task,true)) throw ExecutionException.validation("工作站不存在、停用或不属于该工序");
             Long user=request.assignedUserId;
+            boolean started="STARTED".equals(task.get("status"));
+            if(started && Objects.equals(user,task.get("assigned_user_id")))
+                throw ExecutionException.stateConflict("请为已开工任务选择不同的交接人员");
             if(db.queryForList(ACTIVE_USERS+" and user_id=? for update",user).isEmpty()
                     || !canExecute(user,ExecutionTaskQueryService.stepPermission(task)))
                 throw ExecutionException.validation("执行人员无有效账号或对应工序权限");
             if(!user.equals(task.get("assigned_user_id"))) {
-                if(db.update("update pro_execution_task set assigned_user_id=? where task_id=? and actual_started_at is null and actual_ended_at is null",user,taskId)!=1)
+                // The task and workorder are locked; the original start actor/time are immutable.
+                if(db.update("update pro_execution_task set assigned_user_id=? where task_id=? and actual_ended_at is null",user,taskId)!=1)
                     throw ExecutionException.stateConflict("任务分派状态已变化");
                 if(db.update("update pro_workorder set version=version+1 where workorder_id=? and status='CONFIRMED'",orderId)!=1)
                     throw ExecutionException.stateConflict("工单状态已变化");
@@ -72,7 +77,8 @@ public class ExecutionAssignmentService {
     }
 
     static boolean assignable(Map<String,Object> task) {
-        return "CONFIRMED".equals(task.get("order_status")) && ("WAITING".equals(task.get("status"))||"READY".equals(task.get("status")))
-                && task.get("actual_started_at")==null && task.get("actual_ended_at")==null;
+        if(!"CONFIRMED".equals(task.get("order_status")) || task.get("actual_ended_at")!=null) return false;
+        if("STARTED".equals(task.get("status"))) return task.get("actual_started_at")!=null && task.get("started_by")!=null;
+        return ("WAITING".equals(task.get("status"))||"READY".equals(task.get("status"))) && task.get("actual_started_at")==null;
     }
 }

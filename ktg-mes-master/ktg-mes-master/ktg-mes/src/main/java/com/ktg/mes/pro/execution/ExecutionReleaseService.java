@@ -112,19 +112,27 @@ public class ExecutionReleaseService {
         }
         return Collections.singletonMap("routes",valid);
     }
+    @org.springframework.transaction.annotation.Transactional(readOnly=true, isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
     public Map<String,Object> detail(Long id) {
         access.requireOrderQuery(id);
         Map<String,Object> result=new LinkedHashMap<>();
         result.put("order",camel(db.queryForList("select w.workorder_id,w.workorder_code,w.version,w.status,e.route_id,e.route_code,e.route_name,e.planned_units,e.material_requirements_snapshot from pro_workorder w left join pro_execution_order e on e.workorder_id=w.workorder_id where w.workorder_id=?",id)).get(0));
         List<Map<String,Object>> tasks=camel(db.queryForList("select e.*,t.task_code,t.status,t.workstation_id,t.workstation_code,t.workstation_name,t.quantity,t.quantity_produced,t.start_time,t.end_time from pro_execution_task e join pro_task t on t.task_id=e.task_id where e.workorder_id=? order by e.normal_step_no,e.task_id",id));
         List<Map<String,Object>> units=camel(db.queryForList("select u.sn_id,s.sn_code,u.unit_state,u.current_task_id,u.version from pro_execution_unit u join wm_sn s on s.sn_id=u.sn_id where u.workorder_id=? order by u.sn_id",id));
+        // The compatibility summary is a whole-order projection, never a count of visible SNs.
+        ExecutionStatistics statistics=ExecutionStatistics.fromStates(units.stream()
+                .map(u->ExecutionState.valueOf(String.valueOf(u.get("unitState"))))
+                .collect(java.util.stream.Collectors.toList()));
         // Query scope is checked per task and SN to prevent peer task disclosure.
         tasks.removeIf(t->{try{access.requireTaskQuery(id,((Number)t.get("taskId")).longValue());return false;}catch(ExecutionException denied){return true;}});
         units.removeIf(u->{try{access.requireUnitQuery(id,((Number)u.get("snId")).longValue());return false;}catch(ExecutionException denied){return true;}});
         result.put("tasks",tasks);result.put("units",units);
-        Map<String,Integer> summary=new LinkedHashMap<>();for(String k:Arrays.asList("allocated","assembled","qualified","packed","scrapped"))summary.put(k,0);
-        summary.put("allocated",units.size());
-        for(Map<String,Object> u:units){String state=String.valueOf(u.get("unitState"));if(!"WAIT_ASSEMBLY".equals(state))summary.compute("assembled",(k,v)->v+1);if("WAIT_PACKING".equals(state)||"PACKED".equals(state))summary.compute("qualified",(k,v)->v+1);if("PACKED".equals(state))summary.compute("packed",(k,v)->v+1);if("SCRAPPED".equals(state))summary.compute("scrapped",(k,v)->v+1);}
+        Map<String,Integer> summary=new LinkedHashMap<>();
+        summary.put("allocated",Math.toIntExact(statistics.getAllocated()));
+        summary.put("assembled",Math.toIntExact(statistics.getAssembled()));
+        summary.put("qualified",Math.toIntExact(statistics.getQualified()));
+        summary.put("packed",Math.toIntExact(statistics.getPacked()));
+        summary.put("scrapped",Math.toIntExact(statistics.getScrapped()));
         result.put("summary",summary);return result;
     }
     private List<Map<String,Object>> camel(List<Map<String,Object>> rows) {
@@ -134,8 +142,14 @@ public class ExecutionReleaseService {
         if(s.templateId==null || !Arrays.asList("FIRST","FINAL","PATROL").contains(s.ipqcType)) throw ExecutionException.validation("请选择有效过程检验模板及类型");
         Map<String,Object> t=one("select t.* from qc_template t where template_id=? and enable_flag='Y' and find_in_set(?,replace(qc_types,' ',''))>0 and exists(select 1 from qc_template_product p where p.template_id=t.template_id and p.item_id=?) for update",s.templateId,s.ipqcType,product);
         List<Map<String,Object>> indices=db.queryForList("select index_id,index_code,index_name,index_type,qc_tool,check_method,stander_val,unit_of_measure,threshold_max,threshold_min from qc_template_index where template_id=? order by record_id for update",s.templateId);
-        if(indices.isEmpty()) throw ExecutionException.validation("检测模板至少需要一个指标");
-        Map<String,Object> snapshot=new LinkedHashMap<>(); snapshot.put("schemaVersion",1); snapshot.put("template",t); snapshot.put("inspectionType",s.ipqcType); snapshot.put("indices",indices); return encode(snapshot);
+        Map<String,Object> snapshot=new LinkedHashMap<>(); snapshot.put("schemaVersion",1); snapshot.put("template",t); snapshot.put("inspectionType",s.ipqcType); snapshot.put("indices",indices);
+        com.fasterxml.jackson.databind.JsonNode frozen=json.valueToTree(snapshot);
+        try {
+            ExecutionInspectionRecordService.validateForFreeze(frozen);
+        } catch(ExecutionException invalid) {
+            throw ExecutionException.validation("请检查并修改检验模板："+invalid.getMessage());
+        }
+        return encode(frozen);
     }
     static void validateRoute(List<Map<String,Object>> steps) {
         String[] kinds={"ASSEMBLY","INSPECTION","PACKING"}; Set<Long> process=new HashSet<>(); long last=Long.MIN_VALUE;

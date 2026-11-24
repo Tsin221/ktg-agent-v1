@@ -114,7 +114,7 @@ public class ExecutionReportService {
     }
 
     private List<Map<String, Object>> lockTasks(long orderId) {
-        List<Map<String, Object>> rows = db.queryForList("select e.task_id,e.normal_step_no,e.task_kind,e.step_kind,e.process_id,e.started_by,e.actual_started_at,e.actual_ended_at,t.status,t.workstation_id "
+        List<Map<String, Object>> rows = db.queryForList("select e.task_id,e.normal_step_no,e.task_kind,e.step_kind,e.process_id,e.assigned_user_id,e.started_by,e.actual_started_at,e.actual_ended_at,t.status,t.workstation_id "
                 + "from pro_execution_task e join pro_task t on t.task_id=e.task_id and t.workorder_id=e.workorder_id where e.workorder_id=? order by e.task_id for update", orderId);
         if (!"CONFIRMED".equals(db.queryForObject("select status from pro_workorder where workorder_id=?", String.class, orderId)))
             throw ExecutionException.stateConflict("工单未下达或已结束");
@@ -125,7 +125,7 @@ public class ExecutionReportService {
         Map<String, Object> assembly = tasks.stream().filter(t -> number(t, "task_id") == taskId).findFirst().orElseThrow(ExecutionException::notFound);
         if (!"NORMAL".equals(assembly.get("task_kind")) || !"ASSEMBLY".equals(assembly.get("step_kind"))
                 || !"STARTED".equals(assembly.get("status")) || assembly.get("actual_started_at") == null
-                || assembly.get("actual_ended_at") != null || !Objects.equals(SecurityUtils.getUserId(), assembly.get("started_by")))
+                || assembly.get("started_by") == null || assembly.get("actual_ended_at") != null || !Objects.equals(SecurityUtils.getUserId(), assembly.get("assigned_user_id")))
             throw ExecutionException.stateConflict("仅已开工的正常装配任务可以报工或结束");
         if (db.queryForList("select workstation_id from md_workstation where workstation_id=? and process_id=? and enable_flag='Y' for update",
                 assembly.get("workstation_id"), assembly.get("process_id")).isEmpty())

@@ -143,18 +143,21 @@ public class ExecutionOwnershipService {
         LegacyRef(Ref type, Object key) { this.type = type; this.key = key; }
     }
 
-    /** Call in the same transaction as the guarded write. */
-    void requireLegacyWritable(Collection<LegacyRef> references) {
-        if (references.isEmpty()) return;
-        // A deployment still on the old schema cannot contain execution facts.
-        // Once the first execution table exists, incomplete migration fails closed.
-        boolean migrated = Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) c -> {
+    /** Pre-execution deployments cannot contain bound execution orders. */
+    public boolean hasExecutionSchema() {
+        return Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) c -> {
             try (java.sql.ResultSet found = c.getMetaData().getTables(c.getCatalog(), null, "%", null)) {
                 while (found.next()) if ("pro_execution_order".equalsIgnoreCase(found.getString("TABLE_NAME"))) return true;
             }
             return false;
         }));
-        if (!migrated) return;
+    }
+
+    /** Call in the same transaction as the guarded write. */
+    void requireLegacyWritable(Collection<LegacyRef> references) {
+        if (references.isEmpty()) return;
+        // Once the first execution table exists, incomplete migration fails closed.
+        if (!hasExecutionSchema()) return;
 
         Set<Long> before = resolve(references, false);
         // Same outer lock as RELEASE; re-read current relationships (not a

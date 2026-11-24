@@ -1,9 +1,11 @@
 <template>
   <section aria-label="工单真实生产进度">
-    <h3>生产进度</h3>
+    <h3>整单生产进度</h3>
     <el-descriptions v-if="detail.progress" :column="3" border size="small"><el-descriptions-item v-for="metric in metrics" :key="metric[0]" :label="metric[1]">{{ detail.progress[metric[0]] }}</el-descriptions-item></el-descriptions>
-    <el-table :data="(detail.progress && detail.progress.tasks) || detail.tasks || []" size="small" empty-text="暂无任务">
-      <el-table-column prop="taskId" label="任务 ID" /><el-table-column label="工序"><template slot-scope="{ row }">{{ stepLabel(row.stepKind) }}</template></el-table-column>
+    <h3>可见任务明细</h3>
+    <el-table :data="detail.tasks || []" size="small" empty-text="暂无可见任务">
+      <el-table-column prop="taskCode" label="任务" min-width="120" /><el-table-column label="工序"><template slot-scope="{ row }">{{ row.processName || stepLabel(row.stepKind) }}</template></el-table-column>
+      <el-table-column prop="workstationName" label="工作站" /><el-table-column prop="quantity" label="任务计划" /><el-table-column prop="quantityProduced" label="任务已处理" />
       <el-table-column label="任务状态"><template slot-scope="{ row }">{{ taskLabel(row.status) }}</template></el-table-column>
       <el-table-column prop="actualStartedAt" label="实际开始" min-width="150" /><el-table-column prop="actualEndedAt" label="实际结束" min-width="150" />
     </el-table>

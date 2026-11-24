@@ -19,6 +19,10 @@ public interface MdWorkstationMapper
      */
     public MdWorkstation selectMdWorkstationByWorkstationId(Long workstationId);
 
+    MdWorkstation lockMdWorkstationById(Long workstationId);
+
+    List<Long> lockActiveExecutionProcessIds(Long workstationId);
+
     /**
      * 查询工作站列表
      * 

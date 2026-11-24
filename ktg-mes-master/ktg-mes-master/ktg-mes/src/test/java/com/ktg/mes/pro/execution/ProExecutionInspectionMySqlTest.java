@@ -19,7 +19,7 @@ abstract class ExecutionInspectionFixture extends ExecutionConsumptionFixture { 
         inspectionTask=db.queryForObject("select task_id from pro_execution_task where workorder_id=? and step_kind='INSPECTION'",Long.class,released.order);
 
         db.update("update pro_task set status='STARTED' where task_id=?",inspectionTask);
-        db.update("update pro_execution_task set assigned_user_id=77,started_by=77,actual_started_at=current_timestamp(3),inspection_snapshot_json=json_set(inspection_snapshot_json,'$.indices[0].threshold_min',9,'$.indices[0].threshold_max',11) where task_id=?",inspectionTask);
+        db.update("update pro_execution_task set assigned_user_id=77,started_by=77,actual_started_at=current_timestamp(3) where task_id=?",inspectionTask);
         db.update("insert into qc_defect(defect_code,defect_name,index_type,defect_level) values(?,?,'QUANTITATIVE','MAJ')",released.tag,released.tag);
         defect=db.queryForObject("select defect_id from qc_defect where defect_code=?",Long.class,released.tag);
         qualityLogin();

@@ -25,6 +25,7 @@ import java.util.*;
     }
     public boolean validate(JsonNode snapshot,ExecutionInspectionRequest r) { return validate(snapshot,r,true); }
     public boolean validate(JsonNode snapshot,ExecutionInspectionRequest r,boolean checkDictionary) {
+        validateIndexIdentities(snapshot);
         if(r==null||r.taskId==null||r.taskId<=0||r.indices==null||r.indices.size()!=snapshot.path("indices").size())throw ExecutionException.validation("须完整填写所有冻结指标");
         Map<Long,ExecutionInspectionRequest.IndexResult> results=new HashMap<>();
         for(ExecutionInspectionRequest.IndexResult i:r.indices) {
@@ -44,16 +45,54 @@ import java.util.*;
         }
         return accept;
     }
-    static boolean passes(JsonNode index,ExecutionInspectionRequest.IndexResult i) {
-        String type=index.path("index_type").asText();
-        if("QUANTITATIVE".equals(type)) {
-            if(i.value==null||i.passed!=null||i.value.precision()>30||Math.abs(i.value.scale())>12)throw ExecutionException.validation("定量指标须填写有效测量值");
-            if(!index.hasNonNull("threshold_min")||!index.hasNonNull("threshold_max"))throw ExecutionException.stateConflict("冻结定量指标缺少阈值");
-            BigDecimal min=index.get("threshold_min").decimalValue(),max=index.get("threshold_max").decimalValue();
-            if(min.compareTo(max)>0)throw ExecutionException.stateConflict("冻结指标阈值无效");
-            return i.value.compareTo(min)>=0&&i.value.compareTo(max)<=0;
+    /** Validate the exact snapshot to be frozen, without an operator's measurement or defect selection. */
+    static void validateForFreeze(JsonNode snapshot) {
+        validateIndexIdentities(snapshot);
+        for(JsonNode index:snapshot.path("indices")) {
+            if(!nonBlank(index.path("index_code")))throw invalidIndex(index,"缺少指标编码");
+            if(!nonBlank(index.path("index_name")))throw invalidIndex(index,"缺少指标名称");
+            quantitativeBounds(index);
         }
-        if(!"QUALITATIVE".equals(type)||i.passed==null||i.value!=null)throw ExecutionException.validation("定性指标须明确判定");
+    }
+    private static void validateIndexIdentities(JsonNode snapshot) {
+        JsonNode indices=snapshot.path("indices");
+        if(!indices.isArray()||indices.size()==0)throw ExecutionException.stateConflict("冻结检验要求至少需要一个指标");
+        Set<Long> ids=new HashSet<>();
+        for(JsonNode index:indices) {
+            JsonNode id=index.path("index_id");
+            if(!id.isIntegralNumber()||!id.canConvertToLong()||id.longValue()<=0)throw invalidIndex(index,"指标ID无效");
+            if(!ids.add(id.longValue()))throw invalidIndex(index,"指标ID重复");
+        }
+    }
+    private static boolean nonBlank(JsonNode value) {
+        return value.isTextual()&&!value.textValue().trim().isEmpty();
+    }
+    private static ExecutionException invalidIndex(JsonNode index,String reason) {
+        return ExecutionException.stateConflict("冻结指标 " + index.path("index_code").asText("") + " (ID:" + index.path("index_id").asText("?") + ")：" + reason);
+    }
+    /** Null bounds denote a qualitative decision. Quantitative bounds are inclusive, as before. */
+    private static BigDecimal[] quantitativeBounds(JsonNode index) {
+        String type=index.path("index_type").asText();
+        if("QUALITATIVE".equals(type))return null;
+        if(!"QUANTITATIVE".equals(type))throw invalidIndex(index,"不支持的指标类型");
+        JsonNode minNode=index.path("threshold_min"),maxNode=index.path("threshold_max");
+        if(!minNode.isNumber()||!maxNode.isNumber())throw invalidIndex(index,"定量指标须填写有效上下限阈值");
+        BigDecimal min,max;
+        try {
+            min=minNode.decimalValue();max=maxNode.decimalValue();
+        } catch(NumberFormatException invalid) {
+            throw invalidIndex(index,"定量指标上下限阈值无效");
+        }
+        if(min.compareTo(max)>0)throw invalidIndex(index,"定量指标下限阈值不能高于上限阈值");
+        return new BigDecimal[]{min,max};
+    }
+    static boolean passes(JsonNode index,ExecutionInspectionRequest.IndexResult i) {
+        BigDecimal[] bounds=quantitativeBounds(index);
+        if(bounds!=null) {
+            if(i.value==null||i.passed!=null||i.value.precision()>30||Math.abs(i.value.scale())>12)throw ExecutionException.validation("定量指标须填写有效测量值");
+            return i.value.compareTo(bounds[0])>=0&&i.value.compareTo(bounds[1])<=0;
+        }
+        if(i.passed==null||i.value!=null)throw ExecutionException.validation("定性指标须明确判定");
         return i.passed;
     }
     public long record(Map<String,Object> task,JsonNode snapshot,ExecutionInspectionRequest request,boolean accepted) {

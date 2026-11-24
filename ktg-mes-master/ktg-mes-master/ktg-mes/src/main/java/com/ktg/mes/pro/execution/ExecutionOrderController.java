@@ -17,5 +17,6 @@ public class ExecutionOrderController {
     @PostMapping("/workorders/{workorderId}/completions")
     public AjaxResult complete(@PathVariable Long workorderId,@RequestBody ExecutionCompletionRequest request) {return completion.complete(workorderId,request);}
     @GetMapping("/workorders/{workorderId}")
+    @org.springframework.transaction.annotation.Transactional(readOnly=true, isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
     public AjaxResult detail(@PathVariable Long workorderId) {java.util.Map<String,Object> result=service.detail(workorderId); result.put("progress",progress.progress(workorderId)); return AjaxResult.success(result);}
 }
