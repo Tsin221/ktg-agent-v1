@@ -191,10 +191,7 @@ export default {
 	/** 查询设备类型下拉树结构 */
     getTreeselect() {
       listMachinerytype().then(response => {
-        debugger;
-        this.machinerytypeOptions = [];
-        const data = this.handleTree(response.data, "machineryTypeId", "parentTypeId")[0];
-        this.machinerytypeOptions.push(data);
+        this.machinerytypeOptions = this.handleTree(response.data, "machineryTypeId", "parentTypeId");
       });
     },
     // 取消按钮

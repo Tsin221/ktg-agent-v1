@@ -163,7 +163,7 @@
       <el-tab-pane label="SIP">
         <SIPTab :itemId="form.itemId" :optType="optType"></SIPTab>
       </el-tab-pane>
-      <el-tab-pane label="SOP">
+      <el-tab-pane v-if="canReadSop" label="SOP" lazy>
         <SOPTab :itemId="form.itemId" :optType="optType"></SOPTab>
       </el-tab-pane>
     </el-tabs>
@@ -181,11 +181,15 @@ import {genCode} from "@/api/system/autocode/rule";
 import {listAllUnitmeasure} from "@/api/mes/md/unitmeasure";
 import {treeselect} from "@/api/mes/md/itemtype";
 import {getMdItem} from "@/api/mes/md/mdItem";
+import { checkPermi } from '@/utils/permission';
 
 export default {
   name: "itemForm",
   components: {ItemBom, SIPTab, Treeselect, BarcodeImg, SOPTab, BatchConfig},
   dicts: ['sys_yes_no','mes_item_product'],
+  computed: {
+    canReadSop() { return checkPermi(['mes:md:sop:list']); }
+  },
   data() {
     return {
       itemId: '',

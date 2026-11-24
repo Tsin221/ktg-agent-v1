@@ -111,16 +111,6 @@
     </el-row>
     <el-table v-loading="loading" :data="feedbackList" @selection-change="handleSelectionChange">
       <el-table-column type="selection" width="55" align="center" />
-      <el-table-column label="报工单号" align="center" prop="feedbackCode" width="150px">
-        <template slot-scope="scope">
-          <el-button
-            size="mini"
-            type="text"
-            @click="handleView(scope.row)"
-            v-hasPermi="['mes:pro:feedback:query']"
-          >{{scope.row.feedbackCode}}</el-button>
-        </template>
-      </el-table-column>
       <el-table-column label="报工类型" align="center" prop="feedbackType">
         <template slot-scope="scope">
           <dict-tag :options="dict.type.mes_feedback_type" :value="scope.row.feedbackType"/>

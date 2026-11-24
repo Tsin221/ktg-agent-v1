@@ -117,6 +117,7 @@
 
 <script>
 import { listVendor, getVendor, delVendor, addVendor, updateVendor } from "@/api/mes/md/vendor";
+import { checkPermi } from '@/utils/permission';
 export default {
   name: "VendorSelect",
   dicts: ['sys_yes_no','mes_vendor_level'],
@@ -170,16 +171,25 @@ export default {
       form: {},
     };
   },
-  created() {
-    this.getList();
+  watch: {
+    showFlag(visible) {
+      if (!visible) return;
+      if (!checkPermi(['mes:md:vendor:list'])) {
+        this.showFlag = false;
+        return;
+      }
+      this.getList();
+    }
   },
   methods: {
     handleOpen(id) {
-      this.showFlag = true
+      if (!checkPermi(['mes:md:vendor:list'])) return;
       this.selectedVendorId = id
+      this.showFlag = true
     },
     /** 查询供应商列表 */
     getList() {
+      if (!checkPermi(['mes:md:vendor:list'])) return;
       this.loading = true;
       listVendor(this.queryParams).then(response => {
         this.vendorList = response.rows;

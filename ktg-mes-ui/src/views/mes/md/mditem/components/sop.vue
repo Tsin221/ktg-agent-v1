@@ -8,7 +8,7 @@
                 icon="el-icon-plus"
                 size="mini"
                 @click="handleAdd"
-                v-hasPermi="['mes:md:mditem:add']"
+                v-if="canAddSop"
                 >新增</el-button>
             </el-col>
         </el-row>
@@ -55,8 +55,8 @@
                         <span>
                             {{sopList[index].sopTitle}}
                         </span>
-                        <el-button @click="handleUpdate(sopList[index])" type="primary" icon="el-icon-edit"></el-button>
-                        <el-button @click="handleDelete(sopList[index])" type="danger" icon="el-icon-delete"></el-button>
+                        <el-button v-if="canEditSop" @click="handleUpdate(sopList[index])" type="primary" icon="el-icon-edit"></el-button>
+                        <el-button v-if="canDeleteSop" @click="handleDelete(sopList[index])" type="danger" icon="el-icon-delete"></el-button>
                     </div>
                 </el-card>
             </div>
@@ -67,12 +67,25 @@
 import { listSop, getSop, delSop, addSop, updateSop } from "@/api/mes/md/sop";
 import ImageUpload from "@/components/ImageUpload/index.vue"
 import {listAllProcess} from "@/api/mes/pro/process";
+import { checkPermi } from '@/utils/permission';
 export default{
     name: "SOPTab",
     components: {ImageUpload},
     props:{
         itemId: null,
         optType: null,
+    },
+    computed: {
+        canReadSop() { return checkPermi(['mes:md:sop:list']); },
+        canAddSop() {
+            return this.optType !== 'view' && this.canReadSop && checkPermi(['mes:md:sop:add']) && checkPermi(['mes:pro:process:list']);
+        },
+        canEditSop() {
+            return this.optType !== 'view' && this.canReadSop && checkPermi(['mes:md:sop:edit']) && checkPermi(['mes:md:sop:query']) && checkPermi(['mes:pro:process:list']);
+        },
+        canDeleteSop() {
+            return this.optType !== 'view' && this.canReadSop && checkPermi(['mes:md:sop:remove']);
+        }
     },
     data(){
         return {
@@ -99,14 +112,13 @@ export default{
         }
     },
     created(){
-        this.getList();
-        this.getProcess();
+        if (this.canReadSop) this.getList();
     },
     methods: {
         //获取当前产品的SOP资料清单
         getList(){
+            if (!this.canReadSop) return;
             listSop(this.queryParams).then(response =>{
-                debugger;
                 this.imageList = [];
                 this.sopList = response.rows;
                 this.sopList.forEach(row => {
@@ -144,16 +156,20 @@ export default{
          * 新增操作
          */
         handleAdd(){
+            if (!this.canAddSop) return;
             this.reset();
+            this.getProcess();
             this.open = true;
             this.title = "添加产品SOP";
         },
         /** 修改按钮操作 */
         handleUpdate(row) {
+            if (!this.canEditSop) return;
             this.reset();
             const sopId = row.sopId || this.ids
             getSop(sopId).then(response => {
                 this.form = response.data;
+                this.getProcess();
                 this.open = true;
                 this.title = "修改产品SOP";
             });
@@ -170,6 +186,7 @@ export default{
         },
         //提交
         submitForm(){
+            if (this.form.sopId != null ? !this.canEditSop : !this.canAddSop) return;
             this.$refs["form"].validate(valid => {
                     if (valid) {
                     if (this.form.sopId != null) {
@@ -190,6 +207,7 @@ export default{
         },
         /** 删除按钮操作 */
         handleDelete(row) {
+            if (!this.canDeleteSop) return;
             const sopIds = row.sopId || this.ids;
             this.$modal.confirm('是否确认删除产品SOP编号为"' + sopIds + '"的数据项？').then(function() {
                 return delSop(sopIds);

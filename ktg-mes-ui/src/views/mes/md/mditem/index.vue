@@ -48,7 +48,6 @@
           </el-form-item>
           <el-form-item>
             <el-button type="primary" icon="el-icon-search" size="mini" @click="handleQuery">搜索</el-button>
-            <el-button icon="el-icon-refresh" size="mini" @click="resetQuery">重置</el-button>
           </el-form-item>
         </el-form>
 
@@ -348,7 +347,7 @@
         <el-tab-pane label="BOM组成">
           <ItemBom :optType="optType" :itemId="form.itemId"></ItemBom>
         </el-tab-pane>
-        <el-tab-pane label="SOP">
+        <el-tab-pane v-if="canReadSop" label="SOP" lazy>
           <SOPTab :itemId="form.itemId" :optType="optType"></SOPTab>
         </el-tab-pane>
       </el-tabs>
@@ -403,11 +402,15 @@ import { getBarcodeUrl } from '@/api/mes/wm/barcode';
 import "@riophae/vue-treeselect/dist/vue-treeselect.css";
 import BarcodeImg from "@/components/barcodeImg/index.vue"
 import printLabel from "@/components/printerLabel/index.vue"
+import { checkPermi } from '@/utils/permission';
 
 export default {
   name: "MdItem",
   dicts: ['sys_yes_no','mes_item_product'],
   components: { Treeselect,ItemBom,SOPTab,BarcodeImg,printLabel },
+  computed: {
+    canReadSop() { return checkPermi(['mes:md:sop:list']); }
+  },
   data() {
     return {
       // 遮罩层

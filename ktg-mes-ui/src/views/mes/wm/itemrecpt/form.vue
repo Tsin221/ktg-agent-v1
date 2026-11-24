@@ -42,10 +42,10 @@
       <el-row>
         <el-col :span="8">
           <el-form-item label="供应商" prop="vendorName">
-            <el-input v-model="form.vendorName" readonly="readonly" placeholder="请选择供应商" >
-              <el-button slot="append" @click="handleSelectVendor" icon="el-icon-search"></el-button>
+            <el-input v-model="form.vendorName" readonly="readonly" :placeholder="canSelectVendor ? '请选择供应商' : ''" >
+              <el-button v-if="canSelectVendor" slot="append" @click="handleSelectVendor" icon="el-icon-search"></el-button>
             </el-input>
-            <VendorSelect ref="vendorSelect" @onSelected="onVendorSelected" />
+            <VendorSelect v-if="canSelectVendor" ref="vendorSelect" @onSelected="onVendorSelected" />
           </el-form-item>
         </el-col>
         <el-col :span="8">
@@ -75,14 +75,19 @@ import Itemrecptline from "@/views/mes/wm/itemrecpt/line.vue";
 import VendorSelect from "@/components/vendorSelect/single.vue";
 import {genCode} from "@/api/system/autocode/rule";
 import {getItemrecpt} from "@/api/mes/wm/itemrecpt";
+import { checkPermi } from '@/utils/permission';
 
 export default {
   name: "itemrecptForm",
   components: {VendorSelect, Itemrecptline},
   dicts:['mes_order_status'],
+  computed: {
+    canSelectVendor() { return ['add', 'edit'].includes(this.optType) && checkPermi(['mes:md:vendor:list']); }
+  },
   data() {
     return {
       recptId: '',
+      optType: 'view',
       //自动生成编码
       autoGenFlag:false,
       // 表单参数
@@ -145,7 +150,7 @@ export default {
     },
     //供应商选择
     handleSelectVendor(){
-      this.$refs.form.resetFields()
+      if (!this.canSelectVendor) return;
       this.$refs.vendorSelect.handleOpen(this.form.vendorId)
     },
     //自动生成编码

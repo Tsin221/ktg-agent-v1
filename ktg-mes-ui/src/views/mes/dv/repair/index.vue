@@ -122,8 +122,16 @@
           <dict-tag :options="dict.type.mes_repair_result" :value="scope.row.repairResult"/>
         </template>
       </el-table-column>
-      <el-table-column label="维修人员" align="center" prop="acceptedBy" />
-      <el-table-column label="验收人员" align="center" prop="confirmBy" />
+      <el-table-column label="维修人员" align="center" prop="acceptedBy">
+        <template slot-scope="scope">
+          <span>{{ personName(scope.row.acceptName, scope.row.acceptedBy) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="验收人员" align="center" prop="confirmBy">
+        <template slot-scope="scope">
+          <span>{{ personName(scope.row.confirmName, scope.row.confirmBy) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="单据状态" align="center" prop="status">
         <template slot-scope="scope">
           <dict-tag :options="dict.type.mes_order_status" :value="scope.row.status"/>
@@ -249,13 +257,13 @@
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="维修人员" prop="acceptedName" v-if="form.status =='APPROVING' || form.status=='FINISHED' || form.status=='CONFIRMED' ">
-              <el-input v-model="form.acceptedName" readonly="readonly"/>
+            <el-form-item label="维修人员" prop="acceptedBy" v-if="form.status =='APPROVING' || form.status=='FINISHED' || form.status=='CONFIRMED' ">
+              <el-input :value="personName(form.acceptName, form.acceptedBy)" readonly="readonly"/>
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="验收人员" prop="confirmName" v-if="form.status=='FINISHED' || form.status=='CONFIRMED' ">
-              <el-input v-model="form.confirmName" readonly="readonly"/>
+              <el-input :value="personName(form.confirmName, form.confirmBy)" readonly="readonly"/>
             </el-form-item>
           </el-col>
         </el-row>
@@ -274,9 +282,6 @@
 
       <div slot="footer" class="dialog-footer">
         <el-button type="primary" v-if="form.status =='PREPARE' && optType !='view'" @click="submitForm">提 交</el-button>
-        <el-button type="primary" v-if="form.status == 'APPROVING' && optType !='view'" @click="finish">完成维修</el-button>
-        <el-button type="success" v-if="form.status == 'FINISHED' && optType !='view'" @click="confirm">验收通过</el-button>
-        <el-button type="danger" v-if="form.status == 'FINISHED' && optType !='view'" @click="unconfirm">不通过</el-button>
         <el-button @click="cancel">取 消</el-button>
       </div>
     </el-dialog>
@@ -371,6 +376,11 @@ export default {
     window.removeEventListener('ktg:dv-repair-changed', this.handleAgentRepairChanged);
   },
   methods: {
+    personName(name, identifier) {
+      return [name, identifier]
+        .map(value => value == null ? '' : String(value).trim())
+        .find(value => value !== '') || '未记录';
+    },
     handleAgentRepairChanged(event) {
       this.getList();
       const result = event && event.detail;

@@ -1,10 +1,6 @@
 <template>
-  <div class="flex-container">
-    <el-image ref="image" class="barcodeClass" fit="scale-down" :src="barcodeUrl">
-      <div slot="error" class="image-slot">
-        <i class="el-icon-picture-outline"></i>
-      </div>
-    </el-image>
+  <div v-if="barcodeUrl" class="flex-container">
+    <el-image :key="barcodeUrl" ref="image" class="barcodeClass" fit="scale-down" :src="barcodeUrl" @error="hideBarcode" />
   </div>
 </template>
 <script>
@@ -33,21 +29,19 @@ export default {
   },
   data(){
     return {
-      form: {
-        barcodeUrl: null
-      },
-      barcodeUrl:''
+      barcodeUrl: '',
+      barcodeRequest: 0
     }
   },
-  // mounted() {
-  //   this.getBarcode()
-  // },
   methods: {
-    getBarcode(){
-      console.log("---------------------",this.barcodeType)
-      this.form.barcodeUrl = null;
-      if(this.bussinessCode == null){
-        return ;
+    hideBarcode() {
+      this.barcodeUrl = '';
+    },
+    async getBarcode(){
+      const request = ++this.barcodeRequest;
+      this.hideBarcode();
+      if (!this.bussinessCode || !(Number(this.bussinessId) > 0)) {
+        return;
       }
       //二维码查询参数
       let barcodeParams = {
@@ -56,15 +50,14 @@ export default {
         barcodeFormart: this.barcodeFormart,
         barcodeType: this.barcodeType
       };
-      getBarcodeUrl(barcodeParams).then( response =>{
-        console.log(response,'59')
-        if(response.data != null){
-          //this.$set(this.form,'barcodeUrl',response.data.barcodeUrl);//强制刷新DOM
-          // this.form.barcodeUrl = response.data.barcodeUrl;
-          this.barcodeUrl = response.data.barcodeUrl;
-          console.log(this.barcodeUrl,'63')
-        }
-      });
+      try {
+        const response = await getBarcodeUrl(barcodeParams);
+        if (request !== this.barcodeRequest) return;
+        const url = response.data && response.data.barcodeUrl;
+        this.barcodeUrl = typeof url === 'string' ? url.trim() : '';
+      } catch (error) {
+        if (request === this.barcodeRequest) this.hideBarcode();
+      }
     },
 
   },

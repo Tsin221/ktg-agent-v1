@@ -48,7 +48,6 @@
           </el-form-item>
           <el-form-item>
             <el-button type="primary" icon="el-icon-search" size="mini" @click="handleQuery">搜索</el-button>
-            <el-button icon="el-icon-refresh" size="mini" @click="resetQuery">重置</el-button>
           </el-form-item>
         </el-form>
 
@@ -458,10 +457,7 @@ export default {
 	/** 查询设备类型下拉树结构 */
     getTreeselect() {
       listMachinerytype().then(response => {
-        debugger;
-        this.machineryTypeOptions = [];
-        const data = this.handleTree(response.data, "machineryTypeId", "parentTypeId")[0];
-        this.machineryTypeOptions.push(data);
+        this.machineryTypeOptions = this.handleTree(response.data, "machineryTypeId", "parentTypeId");
       });
     },
     // 筛选节点
