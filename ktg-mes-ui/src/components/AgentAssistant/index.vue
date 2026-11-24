@@ -154,7 +154,7 @@
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
           <h3>今天想查询什么？</h3>
-          <p>目前可查询产品总数和分仓现存量；其他生产业务请使用 MES 相应页面。</p>
+          <p>目前可查询产品总数、分仓现存量、工单与生产进度。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"
@@ -168,17 +168,20 @@
         </section>
 
         <div v-for="message in displayedMessages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
-          <div v-if="message.text" class="agent-message">{{ message.textPreview || message.text }}</div>
-          <details v-if="message.hasFullText" class="agent-query-details">
-            <summary>查看完整回复</summary>
-            <div class="agent-message">{{ message.text }}</div>
-          </details>
+          <div v-if="message.text && message.role === 'user'" class="agent-message">{{ message.text }}</div>
+          <agent-answer-content v-else-if="message.text" class="agent-message" :text="message.textPreview || message.text" />
+          <agent-answer-content v-if="message.followUp" class="agent-message agent-message--follow-up" :text="message.followUp" />
+          <agent-answer-content v-if="message.textTables" class="agent-message" :text="message.textTables" />
           <div
             v-for="(result, index) in message.results || []"
             :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
           >
             <agent-result-card v-if="result" class="agent-result-surface" :result="result" />
           </div>
+          <details v-if="message.hasFullText" class="agent-query-details">
+            <summary>展开依据与明细</summary>
+            <agent-answer-content class="agent-message" :text="message.textDetails" />
+          </details>
           <p v-if="message.queryError" class="agent-message agent-message--error" role="alert">查询失败 · {{ message.queryError }}</p>
           <details
             v-if="message.queryDetails"
@@ -292,6 +295,7 @@
 import { agentSession, createAgentSession, renameAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
   listAgentTasks, getAgentTask, getAgentRun } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
+import AgentAnswerContent from './AnswerContent.vue'
 import { isTerminalRun, pageContext, presentMessages, compactResultPresentation, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText, queryCardPresentation, toolProgressText,
   visibleInputs, inputStatusText } from './sessionPresentation'
@@ -321,7 +325,7 @@ export function clampPanelSize(size, viewport) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard },
+  components: { AgentResultCard, AgentAnswerContent },
   data() {
     return {
       open: false,
@@ -367,7 +371,7 @@ export default {
       unsubscribeStore: null,
       messages: [],
       openQueryDetails: {},
-      examples: ['查询当前产品总数', '查询 CELL-18650-2200 的分仓库存', '查询 PCB-BMS-1S 的分仓库存']
+      examples: ['有哪些工单尚未完工？', '床头阅读灯为什么还没完工？', '查询 CELL-18650-2200 的分仓库存']
     }
   },
   computed: {
@@ -1360,6 +1364,7 @@ export default {
   overflow-wrap: anywhere;
 }
 .agent-entry--user .agent-message { max-width: 88%; padding: 9px 12px; border-radius: 12px 12px 3px 12px; background: #eaf2fc; }
+.agent-message--follow-up { margin: 8px 0; color: var(--assistant-action); }
 .agent-message--error { margin: 8px 0 0; padding: 7px 9px; border-radius: 8px; color: #922e38; background: #fff1f2; font-size: 12px; }
 .agent-input-status { margin-top: 4px; color: var(--assistant-muted); font-size: 12px; text-align: right; }
 .agent-input-status button { border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; }

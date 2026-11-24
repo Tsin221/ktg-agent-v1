@@ -83,6 +83,9 @@ const result = {
 }
 const overview = render(result)
 const overviewText = text(overview)
+assert.ok(tags(overview).includes('table'), '真实工单记录应默认以表格呈现')
+assert.ok(tags(overview).includes('thead'))
+assert.ok(tags(overview).includes('tbody'))
 assert.match(overviewText, /工单概览/)
 assert.match(overviewText, /总数未核实/)
 assert.match(overviewText, /部分数据/)
@@ -126,4 +129,22 @@ for (const kind of ['workorder_draft_preview', 'inventory_preview', 'exploration
   assert.ok(!tags(historical).some(tag => ['button', 'a', 'iframe', 'script', 'form'].includes(tag)))
   assert.match(text(historical), /<script>test<\/script>/)
 }
+const answerSource = fs.readFileSync(path.resolve(__dirname, '../src/components/AgentAssistant/AnswerContent.vue'), 'utf8')
+const answerComponent = compiler.parseComponent(answerSource)
+const answerScript = babel.transformSync(answerComponent.script.content, { babelrc: false, configFile: false,
+  plugins: ['@babel/plugin-transform-modules-commonjs'] }).code
+const answerModule = { exports: {} }
+new Function('exports', 'module', 'require', answerScript)(answerModule.exports, answerModule,
+  name => name === './sessionPresentation' ? presentationModule.exports : require(name))
+const answerCompiled = compiler.compileToFunctions(answerComponent.template.content)
+const answerVm = new Vue({ ...answerModule.exports.default, propsData: {
+  text: '**结论：** 尚未完结。\n\n| 工单 | 状态 |\n|---|---|\n| <script>标签</script> | **已下达** |'
+}, render: answerCompiled.render, staticRenderFns: answerCompiled.staticRenderFns })
+const renderedAnswer = answerVm._render()
+answerVm.$destroy()
+assert.ok(tags(renderedAnswer).includes('table'))
+assert.ok(tags(renderedAnswer).includes('strong'))
+assert.match(text(renderedAnswer), /<script>标签<\/script>/)
+assert.ok(!tags(renderedAnswer).includes('script'))
+assert.doesNotMatch(text(renderedAnswer), /\*\*/)
 console.log('Agent result card renders retained read-only cards and inert historical results')

@@ -8,9 +8,13 @@
     <template v-else-if="result.kind === 'stock_summary'">
       <div class="result-card__heading">{{ title }}</div>
       <p v-if="result.no_records" class="result-card__empty">无匹配库存记录；不代表库存量为零。</p>
-      <div v-for="group in result.groups || []" :key="`${group.itemId}-${group.warehouseId}-${group.unitOfMeasure}`" class="result-card__row">
-        <strong>{{ group.warehouseName || group.warehouseCode || '未分仓' }}</strong>
-        <span>{{ group.itemCode }} · {{ group.quantityOnhand }} {{ group.unitOfMeasure || '' }}</span>
+      <div v-if="result.groups && result.groups.length" class="result-card__table-wrap" role="region" aria-label="分仓库存数据" tabindex="0">
+        <table class="result-card__table">
+          <thead><tr><th scope="col">仓库</th><th scope="col">物料</th><th scope="col">现存量</th></tr></thead>
+          <tbody><tr v-for="group in result.groups" :key="`${group.itemId}-${group.warehouseId}-${group.unitOfMeasure}`">
+            <td>{{ group.warehouseName || group.warehouseCode || '未分仓' }}</td><td>{{ group.itemCode }}</td><td>{{ group.quantityOnhand }} {{ group.unitOfMeasure || '' }}</td>
+          </tr></tbody>
+        </table>
       </div>
       <p v-if="result.queried_at" class="result-card__meta">查询时间 {{ result.queried_at }}</p>
     </template>
@@ -28,7 +32,21 @@
       <p v-if="!result.rows || !result.rows.length" class="result-card__empty">
         {{ result.coverage === 'complete' && result.total === 0 ? '未找到匹配工单' : '本页未获工单记录' }}
       </p>
-      <article v-for="row in result.rows || []" :key="row.workorderId" class="result-card__order">
+      <div v-if="result.rows && result.rows.length" class="result-card__table-wrap" role="region" aria-label="工单及生产进度数据" tabindex="0">
+        <table class="result-card__table">
+          <thead><tr><th scope="col">工单</th><th scope="col">状态</th><th scope="col">计划量</th>
+            <th v-for="metric in overviewMetrics" :key="metric[0]" scope="col">{{ metric[1] }}</th>
+          </tr></thead>
+          <tbody><tr v-for="row in result.rows" :key="row.workorderId">
+            <th scope="row">{{ row.workorderName || row.workorderCode }}</th>
+            <td>{{ statusLabel(row.status) }}<small v-if="row.progress_state === 'draft'">未下达</small><small v-else-if="row.progress_state === 'unavailable'">进度待核实</small></td>
+            <td>{{ row.quantity }} {{ row.unitOfMeasure || '' }}</td>
+            <td v-for="metric in overviewMetrics" :key="metric[0]">{{ row.progress_state === 'available' && row.progress ? metricValue(row.progress, metric[0]) : '—' }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <details v-for="row in result.rows || []" :key="row.workorderId" class="result-card__order">
+        <summary>工单详情 · {{ row.workorderCode }}</summary>
         <div class="result-card__order-heading">
           <strong>{{ row.workorderCode }}</strong>
           <span class="result-card__status">{{ statusLabel(row.status) }}</span>
@@ -70,7 +88,7 @@
           <p class="result-card__notice">执行进度未获取，无法判断实际进展。</p>
           <p v-if="row.progress_reason" class="result-card__meta">{{ row.progress_reason }}</p>
         </template>
-      </article>
+      </details>
       <p v-if="result.queried_at" class="result-card__meta">查询时间 {{ result.queried_at }}</p>
     </template>
     <details v-else class="result-card__history">
@@ -97,6 +115,11 @@ export default {
     },
     workorderFilters() {
       return queryScope({ unfinished_only: false, include_progress: false, ...(this.result.filters || {}) }, false)
+    },
+    overviewMetrics() {
+      const requested = this.result.filters && this.result.filters.include_progress === true
+      return requested || (this.result.rows || []).some(row => row.progress_state === 'available')
+        ? [['assembled', '已装配'], ['qualified', '合格'], ['pendingDisposition', '待处置'], ['packed', '已包装']] : []
     },
     mainMetrics() {
       return [['allocated', '已分配'], ['assembled', '已装配'], ['qualified', '合格'], ['packed', '已包装']]
@@ -166,11 +189,19 @@ export default {
   font-size: 12px;
 }
 .result-card__history summary { cursor: pointer; }
+.result-card__table-wrap { margin: 10px 0; max-width: 100%; overflow-x: auto; border: 1px solid #dfe4ed; border-radius: 6px; }
+.result-card__table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+.result-card__table th, .result-card__table td { padding: 8px; border-bottom: 1px solid #dfe4ed; min-width: 64px; vertical-align: top; overflow-wrap: anywhere; }
+.result-card__table thead th { background: #f2f6fc; color: #303133; white-space: nowrap; }
+.result-card__table tbody th { font-weight: 500; min-width: 112px; }
+.result-card__table tbody tr:last-child th, .result-card__table tbody tr:last-child td { border-bottom: 0; }
+.result-card__table small { display: block; color: #606266; }
 .result-card__order {
   margin-top: 12px;
   padding: 12px 0 0;
   border-top: 1px solid #dfe4ed;
 }
+.result-card__order > summary { cursor: pointer; font-size: 12px; color: #303133; margin-bottom: 8px; overflow-wrap: anywhere; }
 .result-card__order-heading, .result-card__task {
   display: flex;
   justify-content: space-between;

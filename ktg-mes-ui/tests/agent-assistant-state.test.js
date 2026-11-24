@@ -111,7 +111,7 @@ new Function('exports', 'module', 'require', code)(componentModule.exports, comp
 const options = componentModule.exports.default
 const templateContent = compiler.parseComponent(fs.readFileSync(componentPath, 'utf8')).template.content
 assert.deepStrictEqual(compiler.compile(templateContent).errors, [])
-assert.deepStrictEqual(Object.keys(options.components), ['AgentResultCard'])
+assert.deepStrictEqual(Object.keys(options.components), ['AgentResultCard', 'AgentAnswerContent'])
 assert.ok(!Object.keys(options.methods).some(name => /^(confirm|refreshInventory|continueExploration|viewWorkorder)/.test(name)))
 assert.ok(!Object.keys(options.data()).some(name => /^(confirming|completed.*Ids)/.test(name)))
 for (const match of templateContent.matchAll(/<(agent-[a-z0-9-]+)/g)) {

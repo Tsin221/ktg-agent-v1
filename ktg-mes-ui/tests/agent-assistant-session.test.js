@@ -9,7 +9,7 @@ const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
   visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText,
-  queryCardPresentation, compactResultPresentation, toolProgressText } = moduleRef.exports
+  queryCardPresentation, compactResultPresentation, answerBlocks, toolProgressText } = moduleRef.exports
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'
@@ -113,8 +113,52 @@ assert.deepStrictEqual(historical.results.map(item => item.kind), ['workorder_dr
 assert.strictEqual(historical.queryDetails, undefined)
 assert.strictEqual(historical.resultSelection, undefined)
 const longAnswer = compactResultPresentation([{ role: 'assistant', text: '完整答复'.repeat(100) }])[0]
-assert.ok(longAnswer.hasFullText)
-assert.ok(longAnswer.textPreview.length < longAnswer.text.length)
+assert.strictEqual(longAnswer.hasFullText, false, '无可靠段落不能把任意前120字当作概要')
+const conclusion = '床头阅读灯工单尚不能完结：装配已完成，1件待处置，9件合格品尚未包装。'
+const scope = '**查询范围与时间**：按名称查询，共1张，覆盖完整；查询时间15:05。'
+const evidence = '**生产进度**\n- 已装配10件\n- 合格9件\n- 待处置1件'
+const legacyAnswer = [scope, evidence, '也就是说，' + conclusion, '待处置的具体原因尚未核实。'].join('\n\n')
+const legacyPreview = compactResultPresentation([{ role: 'assistant', text: legacyAnswer }])[0]
+assert.strictEqual(legacyPreview.textPreview, '也就是说，' + conclusion)
+assert.ok(legacyPreview.hasFullText)
+assert.ok(legacyPreview.textDetails.includes(scope))
+assert.ok(legacyPreview.textDetails.includes(evidence))
+assert.ok(legacyPreview.textDetails.includes('待处置的具体原因尚未核实。'))
+assert.ok(!legacyPreview.textDetails.includes(conclusion), '展开区域不重复结论')
+const firstAnswer = ['**结论：** ' + conclusion, scope, evidence].join('\n\n')
+const firstPreview = compactResultPresentation([{ role: 'assistant', text: firstAnswer }])[0]
+assert.strictEqual(firstPreview.textPreview, '结论： ' + conclusion)
+assert.strictEqual(firstPreview.textDetails, [scope, evidence].join('\n\n'))
+assert.ok(firstPreview.hasFullText)
+const noConclusion = compactResultPresentation([{ role: 'assistant', text: [scope, evidence].join('\n\n') }])[0]
+assert.strictEqual(noConclusion.hasFullText, false, '只有范围和数据时直接展示，不冒充结论')
+const longConclusion = '结论：' + '当前数据仍不完整，应核实剩余工单。'.repeat(12)
+const longConclusionPreview = compactResultPresentation([{ role: 'assistant', text: [longConclusion, scope].join('\n\n') }])[0]
+assert.strictEqual(longConclusionPreview.textPreview, longConclusion, '不能截断结论或限制条件')
+const shortAnswer = compactResultPresentation([{ role: 'assistant', text: '共有3个产品。' }])[0]
+assert.strictEqual(shortAnswer.textPreview, '共有3个产品。')
+assert.strictEqual(shortAnswer.hasFullText, false)
+const followUp = '需要我继续查询其他未完工工单吗？'
+const withQuestion = compactResultPresentation([{ role: 'assistant', text: [scope, evidence, '简单说：' + conclusion, followUp].join('\n\n') }])[0]
+assert.strictEqual(withQuestion.textPreview, '简单说：' + conclusion)
+assert.strictEqual(withQuestion.followUp, followUp)
+assert.ok(!withQuestion.textDetails.includes(followUp), '追问必须一直可见且不重复')
+const answerTable = '| 工单 | 状态 | 数量 |\n|---|:---:|---:|\n| 阅读灯 | 已下达 | **10** |\n| 办公灯 | 待装配 | 4 |'
+const comparisonPreview = compactResultPresentation([{ role: 'assistant', text: ['结论：办公灯进度更慢。', answerTable, scope].join('\n\n'), results: [] }])[0]
+assert.strictEqual(comparisonPreview.textTables, answerTable, '没有直接数据卡时，对比表默认可见')
+assert.strictEqual(comparisonPreview.textDetails, scope)
+const withResultCard = compactResultPresentation([{ role: 'assistant', text: ['结论：办公灯进度更慢。', answerTable, scope].join('\n\n'), results: [{ kind: 'workorder_overview' }] }])[0]
+assert.strictEqual(withResultCard.textTables, '', '已有权威数据卡时，避免默认重复展示模型表格')
+assert.ok(withResultCard.textDetails.includes(answerTable))
+assert.deepStrictEqual(answerBlocks(['查询结果', answerTable, '还有1件待处置。'].join('\n\n')), [
+  { type: 'text', text: '查询结果' },
+  { type: 'table', headers: ['工单', '状态', '数量'], rows: [['阅读灯', '已下达', '**10**'], ['办公灯', '待装配', '4']] },
+  { type: 'text', text: '还有1件待处置。' }
+])
+assert.deepStrictEqual(answerBlocks('不要把 A | B 当成表格'), [{ type: 'text', text: '不要把 A | B 当成表格' }])
+assert.deepStrictEqual(answerBlocks('| A | B |\n|---|---|\n| <script>标签</script> | 2 |'), [
+  { type: 'table', headers: ['A', 'B'], rows: [['<script>标签</script>', '2']] }
+])
 
 let progress = { messages: [], tools: {} }
 progress = progressFromEvent(progress, { type: 'message_start', payload: { message_id: 'm1', role: 'assistant' } })

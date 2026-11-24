@@ -98,10 +98,37 @@ export function compactResultPresentation(messages) {
   return messages.map(message => {
     if (message.role !== 'assistant') return message
     const text = message.text || ''
-    const long = text.length > 160 || /\n\s*\|/.test(text)
-    const firstParagraph = (text.trim().split(/\n\s*\n/)[0] || '').replace(/^\s*\|.*$/gm, '').trim() || '查询结果见下方。'
-    const preview = long ? firstParagraph.slice(0, 120) + (firstParagraph.length > 120 ? '…' : '') : text
-    return { ...message, textPreview: preview, hasFullText: long && preview !== text }
+    const paragraphs = text.trim().split(/\r?\n\s*\r?\n/)
+    const plain = paragraph => paragraph.replace(/^\s*#{1,6}\s+/, '').replace(/\*\*([^*]+)\*\*/g, '$1').trim()
+    const explicitlyMarked = paragraphs.findIndex(paragraph => /^(?:核心结论|简要结论|总体结论|结论|综合判断|总结)\s*[:：]/.test(plain(paragraph)))
+    const concludingParagraph = explicitlyMarked >= 0 ? explicitlyMarked : paragraphs.findIndex(paragraph => /^(?:也就是说|简单说|简单来说|总的来说|综上所述|总之)[，、：:]/.test(plain(paragraph)))
+    // Never hide an unstructured answer just because its first paragraph is long or metadata.
+    if (concludingParagraph < 0) return { ...message, textPreview: text, hasFullText: false }
+    const preview = plain(paragraphs[concludingParagraph])
+    const last = paragraphs.length - 1
+    const tail = plain(paragraphs[last])
+    const needsResponse = /[？?]\s*$/.test(tail) || /^(?:追问|请补充|请提供|请确认|需要您确认|需要你确认)[：:，、\s]?/.test(tail)
+    const followUpIndex = last !== concludingParagraph && needsResponse ? last : -1
+    const followUp = followUpIndex >= 0 ? paragraphs[followUpIndex] : ''
+    const remaining = paragraphs.filter((_, index) => index !== concludingParagraph && index !== followUpIndex)
+    const tables = (message.results || []).length ? [] : remaining.filter(paragraph => answerBlocks(paragraph)[0]?.type === 'table')
+    const textTables = tables.join('\n\n')
+    const textDetails = remaining.filter(paragraph => !tables.includes(paragraph)).join('\n\n')
+    return { ...message, textPreview: preview, textDetails, textTables, followUp, hasFullText: Boolean(textDetails) }
+  })
+}
+
+// Only recognize flat Markdown tables with a matching separator and column counts.
+// Everything else remains visible as plain text, including untrusted HTML.
+export function answerBlocks(text) {
+  return (text || '').trim().split(/\r?\n\s*\r?\n/).filter(Boolean).map(paragraph => {
+    const lines = paragraph.split(/\r?\n/)
+    const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
+    if (lines.length < 3 || lines.some(line => !line.includes('|') || line.includes('\\|'))) return { type: 'text', text: paragraph }
+    const [headers, separator, ...rows] = lines.map(cells)
+    if (headers.length < 2 || separator.length !== headers.length || !separator.every(cell => /^:?-{3,}:?$/.test(cell)) ||
+        rows.some(row => row.length !== headers.length)) return { type: 'text', text: paragraph }
+    return { type: 'table', headers, rows }
   })
 }
 
