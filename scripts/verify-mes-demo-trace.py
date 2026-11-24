@@ -128,7 +128,23 @@ async def reference(client: KTGClient) -> dict[str, Any]:
         assert data["workorderCode"] == RETAIL and data["unitState"] == row["unitState"]
         assert any(inp["itemCode"] == CELL and inp["sourceBatchCode"] == RETAIL_CELL_BATCH for inp in data["inputs"])
         assert data["inspections"][-1]["checkResult"] == ("REJECT" if code == REJECTED else "ACCEPT")
-    return {"items": items, "units": units, "batches": batches, "missing_unit": {"snCode": MISSING, "error_code": missing}}
+    # Nonzero scope regression: this HOME batch has four packed units while the full workorder has ten.
+    home_rows = batches[batch_key(CELL, HOME_CELL_BATCH)]["rows"]
+    for row in home_rows:
+        code = row["snCode"]
+        if code not in units:
+            units[code] = await unit_reference(client, code)
+        data = units[code]
+        assert data["workorderCode"] == HOME and data["unitState"] == "PACKED" and data["packing"]
+        assert any(inp["itemCode"] == CELL and inp["sourceBatchCode"] == HOME_CELL_BATCH for inp in data["inputs"])
+        assert [(entry["roundNo"], entry["checkResult"]) for entry in data["inspections"]] == [(1, "ACCEPT")]
+    home_progress = (await client.get(f"/mes/pro/execution/workorders/{units[PACKED]['workorderId']}"))["data"]["progress"]
+    assert home_progress["packed"] == 10 and home_progress["qualified"] == 10
+    scope_truth = {"item_code": CELL, "batch_code": HOME_CELL_BATCH, "workorder_code": HOME,
+                   "sn_codes": [row["snCode"] for row in home_rows], "batch_packed": 4,
+                   "batch_first_inspection_accepted": 4, "workorder_packed": home_progress["packed"]}
+    return {"items": items, "units": units, "batches": batches, "scope_regression_truth": scope_truth,
+            "missing_unit": {"snCode": MISSING, "error_code": missing}}
 
 
 def compare_unit(actual: dict[str, Any], expected: dict[str, Any]) -> None:
@@ -170,12 +186,17 @@ def compare_batch(actual: dict[str, Any], source: dict[str, Any], item_code: str
     }
 
 
-async def natural_conversation(authorization: str) -> dict[str, Any]:
+async def natural_conversation(authorization: str, scope_regression: bool = False) -> dict[str, Any]:
     """One opted-in conversation only. No submission retries or fixed tool calls."""
-    session = request_json(GATEWAY + "/agent-api/v1/sessions", authorization, {"title": "正式演示验收：方向C双向追溯"})
+    title = "正式演示验收：方向C同批范围复验" if scope_regression else "正式演示验收：方向C双向追溯"
+    session = request_json(GATEWAY + "/agent-api/v1/sessions", authorization, {"title": title})
     session_id = session["session_id"]
     print(f"Trace verification session: {session_id}", flush=True)
     prompts = (
+        f"物料 {CELL} 的电芯批次 {HOME_CELL_BATCH} 实际用了哪些产品？",
+        "它们首检怎么样，有没有不合格记录？",
+        "有多少已经包装了？",
+    ) if scope_regression else (
         "床头阅读灯不合格的那件实际用了哪些原料？",
         "用同一批电芯的还有哪些？",
         "它们也都不合格吗？",
@@ -219,13 +240,40 @@ async def natural_conversation(authorization: str) -> dict[str, Any]:
     quality_found = any(any(order.get("workorderCode") == RETAIL and any(unit.get("snCode") == REJECTED and unit.get("latest_result") == "REJECT"
                          for unit in order.get("units", [])) for order in event["result"].get("orders", []))
                         for event in successful if event["tool_name"] == "ktg_query_workorder_quality")
+    business_calls = [event for event in successful if event["tool_name"].startswith("ktg_")]
+    # create_task/update_task only update the local Agent session plan; they do not write MES records.
+    session_writes = [event["tool_name"] for event in successful if event["effect"] == "session_write"]
+    required_evidence: dict[str, Any] = {"unit_found": unit_found, "batch_found": batch_found, "quality_found": quality_found}
+    if scope_regression:
+        expected_sns = {numbered(n) for n in range(1, 5)}
+        first_success = [event for event in outcomes[0]["tool_results"] if event["status"] == "succeeded"] if outcomes else []
+        batch_matches = [batch for event in first_success if event["tool_name"] == TOOL
+                         for batch in event["result"].get("batches", [])
+                         if batch.get("itemCode") == CELL and batch.get("batchCode") == HOME_CELL_BATCH]
+        full_home_batch = any(batch.get("page") == 1 and batch.get("coverage") == "complete"
+                              and batch.get("total_units") == batch.get("returned_units") == 4
+                              and {row.get("snCode") for row in batch.get("rows", [])} == expected_sns
+                              and batch.get("state_counts", {}).get("packed") == 4 for batch in batch_matches)
+        second_success = [event for event in outcomes[1]["tool_results"] if event["status"] == "succeeded"] if len(outcomes) >= 2 else []
+        quality_calls = [event for event in second_success if event["tool_name"] == "ktg_query_workorder_quality"]
+        results_by_sn = {unit.get("snCode"): unit for event in quality_calls for order in event["result"].get("orders", [])
+                         if order.get("workorderCode") == HOME for unit in order.get("units", [])}
+        requested_sns = {sn for event in quality_calls for sn in event["result"].get("filters", {}).get("sn_codes", [])}
+        exact_quality = (requested_sns == set(results_by_sn) == expected_sns and all(
+            row.get("inspection_count") == 1 and row.get("latest_result") == "ACCEPT" and row.get("unitState") == "PACKED"
+            for row in results_by_sn.values()))
+        required_evidence = {"complete_home_batch_found": full_home_batch, "exact_scoped_quality_found": exact_quality,
+                             "expected_scope": {"sn_codes": sorted(expected_sns), "batch_packed": 4, "workorder_packed": 10},
+                             "packing_answer_for_manual_review": outcomes[2]["answer"] if len(outcomes) >= 3 else None}
     return {"session_id": session_id, "turns": outcomes,
             "completed_all": len(outcomes) == len(prompts) and all(row["status"] == "completed" for row in outcomes),
-            "required_tool_evidence": {"unit_found": unit_found, "batch_found": batch_found, "quality_found": quality_found,
-                                       "all_successful_calls_read_only": all(event["effect"] == "read" for event in successful)}}
+            "required_tool_evidence": {**required_evidence,
+                                       "all_successful_business_calls_read_only": bool(business_calls) and all(event["effect"] == "read" for event in business_calls),
+                                       "session_plan_writes": session_writes,
+                                       "other_effects_allowed": all(event["effect"] == "read" or (event["effect"] == "session_write" and event["tool_name"] in {"create_task", "update_task"}) for event in successful)}}
 
 
-async def main_async(via_gateway: bool, reference_only: bool, source_only: bool, model_conversation: bool) -> dict[str, Any]:
+async def main_async(via_gateway: bool, reference_only: bool, source_only: bool, model_conversation: bool, scope_regression: bool = False) -> dict[str, Any]:
     mes_base = GATEWAY + "/prod-api" if via_gateway else DIRECT_MES
     authorization = login(mes_base)
     client = KTGClient(base_url=mes_base, authorization=authorization)
@@ -287,7 +335,7 @@ async def main_async(via_gateway: bool, reference_only: bool, source_only: bool,
         for result in details["batches"]:
             compare_batch(result, facts, result["itemCode"], result["batchCode"], page, size)
     if model_conversation:
-        evidence["natural_conversation"] = await natural_conversation(authorization)
+        evidence["natural_conversation"] = await natural_conversation(authorization, scope_regression)
     return evidence
 
 
@@ -297,11 +345,14 @@ def main() -> None:
     parser.add_argument("--source-only", action="store_true")
     parser.add_argument("--via-gateway", action="store_true")
     parser.add_argument("--model-conversation", action="store_true", help="Explicitly authorized one real five-turn conversation")
+    parser.add_argument("--scope-regression", action="store_true", help="Opt into the three-turn HOME batch scope conversation instead")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.scope_regression and not args.model_conversation:
+        parser.error("--scope-regression requires --model-conversation")
     if args.model_conversation and (args.reference_only or args.source_only or not args.via_gateway):
         parser.error("--model-conversation requires --via-gateway and full tool verification")
-    evidence = asyncio.run(main_async(args.via_gateway, args.reference_only, args.source_only, args.model_conversation))
+    evidence = asyncio.run(main_async(args.via_gateway, args.reference_only, args.source_only, args.model_conversation, args.scope_regression))
     if args.output:
         output = args.output.resolve()
         assert output.parent == RUNTIME.resolve(), "Evidence must stay inside dedicated demo runtime"
