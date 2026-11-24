@@ -53,7 +53,7 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 
 工单用料查询接收 1–5 个准确工单编号，可选批次详情；名称片段先由工单概览定位。草稿比较工单 BOM 总需求与未绑定工单的非虚拟仓账面现存量，仅作原仓备料参考；已下达则使用冻结 BOM 与待装配件数计算剩余需求，对比本工单真实可耗线边库存。不跨工单分配库存，不执行领料或采购。正式数据只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-materials.py`。
 
-工单质量查询接收 1–5 个准确工单编号，可选 1–10 个准确 SN 编码；默认展示当前或历史异常单件及对应检验历史。全单统计与明细范围分开，首检不合格不等于最终不合格，未检不等于失败；未匹配或不完整的历史不得作为全部无异常的依据。只读取真实检验项、实测、阈值及缺陷记录，不推定根因，不提供处置或双向追溯。默认每单核实至多 50 个检验成员，明细超限、版本变化等情况显式标明部分覆盖或待核实。正式库只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-quality.py`。
+工单质量查询接收 1–5 个准确工单编号，可选 1–10 个准确 SN 编码；默认展示当前或历史异常单件及对应检验历史。`summary.firstInspectionCompleted` 与 `firstInspectionAccepted` 分别为全单实际首检完成件数及首检合格件数；历史核实件数 `scanned_units` 包含尚待检但已核实空历史的单件，绝不等于已检数量。首检不合格不等于最终不合格，未检不等于失败；未匹配或不完整的历史不得作为全部无异常的依据。只读取真实检验项、实测、阈值及缺陷记录，不推定根因；MES 不合格处置仅支持返工和报废，但 Agent 不执行处置或双向追溯。默认每单核实至多 50 个检验成员，明细超限、版本变化等情况显式标明部分覆盖或待核实。正式库只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-quality.py`。
 
 `search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录只包含上述五项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
 

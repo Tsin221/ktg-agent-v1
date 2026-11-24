@@ -255,6 +255,15 @@ const noExceptions = text(render({ ...qualityResult, filters: { workorder_codes:
 assert.match(noExceptions, /本次查询范围内未发现已记录的质量异常/)
 assert.match(noExceptions, /检验任务可见历史成员/)
 assert.match(noExceptions, /未检验不代表合格/)
+const waitingOnly = text(render({ ...qualityResult, filters: { workorder_codes: ['WO-LAMP-OFFICE'] }, coverage: 'complete', missing_codes: [],
+  orders: [{ ...qualityOrder, workorderCode: 'WO-LAMP-OFFICE', workorderName: '办公台灯',
+    summary: { ...qualityOrder.summary, waitingAssembly: 6, waitingInspection: 4, pendingDisposition: 0, reworkInProgress: 0,
+      waitingReinspection: 0, scrapped: 0, reinspectionCount: 0, firstInspectionCompleted: 0, firstInspectionAccepted: 0,
+      firstInspectionRejected: 0, qualified: 0 },
+    units: [], scanned_units: 4, total_units: 4, history_coverage: 'complete', missing_sn_codes: [], warnings: [] }] }, 'WorkorderQualityCard.vue')).replace(/\s+/g, ' ')
+assert.match(waitingOnly, /首检完成件数\s+0/)
+assert.match(waitingOnly, /首检合格件数\s+0/)
+assert.match(waitingOnly, /历史核实.*4.*4.*不等于已检验/)
 const noInspectedMembers = text(render({ ...qualityResult, filters: { workorder_codes: ['WO-LAMP-STOCK'] }, coverage: 'complete',
   orders: [{ ...qualityOrder, units: [], scanned_units: 0, total_units: 0, history_coverage: 'complete' }] }, 'WorkorderQualityCard.vue'))
 assert.match(noInspectedMembers, /当前无可见检验任务成员；未检验不代表合格/)

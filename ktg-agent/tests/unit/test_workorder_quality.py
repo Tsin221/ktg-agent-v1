@@ -124,6 +124,43 @@ def test_default_includes_historical_reject_and_current_abnormal_states_not_pend
     assert failed["reason"] == "测量值低于下限" and failed["defectName"] == "电压偏低"
 
 
+def test_verified_empty_history_is_not_a_completed_first_inspection() -> None:
+    mes = Mes()
+    mes.header["quantity"] = 10
+    mes.units = [unit(sn, "WAIT_INSPECTION") for sn in range(1, 5)]
+    mes.history = {sn: [] for sn in range(1, 5)}
+    mes.progress.update({"planned": 10, "allocated": 10, "assembled": 4, "waitingAssembly": 6,
+                         "waitingInspection": 4, "pendingDisposition": 0, "reworkInProgress": 0,
+                         "waitingReinspection": 0, "qualified": 0, "packable": 0, "packed": 0,
+                         "scrapped": 0, "firstInspectionRejected": 0, "reinspectionCount": 0})
+    result = mes.query()
+    order = first(result)
+    summary = cast(JsonObject, order["summary"])
+    assert order["history_coverage"] == "complete" and order["scanned_units"] == 4
+    assert summary["firstInspectionCompleted"] == 0 and summary["firstInspectionAccepted"] == 0
+    assert summary["waitingInspection"] == 4 and summary["qualified"] == 0
+    assert "历史核实件数不等于已检验件数" in result.content
+    assert "尚无首检结果" in result.content
+    assert "只支持返工和报废" in result.content
+
+
+def test_first_inspection_counts_do_not_promote_reinspection_accept_to_first_pass() -> None:
+    order = first(Mes().query(sn_codes=["SN-5"]))
+    summary = cast(JsonObject, order["summary"])
+    assert summary["firstInspectionCompleted"] == 6
+    assert summary["firstInspectionAccepted"] == 1
+    assert summary["firstInspectionRejected"] == 5
+    assert summary["qualified"] == 2 and order["scanned_units"] == 1
+
+
+def test_naive_inspection_time_is_preserved_without_assuming_utc() -> None:
+    result = Mes().query(sn_codes=["SN-2"])
+    row = units(result)[0]
+    inspection_row = cast(list[JsonObject], row["inspections"])[0]
+    assert inspection_row["inspect_date"] == "2026-11-24 12:00:00"
+    assert "检验时间无时区时按MES原样" in result.content
+
+
 def test_exact_requested_sn_can_show_uninspected_or_first_pass_and_missing_is_not_nonexistent() -> None:
     result = Mes().query(sn_codes=["SN-1", "SN-7", "SN-70"])
     assert first(result)["missing_sn_codes"] == ["SN-70"]

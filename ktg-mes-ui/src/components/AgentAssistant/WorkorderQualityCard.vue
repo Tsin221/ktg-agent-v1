@@ -23,7 +23,7 @@
         </dl>
         <p class="quality-card__meta">全单检验历史统计（首检件数与复检次数分别计数）</p>
         <dl class="quality-card__metrics quality-card__metrics--history">
-          <div v-for="metric in historyMetrics" :key="metric[0]">
+          <div v-for="metric in historyMetrics(order.summary)" :key="metric[0]">
             <dt>{{ metric[1] }}</dt><dd>{{ display(order.summary[metric[0]]) }}</dd>
           </div>
         </dl>
@@ -32,7 +32,7 @@
       <p v-else class="quality-card__notice">质量汇总未核实。</p>
 
       <p v-if="order.history_coverage !== 'not_applicable'" class="quality-card__meta">
-        检验历史覆盖：{{ coverageLabel(order.history_coverage) }} · 已核实 {{ display(order.scanned_units) }} / {{ display(order.total_units) }} 件（{{ requestedSNs ? '已匹配指定 SN' : '检验任务可见历史成员' }}）
+        检验历史覆盖：{{ coverageLabel(order.history_coverage) }} · 历史核实：已核实 {{ display(order.scanned_units) }} / {{ display(order.total_units) }} 件（{{ requestedSNs ? '已匹配指定 SN' : '检验任务可见历史成员' }}；不等于已检验）
       </p>
       <p v-if="order.missing_sn_codes && order.missing_sn_codes.length" class="quality-card__notice">未返回 SN：{{ order.missing_sn_codes.join('、') }}（未发现或未核实）</p>
       <div v-if="order.units && order.units.length" class="quality-card__table-wrap" role="region" :aria-label="order.workorderCode + ' 单件质量数据'" tabindex="0">
@@ -106,9 +106,13 @@ export default {
     requestedSNs() { return Boolean(this.result.filters && this.result.filters.sn_codes && this.result.filters.sn_codes.length) },
     progressMetrics() { return [['waitingAssembly', '待装配'], ['waitingInspection', '待检'], ['pendingDisposition', '待处置', true],
       ['reworkInProgress', '返工中', true], ['waitingReinspection', '待复检', true], ['qualified', '当前合格'], ['scrapped', '已报废', true]] },
-    historyMetrics() { return [['firstInspectionRejected', '首检不合格件数'], ['reinspectionCount', '复检次数']] }
   },
   methods: {
+    historyMetrics(summary) {
+      return [ ['firstInspectionCompleted', '首检完成件数'], ['firstInspectionAccepted', '首检合格件数'],
+        ['firstInspectionRejected', '首检不合格件数'], ['reinspectionCount', '复检次数'] ]
+        .filter(metric => summary[metric[0]] != null)
+    },
     statusLabel: workorderStatusLabel,
     display(value) { return value == null ? '未核实' : value },
     unitLabel(value) { return { WAIT_ASSEMBLY: '待装配', WAIT_INSPECTION: '待检', WAIT_DISPOSITION: '待处置', REWORK_IN_PROGRESS: '返工中',

@@ -36,6 +36,7 @@ _ABNORMAL = {"WAIT_DISPOSITION", "REWORK_IN_PROGRESS", "WAIT_REINSPECTION", "SCR
 _SUMMARY_KEYS = ("planned", "allocated", "waitingAssembly", "waitingInspection", "pendingDisposition",
                  "reworkInProgress", "waitingReinspection", "qualified", "scrapped",
                  "firstInspectionRejected", "reinspectionCount")
+_SUMMARY_OUTPUT_KEYS = (*_SUMMARY_KEYS, "firstInspectionCompleted", "firstInspectionAccepted")
 
 
 def _object(properties: JsonObject, required: tuple[str, ...]) -> JsonObject:
@@ -74,7 +75,7 @@ _UNIT = _object({
     "inspections": {"type": "array", "items": _INSPECTION, "maxItems": _MAX_ROUNDS}, "warnings": _STRINGS,
 }, ("snId", "snCode", "unitState", "inspection_count", "first_result", "latest_result", "ever_rejected",
     "history_state", "inspections"))
-_SUMMARY = _object({key: {"type": "integer", "minimum": 0} for key in _SUMMARY_KEYS}, _SUMMARY_KEYS)
+_SUMMARY = _object({key: {"type": "integer", "minimum": 0} for key in _SUMMARY_OUTPUT_KEYS}, _SUMMARY_OUTPUT_KEYS)
 _ORDER_OUTPUT = _object({
     **{key: _STRING for key in ("workorderId", "workorderCode", "workorderName", "status")},
     "summary": {"anyOf": [_SUMMARY, {"type": "null"}]}, "history_coverage": {"enum": ["complete", "partial", "not_applicable"]},
@@ -94,7 +95,9 @@ def build_workorder_quality_tool() -> ToolDefinition:
         description=("按准确工单编码查询全单质量统计与历史异常SN，区分待首检、当前待处置、返工中、"
                      "待复检、已报废及复检后合格。读取实际检验轮次、失败指标、测量与阈值、记录缺陷及备注。"
                      "可选准确SN编码查看指定单件（包括无失败或尚未检验）；仅查询当前账号检验任务范围。"
+                     "首检完成件数由全单统计直接提供；历史核实件数不等于已检验件数。"
                      "默认每工单至多核实50个历史成员，部分覆盖或历史不可用时不声称无异常。"
+                     "MES不合格处置只支持返工和报废，不支持降级放行或让步接收。"
                      "缺陷备注只是检验事实，不证明根因；不查原料追溯、不执行任何业务写入。"),
         input_schema=_INPUT, output_schema=_OUTPUT, required_permissions=PERMISSIONS,
         effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,
@@ -378,7 +381,12 @@ async def _history(client: KTGClient, task: str, unit: JsonObject) -> None:
 async def _read_quality(client: KTGClient, order: JsonObject, identity: tuple[str, str, str, int, Decimal],
                         sn_codes: list[str]) -> None:
     counts, task = await _progress(client, identity)
-    order["summary"] = {key: counts[key] for key in _SUMMARY_KEYS}
+    first_completed = counts["allocated"] - counts["waitingAssembly"] - counts["waitingInspection"]
+    order["summary"] = {**{key: counts[key] for key in _SUMMARY_KEYS},
+                        "firstInspectionCompleted": first_completed,
+                        "firstInspectionAccepted": first_completed - counts["firstInspectionRejected"]}
+    if first_completed == 0:
+        _note(order, f"本工单尚无首检结果，首检实际完成0件；当前{counts['waitingInspection']}件待检、{counts['waitingAssembly']}件待装配，不能称为已经检验或合格。")
     if task is None:
         _note(order, "正常检验任务不可见或无法唯一定位，质量统计为全工单，单件历史待核实。")
         return
@@ -470,7 +478,9 @@ async def _execute(context: ToolContext, arguments: Mapping[str, object]) -> Too
         filters["sn_codes"] = cast(list[JsonValue], sn_codes)
     orders: list[JsonValue] = []
     missing: list[JsonValue] = []
-    warnings: list[JsonValue] = ["缺陷与备注为已记录的质检事实，不能直接确定真实根因。",
+    warnings: list[JsonValue] = ["历史核实件数不等于已检验件数，包含已核实无检验记录的待检单件。",
+                                "当前MES不合格处置只支持返工和报废，不支持降级放行、让步接收或其他放行方式。本工具只读，不执行处置。",
+                                "缺陷与备注为已记录的质检事实，不能直接确定真实根因。",
                                 "统计与明细为多接口读取，不是跨接口一致事务快照。"]
     partial = False
     for code in codes:
@@ -516,4 +526,6 @@ async def _execute(context: ToolContext, arguments: Mapping[str, object]) -> Too
     details: JsonObject = {"kind": "workorder_quality", "filters": filters, "orders": orders, "missing_codes": missing,
                            "coverage": "partial" if partial else "complete", "queried_at": datetime.now(UTC).isoformat(), "warnings": warnings}
     return ToolResult("仅依据已核实的全工单质量统计与单件检验历史；待核实不代表没有异常。"
+                      "首检完成和首检合格件数分别读取 summary.firstInspectionCompleted 和 summary.firstInspectionAccepted；scanned_units、total_units 不是已检件数。"
+                      "inspect_date 检验时间无时区时按MES原样报告，不自行认定UTC或换算；queried_at 是独立查询时点。"
                       + json.dumps(details, ensure_ascii=False, separators=(",", ":")), details=details)

@@ -71,6 +71,8 @@ async def reference(client: KTGClient) -> dict[str, Any]:
                 assert entry["snId"] == unit["snId"] and entry["taskId"] == task_id
             units.append({**unit, "inspections": history})
         fact["units"] = units
+        fact["summary"]["firstInspectionCompleted"] = sum(bool(unit["inspections"]) for unit in units)
+        fact["summary"]["firstInspectionAccepted"] = sum(bool(unit["inspections"]) and unit["inspections"][0]["checkResult"] == "ACCEPT" for unit in units)
         assert len(units) == progress["allocated"] - progress["waitingAssembly"]
         assert sum(bool(unit["inspections"]) and unit["inspections"][0]["checkResult"] == "REJECT" for unit in units) == progress["firstInspectionRejected"]
         assert sum(max(0, len(unit["inspections"]) - 1) for unit in units) == progress["reinspectionCount"]
@@ -78,6 +80,7 @@ async def reference(client: KTGClient) -> dict[str, Any]:
     # to create a convenient rework or scrap case.
     assert result[HOME]["summary"]["qualified"] == 10
     assert result[OFFICE]["summary"]["waitingInspection"] == 4 and not any(unit["inspections"] for unit in result[OFFICE]["units"])
+    assert result[OFFICE]["summary"]["firstInspectionCompleted"] == result[OFFICE]["summary"]["firstInspectionAccepted"] == 0
     assert result[STOCK]["summary"]["waitingAssembly"] == 10 and not result[STOCK]["units"]
     assert result[RETAIL]["summary"]["qualified"] == 9
     assert result[RETAIL]["summary"]["pendingDisposition"] == 1
@@ -142,16 +145,23 @@ def assert_projection(details: dict[str, Any], source: dict[str, Any], codes: li
                 assert measured["reason"] == defect["remark"]
 
 
-async def natural_conversation(authorization: str) -> dict[str, Any]:
+async def natural_conversation(authorization: str, regression: bool = False) -> dict[str, Any]:
     """One opted-in real conversation. No submission retries, fixed tool calls or DB changes."""
-    session = request_json(GATEWAY + "/agent-api/v1/sessions", authorization, {"title": "正式演示验收：质量异常多轮"})
+    title = "正式演示验收：测试会话B回归" if regression else "正式演示验收：质量异常多轮"
+    session = request_json(GATEWAY + "/agent-api/v1/sessions", authorization, {"title": title})
     session_id = session["session_id"]
     print(f"Quality verification session: {session_id}", flush=True)
-    prompts = (("床头阅读灯怎么还没全部合格？", RETAIL),
-               ("具体哪件，哪项不合格，差了多少？", RETAIL),
-               ("办公台灯也有这种问题吗？", OFFICE))
+    prompts = (("现在有哪些工单存在质量问题？", CODES),
+               ("最严重的是哪个？", [RETAIL]),
+               ("具体是哪件产品出问题了？", [RETAIL]),
+               ("差了多少？还能算合格吗？", [RETAIL]),
+               ("那办公台灯有没有同样的问题？", [OFFICE]),
+               ("能确定是原料导致的吗？", [])) if regression else (
+               ("床头阅读灯怎么还没全部合格？", [RETAIL]),
+               ("具体哪件，哪项不合格，差了多少？", [RETAIL]),
+               ("办公台灯也有这种问题吗？", [OFFICE]))
     outcomes: list[dict[str, Any]] = []
-    for prompt, code in prompts:
+    for prompt, codes in prompts:
         run = request_json(GATEWAY + f"/agent-api/v1/sessions/{session_id}/runs", authorization,
                            {"request_id": str(uuid4()), "message": prompt})
         run_id = run["run_id"]
@@ -172,19 +182,21 @@ async def natural_conversation(authorization: str) -> dict[str, Any]:
         end_events = [event["payload"] for event in events if event["type"] == "tool_execution_end"]
         successful = {entry["tool_call_id"] for entry in end_events if entry["status"] == "succeeded"}
         selected = [call for call in calls if call["name"] == TOOL and call["id"] in successful]
-        match = any(call["arguments"].get("workorder_codes") == [code] for call in selected)
+        queried_codes = {code for call in selected for code in call["arguments"].get("workorder_codes", [])}
+        match = set(codes) <= queried_codes and all(entry["effect"] == "read" for entry in end_events if entry["status"] == "succeeded")
         answer = "\n".join(block["text"] for block in assistant[-1]["content"] if block["type"] == "text") if assistant else ""
         outcomes.append({"question": prompt, "run_id": run_id, "status": snapshot["status"],
                          "stop_reason": snapshot["stop_reason"], "model_requests": len(snapshot.get("model_requests", [])),
                          "calls": calls, "tool_results": end_events, "answer": answer,
-                         "expected_workorder_code": code, "object_context_match": match, "event_count": len(events)})
+                         "expected_workorder_codes": codes, "object_context_match": match, "event_count": len(events)})
         if snapshot["status"] != "completed":
             break
     return {"session_id": session_id, "turns": outcomes,
             "object_context_passed": len(outcomes) == len(prompts) and all(turn["status"] == "completed" and turn.get("object_context_match") for turn in outcomes)}
 
 
-async def main_async(via_gateway: bool, reference_only: bool, model_conversation: bool, source_only: bool = False) -> dict[str, Any]:
+async def main_async(via_gateway: bool, reference_only: bool, model_conversation: bool, source_only: bool = False,
+                     regression: bool = False) -> dict[str, Any]:
     mes_base = GATEWAY + "/prod-api" if via_gateway else DIRECT_MES
     agent_base = GATEWAY if via_gateway else DIRECT_AGENT
     authorization = login(mes_base)
@@ -227,7 +239,7 @@ async def main_async(via_gateway: bool, reference_only: bool, model_conversation
         assert_projection(result.details, facts, codes, sn_codes)
         observations.append({"args": args, "details": result.details})
     if model_conversation:
-        evidence["natural_conversation"] = await natural_conversation(authorization)
+        evidence["natural_conversation"] = await natural_conversation(authorization, regression)
     return evidence
 
 
@@ -237,11 +249,14 @@ def main() -> None:
     parser.add_argument("--source-only", action="store_true", help="Verify local Agent source before the service restart")
     parser.add_argument("--via-gateway", action="store_true")
     parser.add_argument("--model-conversation", action="store_true")
+    parser.add_argument("--regression-conversation", action="store_true", help="Repeat the six prompts from user test B once")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.regression_conversation and not args.model_conversation:
+        parser.error("--regression-conversation requires --model-conversation")
     if args.model_conversation and (args.reference_only or args.source_only or not args.via_gateway):
         parser.error("--model-conversation requires --via-gateway and the full tool verification")
-    results = asyncio.run(main_async(args.via_gateway, args.reference_only, args.model_conversation, args.source_only))
+    results = asyncio.run(main_async(args.via_gateway, args.reference_only, args.model_conversation, args.source_only, args.regression_conversation))
     if args.output is not None:
         output = args.output.resolve()
         assert output.parent == RUNTIME.resolve(), "Evidence must stay inside dedicated demo Agent runtime"
