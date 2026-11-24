@@ -672,7 +672,8 @@ export default {
             this.messages = presentMessages(finalItems)
           } else this.followRun(epoch)
         }
-        this.scrollToBottom()
+        if (this.activeRun && !isTerminalRun(this.activeRun.status)) this.scrollToBottom()
+        else this.scrollToLatestAnswer()
       } catch (error) {
         if (epoch === this.epoch) this.panelError = this.errorText(error, '会话读取失败，请重新选择。')
       } finally {
@@ -825,7 +826,8 @@ export default {
                   .map(message => ({ ...message, status: 'incomplete' })) }
               }
             }
-            this.scrollToBottom()
+            if (isTerminalRun(snapshot.run.status)) this.scrollToLatestAnswer()
+            else this.scrollToBottom()
           }
         })
         if (epoch === this.epoch && this.activeRun && !isTerminalRun(this.activeRun.status)) {
@@ -848,6 +850,8 @@ export default {
     },
     openPanel() {
       this.open = true
+      if (this.activeRun && !isTerminalRun(this.activeRun.status)) this.scrollToBottom()
+      else this.scrollToLatestAnswer()
       this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
     },
     closePanel() {
@@ -1084,7 +1088,8 @@ export default {
       } finally {
         if (epoch === this.epoch) {
           this.loading = false
-          this.scrollToBottom()
+          if (this.activeRun && isTerminalRun(this.activeRun.status)) this.scrollToLatestAnswer()
+          else this.scrollToBottom()
           if (this.open && !this.busy) this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
         }
       }
@@ -1093,6 +1098,16 @@ export default {
       this.$nextTick(() => {
         const container = this.$refs.messages
         if (container) container.scrollTop = container.scrollHeight
+      })
+    },
+    scrollToLatestAnswer() {
+      this.$nextTick(() => {
+        const container = this.$refs.messages
+        if (!container) return
+        const entries = container.querySelectorAll('.agent-entry--assistant')
+        const latest = Array.from(entries).reverse().find(entry => entry.querySelector('.agent-answer-content'))
+        if (!latest) { container.scrollTop = container.scrollHeight; return }
+        container.scrollTop += latest.getBoundingClientRect().top - container.getBoundingClientRect().top - 8
       })
     }
   }

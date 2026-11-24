@@ -134,6 +134,15 @@ for (const name of ['canInput', 'canCancel', 'composerBusy', 'displayedMessages'
 }
 Object.defineProperty(view, 'contextStatus', { get: () => options.computed.contextStatus.call(view) })
 assert.strictEqual(view.errorText({ response: { status: 500 } }, '提交状态未确认'), '提交状态未确认')
+const older = { querySelector: () => ({}), getBoundingClientRect: () => ({ top: 40 }) }
+const latest = { querySelector: () => ({}), getBoundingClientRect: () => ({ top: 180 }) }
+const tableOnly = { querySelector: () => null }
+const scrollContainer = { scrollTop: 20, scrollHeight: 900,
+  querySelectorAll: () => [older, latest, tableOnly], getBoundingClientRect: () => ({ top: 100 }) }
+view.$refs.messages = scrollContainer
+view.scrollToLatestAnswer()
+assert.strictEqual(scrollContainer.scrollTop, 92, '打开历史或运行完毕应定位最新答复的开头，而不是表格底部')
+delete view.$refs.messages
 
 async function settle(number, answer) {
   const runId = `run-${number}`

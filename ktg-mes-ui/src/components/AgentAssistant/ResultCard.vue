@@ -33,7 +33,16 @@
         {{ result.coverage === 'complete' && result.total === 0 ? '未找到匹配工单' : '本页未获工单记录' }}
       </p>
       <div v-if="result.rows && result.rows.length" class="result-card__table-wrap" role="region" aria-label="工单及生产进度数据" tabindex="0">
-        <table class="result-card__table">
+        <table v-if="result.rows.length === 1" class="result-card__table result-card__table--single">
+          <thead><tr><th scope="col">工单指标</th><th scope="col">当前结果</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">工单</th><td>{{ result.rows[0].workorderName || result.rows[0].workorderCode }}</td></tr>
+            <tr><th scope="row">状态</th><td>{{ statusLabel(result.rows[0].status) }}<small v-if="result.rows[0].progress_state === 'unavailable'">进度待核实</small></td></tr>
+            <tr><th scope="row">计划量</th><td>{{ result.rows[0].quantity }} {{ result.rows[0].unitOfMeasure || '' }}</td></tr>
+            <tr v-for="metric in overviewMetrics" :key="metric[0]"><th scope="row">{{ metric[1] }}</th><td>{{ result.rows[0].progress_state === 'available' && result.rows[0].progress ? metricValue(result.rows[0].progress, metric[0]) : '—' }}</td></tr>
+          </tbody>
+        </table>
+        <table v-else class="result-card__table">
           <thead><tr><th scope="col">工单</th><th scope="col">状态</th><th scope="col">计划量</th>
             <th v-for="metric in overviewMetrics" :key="metric[0]" scope="col">{{ metric[1] }}</th>
           </tr></thead>
@@ -194,6 +203,8 @@ export default {
 .result-card__table th, .result-card__table td { padding: 8px; border-bottom: 1px solid #dfe4ed; min-width: 64px; vertical-align: top; overflow-wrap: anywhere; }
 .result-card__table thead th { background: #f2f6fc; color: #303133; white-space: nowrap; }
 .result-card__table tbody th { font-weight: 500; min-width: 112px; }
+.result-card__table--single tbody th { min-width: 0; width: 32%; white-space: nowrap; }
+.result-card__table--single th, .result-card__table--single td { padding: 6px 8px; }
 .result-card__table tbody tr:last-child th, .result-card__table tbody tr:last-child td { border-bottom: 0; }
 .result-card__table small { display: block; color: #606266; }
 .result-card__order {
