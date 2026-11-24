@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import asyncio
+from collections.abc import Mapping
 
 import pytest
 
-from ktg_agent.operations.workorders import draft_digest, select_release_configuration, build_draft
+from ktg_agent.operations.workorders import draft_digest, select_release_configuration, build_draft, edit_draft
+from ktg_agent.operations.planner import prepare_steps
+from ktg_agent.ktg.client import KTGClient
 
 
 def test_draft_digest_matches_java_canonical_numeric_and_unicode_contract() -> None:
@@ -50,3 +54,52 @@ def test_ambiguous_workstations_require_explicit_choice() -> None:
         select_release_configuration(source, {})
     selected = select_release_configuration(source, {'workstation_ids': ['99', '22', '23']})
     assert selected['steps'][0]['workstation_id'] == '99'
+
+
+def test_edit_merges_real_draft_fields_and_rejects_uncontrolled_state_changes() -> None:
+    original = {'workorderId': 18, 'version': 2, 'status': 'PREPARE', 'workorderCode': 'WO-18',
+                'workorderName': '客户补库', 'workorderType': 'SELF', 'orderSource': 'ORDER',
+                'sourceCode': 'ORDER-1', 'clientId': 4, 'clientName': '张三', 'quantity': '10.00',
+                'productId': 17, 'requestDate': '2026-11-30', 'remark': '旧备注'}
+    result = edit_draft(original, {'quantity': 15, 'request_date': '2026-12-01'})
+    assert result['quantity'] == 15 and result['requestDate'] == '2026-12-01'
+    assert result['clientId'] == 4 and result['sourceCode'] == 'ORDER-1'
+    assert result['remark'] == '旧备注' and 'status' not in result and 'version' not in result
+    assert original['quantity'] == '10.00'
+    with pytest.raises(ValueError, match='修改字段'):
+        edit_draft(original, {'status': 'CONFIRMED'})
+
+
+def test_prepare_multi_step_uses_resolved_future_order_and_does_not_write() -> None:
+    calls: list[str] = []
+
+    async def read(url: str, headers: Mapping[str, str], params: Mapping[str, object], timeout: float) -> object:
+        calls.append(url)
+        if url.endswith('/getInfo'):
+            return {'code': 200, 'user': {'userId': 1}, 'permissions': ['*:*:*']}
+        if url.endswith('/mes/md/mditem/list'):
+            return {'code': 200, 'total': 1, 'rows': [{'itemId': 17, 'itemCode': 'LAMP', 'itemName': '台灯',
+                    'unitOfMeasure': 'PCS', 'itemOrProduct': 'PRODUCT', 'enableFlag': 'Y'}]}
+        if url.endswith('/products/17/release-options'):
+            return {'code': 200, 'data': config()}
+        raise AssertionError(url)
+
+    async def write(method: str, url: str, headers: Mapping[str, str], body: Mapping[str, object], timeout: float) -> dict[str, object]:
+        raise AssertionError('preparing a plan cannot write')
+
+    client = KTGClient(base_url='http://localhost:8080', authorization='Bearer test', transport=read, write_transport=write)
+    result = asyncio.run(prepare_steps(client, {'userId': 1}, [
+        {'action': 'create_draft', 'step_id': 'create', 'product_code': 'LAMP', 'quantity': 50,
+         'request_date': '2026-11-30', 'workorder_code': 'WO-LAMP'},
+        {'action': 'edit_draft', 'step_id': 'edit', 'target': {'from_step': 'create'}, 'changes': {'quantity': 40}},
+        {'action': 'check_materials', 'step_id': 'check', 'targets': [{'from_step': 'edit'}]},
+        {'action': 'release', 'step_id': 'release', 'target': {'from_step': 'edit'},
+         'condition': 'warehouse_reference_sufficient', 'depends_on': ['check']},
+    ]))
+    assert result[1]['target']['expected_version'] == 0
+    assert result[1]['depends_on'] == ['create']
+    assert result[2]['depends_on'] == ['edit']
+    assert result[3]['target']['quantity'] == 40 and result[3]['target']['expected_version'] == 1
+    assert result[3]['depends_on'] == ['check', 'edit']
+    assert result[3]['selection']['route_id'] == '6'
+    assert all('autocode' not in call for call in calls)

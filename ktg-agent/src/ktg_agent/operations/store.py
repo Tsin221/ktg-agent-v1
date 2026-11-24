@@ -96,6 +96,9 @@ class OperationPlanStore:
         plan_id, now = str(uuid4()), self._now()
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE agent_operation_plans SET status='superseded',updated_at=? "
+                       "WHERE session_id=? AND owner_user_id=? AND status='pending'", (now, run.session_id, owner))
             db.execute("INSERT INTO agent_operation_plans VALUES(?,?,?,?,?,?,?,'pending',?,?,?)",
                        (plan_id, run.session_id, run_id, owner, digest, steps_json,
                         _safe_json({"results": results}), now, expires, now))
@@ -148,7 +151,7 @@ class OperationPlanStore:
         with self._connect() as db:
             row = self._row(db, owner, session_id, plan_id)
             prior = self._from_row(row)
-            if row["status"] not in {"executing", "needs_reconciliation"}:
+            if row["status"] not in {"executing", "reconciling"}:
                 raise ValueError("operation-plan is not executing")
             if [r["operation_id"] for r in results] != [r["operation_id"] for r in prior["results"]]:
                 raise ValueError("operation IDs are immutable")
@@ -156,11 +159,21 @@ class OperationPlanStore:
                        (status, _safe_json({"results": results}), self._now(), plan_id))
             return self._from_row(self._row(db, owner, session_id, plan_id))
 
+    def claim_reconciliation(self, owner: str, session_id: str, plan_id: str) -> tuple[Plan, bool]:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._row(db, owner, session_id, plan_id)
+            if row["status"] != "needs_reconciliation":
+                return self._from_row(row), False
+            db.execute("UPDATE agent_operation_plans SET status='reconciling',updated_at=? WHERE plan_id=?",
+                       (self._now(), plan_id))
+            return self._from_row(self._row(db, owner, session_id, plan_id)), True
+
     def recover_interrupted(self) -> int:
         """Startup recovery cannot infer whether an outstanding remote request committed."""
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = db.execute("SELECT * FROM agent_operation_plans WHERE status='executing'").fetchall()
+            rows = db.execute("SELECT * FROM agent_operation_plans WHERE status IN ('executing','reconciling')").fetchall()
             for row in rows:
                 results: list[Step] = self._from_row(row)["results"]
                 for result in results:

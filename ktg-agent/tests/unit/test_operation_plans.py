@@ -69,3 +69,13 @@ def test_cancel_before_confirmation_prevents_execution(tmp_path: Path) -> None:
     assert cancelled["status"] == "cancelled"
     _, won = store.claim("id:1", session.id, plan["plan_id"], plan["digest"])
     assert not won
+
+
+def test_new_proposal_supersedes_previous_unconfirmed_same_session(tmp_path: Path) -> None:
+    repository, store, session, run = setup_store(tmp_path)
+    earlier = store.create("id:1", run.id, [{"action": "create_draft", "quantity": 10}])
+    later = store.create("id:1", run.id, [{"action": "create_draft", "quantity": 12}])
+    assert store.get("id:1", session.id, earlier["plan_id"])["status"] == "superseded"
+    assert store.get("id:1", session.id, later["plan_id"])["status"] == "pending"
+    repository.settle_run("id:1", run.id, "completed", "completed", {}, ())
+    assert not store.claim("id:1", session.id, earlier["plan_id"], earlier["digest"])[1]

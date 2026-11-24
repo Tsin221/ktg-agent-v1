@@ -107,6 +107,37 @@ def build_draft(action: Mapping[str, object], product: Mapping[str, object], *, 
     return draft
 
 
+def edit_draft(original: Mapping[str, object], changes: Mapping[str, object], *,
+               product: Mapping[str, object] | None = None) -> Step:
+    if original.get("status") != "PREPARE":
+        raise ValueError("仅允许修改草稿工单。")
+    if not changes or set(changes) - {"name", "quantity", "request_date", "product_code", "remark", "batch_code"}:
+        raise ValueError("修改字段无效；仅支持草稿名称、数量、需求日期、产品、备注和批次。")
+    result: Step = {field: value for field in DRAFT_FIELDS
+                    if (value := original.get(field)) is not None}
+    for field in INTEGER_FIELDS & result.keys():
+        result[field] = as_id(result[field], allow_zero=field in {"parentId", "clientId"})
+    result["quantity"] = as_quantity(result.get("quantity"))
+    original_date = result.get("requestDate")
+    if isinstance(original_date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T].*)?", original_date):
+        original_date = original_date[:10]
+    result["requestDate"] = as_date(original_date)
+    for field, limit in (("workorderCode", 64), ("workorderName", 255), ("workorderType", 64), ("orderSource", 64)):
+        as_text(result.get(field), field, limit)
+    if "quantity" in changes:
+        result["quantity"] = as_quantity(changes["quantity"])
+    if "request_date" in changes:
+        result["requestDate"] = as_date(changes["request_date"])
+    if "product_code" in changes:
+        if product is None or product.get("itemCode") != changes["product_code"]:
+            raise ValueError("修改的产品尚未核实。")
+        result["productId"] = as_id(product.get("itemId"))
+    for key, field, limit in (("name", "workorderName", 255), ("remark", "remark", 500), ("batch_code", "batchCode", 64)):
+        if key in changes:
+            result[field] = as_text(changes[key], field, limit, empty=(key != "name"))
+    return result
+
+
 def _rows(value: object, label: str) -> list[Step]:
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
         raise ValueError(f"MES未返回有效的{label}。")
