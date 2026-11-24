@@ -15,8 +15,6 @@ const sent = []
 let failNextRun = false
 let handlers
 let pointer = null
-let resolveWorkorder
-let resolveInventory
 let inputFailure = null
 let runFailure = null
 let taskVersions = [1]
@@ -82,9 +80,7 @@ const api = {
     { message_id: 2, run_id: 'run-1', role: 'tool', details: { kind: 'stock', rows: [], total: 0 }, content: [] },
     { message_id: 3, run_id: 'run-1', role: 'assistant', content: [{ type: 'text', text: '第一轮回答' }] }
   ], next_cursor: null }),
-  getAgentRun: async runId => ({ run_id: runId, status: 'cancelling' }),
-  confirmWorkorderDraft: async () => new Promise(resolve => { resolveWorkorder = resolve }),
-  confirmInventoryOperation: async () => new Promise(resolve => { resolveInventory = resolve })
+  getAgentRun: async runId => ({ run_id: runId, status: 'cancelling' })
 }
 const componentPath = path.resolve(__dirname, '../src/components/AgentAssistant/index.vue')
 const script = compiler.parseComponent(fs.readFileSync(componentPath, 'utf8')).script.content
@@ -94,7 +90,6 @@ const componentModule = { exports: {} }
 const mockRequire = name => {
   if (name === '@/api/agent') return api
   if (name === './sessionPresentation') return presentationModule.exports
-  if (name === './workorderPresentation') return { isWorkorderAssistantResult: () => false }
   if (name.endsWith('.vue')) return {}
   if (name.includes('@babel/runtime/')) return require(name)
   if (name.startsWith('core-js/')) return require(name)
@@ -115,6 +110,10 @@ global.window = { innerWidth: 1200, innerHeight: 900,
 new Function('exports', 'module', 'require', code)(componentModule.exports, componentModule, mockRequire)
 const options = componentModule.exports.default
 const templateContent = compiler.parseComponent(fs.readFileSync(componentPath, 'utf8')).template.content
+assert.deepStrictEqual(compiler.compile(templateContent).errors, [])
+assert.deepStrictEqual(Object.keys(options.components), ['AgentResultCard'])
+assert.ok(!Object.keys(options.methods).some(name => /^(confirm|refreshInventory|continueExploration|viewWorkorder)/.test(name)))
+assert.ok(!Object.keys(options.data()).some(name => /^(confirming|completed.*Ids)/.test(name)))
 for (const match of templateContent.matchAll(/<(agent-[a-z0-9-]+)/g)) {
   const tag = match[1]
   const camel = tag.replace(/-([a-z0-9])/g, (_, char) => char.toUpperCase())
@@ -219,17 +218,11 @@ async function main() {
   view.saveLocalState()
   handlers.onSnapshot({ run: { run_id: 'run-1', status: 'running' }, messages: { items: [] }, inputs: [] })
   assert.strictEqual(view.displayedMessages[0].text, '工单确认成功')
-  const workorderConfirmation = view.confirmPreview('preview-1')
-  const inventoryConfirmation = view.confirmInventory('inventory-1')
   handlers.onSnapshot({ run: { run_id: 'run-1', status: 'cancelled' }, messages: { items: [] }, inputs: [] })
   assert.strictEqual(view.progress.messages[0].status, 'incomplete')
-  assert.strictEqual(view.confirmingPreviewId, 'preview-1')
-  assert.strictEqual(view.confirmingInventoryId, 'inventory-1')
-  resolveWorkorder({ result: { kind: 'workorder_draft_result', outcome: 'failed', label: '工单失败' } })
-  resolveInventory({ result: { kind: 'inventory_result', operation_id: 'inventory-1', outcome: 'failed', label: '库存失败' } })
-  await Promise.all([workorderConfirmation, inventoryConfirmation])
-  assert.ok(view.displayedMessages.some(item => item.text === '工单失败'))
-  assert.ok(view.displayedMessages.some(item => item.results && item.results.some(result => result.label === '库存失败')))
+  assert.ok(view.displayedMessages.some(item => item.text === '工单确认成功'))
+  assert.strictEqual(view.confirmPreview, undefined)
+  assert.strictEqual(view.confirmInventory, undefined)
   view.activeRun.status = 'running'
   handlers.onConnectionError(new Error('offline'))
   assert.strictEqual(view.streamError, true)

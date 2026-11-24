@@ -23,6 +23,9 @@ const apiRequire = name => {
   throw new Error('unexpected import: ' + name)
 }
 assert.doesNotThrow(() => new Function('exports', 'module', 'require', apiCode)(apiModule.exports, apiModule, apiRequire))
+assert.ok(apiModule.exports.agentSession)
+assert.ok(!Object.keys(apiModule.exports).some(name => /confirm|ExplorationView|InventoryOperation/.test(name)),
+  'The assistant must not expose retired business confirmation or exploration APIs')
 
 function stream(chunks) {
   return new ReadableStream({

@@ -7,12 +7,6 @@ const sessionUrl = '/agent-api/v1/sessions'
 const runUrl = '/agent-api/v1/runs'
 const id = value => encodeURIComponent(value)
 
-export const getAgentExplorationView = (sessionId, tool, args) => request({
-  baseURL: '', url: '/agent-api/v1/exploration/view', method: 'post',
-  data: { session_id: sessionId, tool, arguments: args },
-  timeout: 30000, headers: { repeatSubmit: false }
-})
-
 export const createAgentSession = title => request({
   baseURL: '', url: sessionUrl, method: 'post', data: title ? { title } : {},
   headers: { repeatSubmit: false }
@@ -93,101 +87,5 @@ export function queryAgent(message) {
     data: { message },
     timeout: 120000,
     headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmWorkorderDraft(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/workorder-drafts/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmInventoryOperation(operationId) {
-  return request({
-    baseURL: '', url: '/agent-api/v1/inventory-operations/confirm', method: 'post',
-    data: { operation_id: operationId }, timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmDvMachineryType(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/dv-machinerytype/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmDvMachinery(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/dv-machinery/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmDvSubject(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/dv-subject/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmTmToolType(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/tm-tooltype/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmTmTool(previewId) {
-  return request({
-    baseURL: '',
-    url: '/agent-api/v1/tm-tool/confirm',
-    method: 'post',
-    data: { preview_id: previewId },
-    timeout: 120000,
-    headers: { repeatSubmit: false }
-  })
-}
-
-export function getInventoryOperation(operationId) {
-  return request({
-    baseURL: '', url: '/agent-api/v1/inventory-operations/' + encodeURIComponent(operationId),
-    method: 'get', timeout: 30000
-  })
-}
-
-
-export function confirmDvCheckPlan(previewId) {
-  return request({
-    baseURL: '', url: '/agent-api/v1/dv-checkplan/confirm', method: 'post',
-    data: { preview_id: previewId }, timeout: 120000, headers: { repeatSubmit: false }
-  })
-}
-
-export function confirmDvRepair(previewId) {
-  return request({
-    baseURL: '', url: '/agent-api/v1/dv-repair/confirm', method: 'post',
-    data: { preview_id: previewId }, timeout: 120000, headers: { repeatSubmit: false }
   })
 }

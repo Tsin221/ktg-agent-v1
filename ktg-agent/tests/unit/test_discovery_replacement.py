@@ -4,9 +4,7 @@ import asyncio
 from typing import cast
 
 from ktg_agent.core.messages import ToolCall
-from ktg_agent.ktg.dv_repair import build_dv_repair_tools
 from ktg_agent.ktg.queries import build_query_tools
-from ktg_agent.ktg.workorders import PreviewStore, build_workorder_tools
 from ktg_agent.tools.catalog import CatalogIdentity, CatalogSwitches, ToolCatalog
 from ktg_agent.tools.discovery import RunToolDiscovery
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
@@ -18,7 +16,7 @@ from ktg_agent.tools.runner import CallAuthorization, ToolRunner
 def setup_discovery(*, maximum: int = 1) -> tuple[
     RunToolDiscovery, ToolRegistry, list[frozenset[str]], ToolCatalog,
 ]:
-    definitions = (*build_query_tools(), *build_workorder_tools(PreviewStore()))
+    definitions = build_query_tools()
     catalog = build_legacy_catalog(definitions)
     switches = CatalogSwitches({"md": True, "wm": True, "pro": True},
                               {definition.name: True for definition in definitions})
@@ -43,7 +41,7 @@ async def load(discovery: RunToolDiscovery, *names: str, mode: str = "add") -> T
 def test_replace_clears_and_reloads_without_mutating_prior_snapshots() -> None:
     async def scenario() -> None:
         discovery, registry, _, _ = setup_discovery()
-        count, search = "ktg_count_products", "ktg_search_items"
+        count, search = "ktg_count_products", "ktg_query_stock_summary"
         assert (await load(discovery, count)).error_code is None
         old = discovery.begin_request("old")
         registered = registry.get(count)
@@ -67,7 +65,7 @@ def test_replace_clears_and_reloads_without_mutating_prior_snapshots() -> None:
 def test_failed_replacement_and_revoked_retained_tool_are_atomic() -> None:
     async def scenario() -> None:
         discovery, _, permissions, _ = setup_discovery(maximum=2)
-        count, stock = "ktg_count_products", "ktg_query_stock"
+        count, stock = "ktg_count_products", "ktg_query_stock_summary"
         assert (await load(discovery, count)).error_code is None
         before = discovery.begin_request("before").names
         for names, expected in [((stock, "missing"), "TOOL_NOT_FOUND"),
@@ -131,11 +129,11 @@ def test_search_pages_have_stable_total_next_offset_and_fallback_semantics() -> 
         offset = 0
         while True:
             result = await discovery.execute(ToolCall("search", "search_tools", {
-                "query": "", "limit": 2, "offset": offset,
+                "query": "", "limit": 1, "offset": offset,
             }))
             assert result.error_code is None
             details = result.details
-            assert details is not None and details["total"] == 7
+            assert details is not None and details["total"] == 2
             names.extend(str(item["name"]) for item in cast(list[dict[str, object]], details["items"]))
             next_offset = details["next_offset"]
             if next_offset is None:
@@ -143,40 +141,28 @@ def test_search_pages_have_stable_total_next_offset_and_fallback_semantics() -> 
                 break
             assert isinstance(next_offset, int) and next_offset > offset
             offset = next_offset
-        assert len(names) == len(set(names)) == 7
+        assert len(names) == len(set(names)) == 2
         empty = await discovery.execute(ToolCall("empty", "search_tools", {"query": "", "offset": 100}))
         assert empty.details is not None and empty.details["items"] == []
-        assert empty.details["total"] == 7 and empty.details["next_offset"] is None
+        assert empty.details["total"] == 2 and empty.details["next_offset"] is None
         assert "No available tool" not in empty.content
         fallback = await discovery.execute(ToolCall("fallback", "search_tools", {
-            "query": "火星气候", "limit": 2, "offset": 2,
+            "query": "火星气候", "limit": 1, "offset": 1,
         }))
         assert fallback.details is not None
         assert fallback.details["match_type"] == "available_alternatives"
-        assert fallback.details["total"] == 7 and "not evidence" in fallback.content
+        assert fallback.details["total"] == 2 and "not evidence" in fallback.content
 
     asyncio.run(scenario())
 
 
-def test_colloquial_capability_synonyms_find_repair_tools_not_business_records() -> None:
+def test_colloquial_capability_synonyms_find_stock_not_business_records() -> None:
     async def scenario() -> None:
-        from ktg_agent.ktg.dv_repair import dv_repair_factories, dv_repair_manifests
-
-        definitions = build_dv_repair_tools()
-        catalog = build_legacy_catalog(definitions, extra_manifests=dv_repair_manifests(),
-                                       extra_factories=dv_repair_factories())
-        switches = CatalogSwitches({"dv": True}, {tool.name: True for tool in definitions})
-        permissions = frozenset({"*:*:*"})
-
-        async def access() -> tuple[frozenset[str], CatalogSwitches]:
-            return permissions, switches
-
-        discovery = RunToolDiscovery(catalog, catalog.candidate_snapshot(
-            CatalogIdentity(permissions, "synonyms"), switches), ToolRegistry(), access)
-        for query in ("修理", "机器坏了", "检修"):
+        discovery, _, _, _ = setup_discovery()
+        for query in ("存量", "仓储", "inventory"):
             result = await discovery.execute(ToolCall("search", "search_tools", {"query": query}))
             assert result.details is not None and result.details["match_type"] == "matched"
-            assert "ktg_dv_repair_list" in {
+            assert "ktg_query_stock_summary" in {
                 item["name"] for item in cast(list[dict[str, object]], result.details["items"])
             }
 

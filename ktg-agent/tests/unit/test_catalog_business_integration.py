@@ -1,123 +1,97 @@
-"""Regression coverage for standalone imports and existing MES definitions."""
+"""Regression coverage for imports and the retained MES read-only definitions."""
 
 import subprocess
 import sys
 from dataclasses import replace
-from pathlib import Path
+from http import HTTPStatus
+from unittest.mock import Mock, patch
 
-from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore, build_inventory_tools
+import pytest
+
 from ktg_agent.ktg.queries import build_query_tools
-from ktg_agent.ktg.workorders import PreviewStore, build_workorder_tools
-from ktg_agent.tools import RetryPolicy
+from ktg_agent.tools import RetryPolicy, ToolEffect
 from ktg_agent.tools import CatalogIdentity, CatalogSwitches
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
-from ktg_agent.server import Settings, create_service
-from ktg_agent.tools.permissions import PermissionAll, PermissionLeaf
+from ktg_agent.server import AgentRequestHandler, Settings, create_service
+from ktg_agent.tools.permissions import PermissionLeaf
+from ktg_agent.tools.registry import ToolDefinitionError
+
+RETAINED = {"ktg_count_products", "ktg_query_stock_summary"}
 
 
 def test_tools_import_in_fresh_process() -> None:
     result = subprocess.run(
-        [sys.executable, "-c", "import ktg_agent.tools; from ktg_agent.core import Agent, InputQueue"],
+        [sys.executable, "-B", "-c", "import ktg_agent.tools; from ktg_agent.core import Agent, InputQueue"],
         capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
 
 
-def test_existing_definitions_have_permissions_and_nonretryable_previews(tmp_path: Path) -> None:
-    definitions = (
-        *build_query_tools(), *build_workorder_tools(PreviewStore()),
-        *build_inventory_tools(InventoryStore(str(tmp_path / "inventory.db")), frozenset({RECEIPT, ISSUE})),
-    )
-    assert len(definitions) == 13
+def test_retained_definitions_are_reads_with_permissions() -> None:
+    definitions = build_query_tools()
+    assert {definition.name for definition in definitions} == RETAINED
     for definition in definitions:
         assert definition.required_permissions, definition.name
-        if definition.name.startswith("ktg_preview_"):
-            assert definition.retry_policy is RetryPolicy.NEVER, definition.name
+        assert definition.effect is ToolEffect.READ
+        assert definition.retry_policy is RetryPolicy.BOUNDED_READ
 
 
-def test_business_catalog_resolves_and_filters_existing_tools(tmp_path: Path) -> None:
-    definitions = (
-        *build_query_tools(), *build_workorder_tools(PreviewStore()),
-        *build_inventory_tools(InventoryStore(str(tmp_path / "inventory.db")), frozenset({RECEIPT, ISSUE})),
-    )
+def test_business_catalog_resolves_and_filters_retained_tools() -> None:
+    definitions = build_query_tools()
     catalog = build_legacy_catalog(definitions)
-    switches = CatalogSwitches(
-        {"md": True, "pro": True, "wm": True},
-        {definition.name: True for definition in definitions},
-    )
+    switches = CatalogSwitches({"md": True, "wm": True}, {item.name: True for item in definitions})
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert len(catalog.candidate_snapshot(admin, switches).candidates) == 9
+    assert set(catalog.candidate_snapshot(admin, switches).candidates) == RETAINED
     for definition in definitions:
         assert catalog.resolve_definition(definition.name, definition.version) is definition
-        if not definition.expose_to_model:
-            assert definition.name not in catalog.candidate_snapshot(admin, switches).candidates
-        if not definition.name.startswith("ktg_preview_"):
-            for missing in definition.required_permissions:
-                identity = CatalogIdentity(frozenset(set(definition.required_permissions) - {missing}), "run")
-                assert definition.name not in catalog.candidate_snapshot(identity, switches).candidates
-    create = catalog.manifest("ktg_preview_create_workorder_draft")
-    assert isinstance(create.permission_policy, PermissionAll)
-    assert {item.permission for item in create.permission_policy.all_of
-            if isinstance(item, PermissionLeaf)} == {
-                "mes:pro:workorder:add", "mes:md:mditem:list"}
-    edit = catalog.manifest("ktg_preview_edit_workorder_draft")
-    assert isinstance(edit.permission_policy, PermissionAll)
-    assert {item.permission for item in edit.permission_policy.all_of
-            if isinstance(item, PermissionLeaf)} == {
-                "mes:pro:workorder:edit", "mes:pro:workorder:query", "mes:md:mditem:list"}
-    receipt_user = CatalogIdentity(frozenset({
-        "mes:wm:itemrecpt:query", "mes:wm:wmstock:list",
-    }), "run")
-    receipt_candidates = catalog.candidate_snapshot(receipt_user, switches).candidates
-    assert "ktg_preview_item_receipt" in receipt_candidates
-    assert "ktg_execute_item_receipt" not in receipt_candidates
-    no_stock_read = CatalogIdentity(frozenset({"mes:wm:itemrecpt:query"}), "run")
-    assert "ktg_preview_item_receipt" not in catalog.candidate_snapshot(no_stock_read, switches).candidates
+        policy = catalog.manifest(definition.name).permission_policy
+        assert isinstance(policy, PermissionLeaf)
+        assert policy.permission == definition.required_permissions[0]
+        identity = CatalogIdentity(frozenset({policy.permission}), "run")
+        assert set(catalog.candidate_snapshot(identity, switches).candidates) == {definition.name}
     assert not catalog.candidate_snapshot(admin, CatalogSwitches({}, {})).candidates
     assert not catalog.candidate_snapshot(CatalogIdentity(None, "run"), switches).candidates
 
 
-def test_disabled_inventory_is_not_added_by_adapter() -> None:
-    definitions = (*build_query_tools(), *build_workorder_tools(PreviewStore()))
-    catalog = build_legacy_catalog(definitions)
-    assert catalog.manifest("ktg_preview_create_workorder_draft").proposal_store_effect
-    import pytest
-    with pytest.raises(KeyError):
-        catalog.manifest("ktg_preview_item_receipt")
+def test_retired_definition_cannot_register_in_business_catalog() -> None:
+    definition = replace(build_query_tools()[0], name="retired_business_tool")
+    with pytest.raises(ToolDefinitionError, match="unreviewed"):
+        build_legacy_catalog((definition,))
 
 
-def test_service_assembles_complete_candidate_set_and_keeps_experiment_off(tmp_path: Path) -> None:
+def test_service_assembles_exact_read_only_candidate_set() -> None:
     settings = Settings(
         model_api_key="test", model_base_url="https://example.test/v1",
-        model_id="test-model", ktg_base_url="http://127.0.0.1:8080",
-        inventory_db_path=str(tmp_path / "inventory.sqlite3"),
-        workorder_db_path=str(tmp_path / "workorders.sqlite3"),
-        enable_item_receipt=True, enable_production_issue=True,
-    )
+        model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
-    catalog = service._catalog
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    candidates = catalog.candidate_snapshot(admin, service._switches_provider())
-    assert len(service.model_tool_schemas) == 2  # search_tools and load_tools
-    for name, manifest in catalog._manifests.items():
-        assert catalog.resolve_definition(name, manifest.version).name == name
-    assert "ktg_wm_operation_result" in candidates.candidates
-    assert {"ktg_dv_machinerytype_tree", "ktg_dv_machinerytype_detail"} <= set(candidates.candidates)
-    assert {"ktg_dv_machinery_list", "ktg_dv_machinery_detail",
-            "ktg_md_machinery_workshop_options"} <= set(candidates.candidates)
-    assert {"ktg_dv_checkplan_list", "ktg_dv_checkplan_detail", "ktg_dv_checkplan_options",
-            "ktg_dv_checkplan_links", "ktg_dv_checkplan_machinery_candidates",
-            "ktg_dv_checkplan_subject_candidates"} <= set(candidates.candidates)
-    assert {"ktg_dv_repair_list", "ktg_dv_repair_detail", "ktg_dv_repair_lines",
-            "ktg_dv_repair_options", "ktg_dv_repair_machinery_candidates",
-            "ktg_dv_repair_subject_candidates"} <= set(candidates.candidates)
-    assert {"ktg_tm_tool_list", "ktg_tm_tool_detail", "ktg_tm_tool_options"} <= set(candidates.candidates)
-    assert "ktg_pro_workorder_progress" not in candidates.candidates
-    assert all(name not in candidates.candidates for name in (
-        "ktg_create_workorder_draft", "ktg_edit_workorder_draft",
-        "ktg_execute_item_receipt", "ktg_execute_production_issue"))
+    assert set(service._catalog._manifests) == RETAINED
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED
+    assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
 
-    progress_settings = replace(settings, enable_workorder_progress=True)
-    enabled = create_service(progress_settings)
-    assert "ktg_pro_workorder_progress" in enabled._catalog.candidate_snapshot(
-        admin, enabled._switches_provider()).candidates
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("GET", "/agent-api/v1/inventory-operations/retired-id"),
+    ("POST", "/agent-api/v1/exploration/view"),
+    ("POST", "/agent-api/v1/workorder-drafts/confirm"),
+    ("POST", "/agent-api/v1/inventory-operations/confirm"),
+    ("POST", "/agent-api/v1/dv-machinerytype/confirm"),
+    ("POST", "/agent-api/v1/dv-machinery/confirm"),
+    ("POST", "/agent-api/v1/dv-subject/confirm"),
+    ("POST", "/agent-api/v1/dv-checkplan/confirm"),
+    ("POST", "/agent-api/v1/dv-repair/confirm"),
+    ("POST", "/agent-api/v1/tm-tooltype/confirm"),
+    ("POST", "/agent-api/v1/tm-tool/confirm"),
+])
+def test_retired_business_http_routes_are_not_found(method: str, path: str) -> None:
+    # The handler must reject removed routes before opening the query service,
+    # creating an event loop, or reading the request body.
+    handler = object.__new__(AgentRequestHandler)
+    handler.path = path
+    write_json = Mock()
+    with patch.object(handler, "_write_json", write_json):
+        if method == "GET":
+            handler.do_GET()
+        else:
+            handler.do_POST()
+    write_json.assert_called_once_with(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})

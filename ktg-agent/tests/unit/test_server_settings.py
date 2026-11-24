@@ -77,101 +77,30 @@ def test_invalid_token_limit_configuration_fails(
         Settings.from_env()
 
 
-def test_session_database_uses_separate_absolute_path(
+def test_session_database_uses_absolute_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     _set_valid_environment(monkeypatch)
     session_path = tmp_path / "sessions.sqlite3"
     monkeypatch.setenv("AGENT_SESSION_DB", str(session_path))
-    monkeypatch.setenv("AGENT_INVENTORY_DB", str(tmp_path / "inventory.sqlite3"))
-    settings = Settings.from_env()
-    assert create_session_repository(settings).path == session_path
+    assert create_session_repository(Settings.from_env()).path == session_path
     assert session_path.exists()
-
-    monkeypatch.setenv("AGENT_INVENTORY_DB", str(session_path))
-    with pytest.raises(RuntimeError, match="must differ"):
-        create_session_repository(Settings.from_env())
-
     monkeypatch.setenv("AGENT_SESSION_DB", "relative.sqlite3")
     with pytest.raises(RuntimeError, match="absolute"):
         create_session_repository(Settings.from_env())
 
 
-def test_workorder_proposal_database_defaults_beside_session_database(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
+def test_retired_configuration_cannot_restore_business_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ktg_agent.tools.catalog import CatalogIdentity
+
     _set_valid_environment(monkeypatch)
-    session_path = tmp_path / "sessions.sqlite3"
-    monkeypatch.setenv("AGENT_SESSION_DB", str(session_path))
-    monkeypatch.delenv("AGENT_WORKORDER_DB", raising=False)
-
-    service = create_service(Settings.from_env())
-
-    workorder_path = tmp_path / "agent-workorders.sqlite3"
-    assert service._preview_store.path == str(workorder_path)
-    assert workorder_path.exists()
-    assert workorder_path != session_path
-
-
-def test_workorder_proposal_database_has_stable_default_without_other_databases(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    _set_valid_environment(monkeypatch)
-    monkeypatch.delenv("AGENT_SESSION_DB", raising=False)
-    monkeypatch.delenv("AGENT_INVENTORY_DB", raising=False)
-    monkeypatch.delenv("AGENT_WORKORDER_DB", raising=False)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-    first = create_service(Settings.from_env())
-    preview_id = first._preview_store.create(
-        user_key="id:7", action="create", request={}, preview={})
-    second = create_service(Settings.from_env())
-
-    expected = tmp_path / ".ktg-agent" / "agent-workorders.sqlite3"
-    assert first._preview_store.path == second._preview_store.path == str(expected)
-    assert expected.exists()
-    assert second._preview_store.action_for(preview_id=preview_id, user_key="id:7") == "create"
-
-
-def test_workorder_proposal_default_rejects_collision_with_inventory_database(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    _set_valid_environment(monkeypatch)
-    monkeypatch.delenv("AGENT_SESSION_DB", raising=False)
-    monkeypatch.delenv("AGENT_WORKORDER_DB", raising=False)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv(
-        "AGENT_INVENTORY_DB", str(tmp_path / ".ktg-agent" / "agent-workorders.sqlite3"))
-
-    with pytest.raises(RuntimeError, match="must differ from AGENT_INVENTORY_DB"):
-        create_service(Settings.from_env())
-
-
-def test_checkplan_write_flag_defaults_off_and_requires_isolated_absolute_database(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    _set_valid_environment(monkeypatch)
-    monkeypatch.setenv("AGENT_SESSION_DB", str(tmp_path / "session.sqlite3"))
-    monkeypatch.setenv("AGENT_WORKORDER_DB", str(tmp_path / "workorder.sqlite3"))
-    monkeypatch.setenv("AGENT_INVENTORY_DB", str(tmp_path / "inventory.sqlite3"))
-    monkeypatch.delenv("AGENT_ENABLE_DV_CHECKPLAN_WRITE", raising=False)
-    monkeypatch.delenv("AGENT_DV_CHECKPLAN_DB", raising=False)
-    disabled = create_service(Settings.from_env())
-    assert disabled._dv_checkplan_store is None
-    assert Settings.from_env().enable_dv_checkplan_write is False
-
+    monkeypatch.setenv("AGENT_ENABLE_EXPLORATION", "true")
+    monkeypatch.setenv("AGENT_ENABLE_ITEM_RECEIPT", "true")
     monkeypatch.setenv("AGENT_ENABLE_DV_CHECKPLAN_WRITE", "true")
-    with pytest.raises(RuntimeError, match="AGENT_DV_CHECKPLAN_DB"):
-        create_service(Settings.from_env())
-    monkeypatch.setenv("AGENT_DV_CHECKPLAN_DB", "relative.sqlite3")
-    with pytest.raises(RuntimeError, match="absolute"):
-        create_service(Settings.from_env())
-
-    path = tmp_path / "checkplan.sqlite3"
-    monkeypatch.setenv("AGENT_DV_CHECKPLAN_DB", str(path))
-    enabled_service = create_service(Settings.from_env())
-    assert enabled_service._dv_checkplan_store is not None
-    assert enabled_service._dv_checkplan_store.path == str(path)
-    monkeypatch.setenv("AGENT_SESSION_DB", str(path))
-    with pytest.raises(RuntimeError, match="must differ from AGENT_SESSION_DB"):
-        create_service(Settings.from_env())
+    settings = Settings.from_env()
+    assert not hasattr(settings, "enable_exploration")
+    assert not hasattr(settings, "enable_item_receipt")
+    service = create_service(settings)
+    candidate = service._catalog.candidate_snapshot(
+        CatalogIdentity(frozenset({"*:*:*"}), "run"), service._switches_provider())
+    assert set(candidate.candidates) == {"ktg_count_products", "ktg_query_stock_summary"}

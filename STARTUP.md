@@ -275,13 +275,13 @@ http://localhost:81
 5. 在根目录 `.env` 配置 `MODEL_API_KEY`、`MODEL_BASE_URL` 和 `MODEL_ID`
 6. 在 `ktg-agent` 中执行 `uv run --locked python -m ktg_agent.server`
 7. 在 `ktg-mes-ui` 中执行 `npm run dev -- --port 81`
-8. 浏览器访问 `http://localhost:81`，通过公共布局右下角“智能查询”使用当前账号查询产品、库存和工单
+8. 浏览器访问 `http://localhost:81`，通过公共布局右下角“智能查询”使用当前账号查询产品总数和分仓现存库存；其他旧 Agent 业务工具已退役，仍可使用正常 MES 页面。
 
-使用 `scripts/start-agent.ps1` 启动时，如 `.env` 未设置 `AGENT_SESSION_DB`，脚本会将其设为工作区 `.runtime/agent-sessions.sqlite3` 的绝对路径。直接执行 `python -m ktg_agent.server` 时仍需自行设置绝对路径；会话数据文件应随服务备份。
+使用 `scripts/start-agent.ps1` 启动时，如 `.env` 未设置 `AGENT_SESSION_DB`，脚本会将其设为工作区 `.runtime/agent-readonly-sessions.sqlite3` 的绝对路径。直接执行 `python -m ktg_agent.server` 时仍需自行设置绝对路径；会话数据文件应随服务备份。历史工具使用的预览数据库、环境开关不再被装配，不要用旧运行状态启动正式新环境。
 
 ### 8.1 独立端到端验收环境
 
-生产工单草稿链路需要联调时，建议使用独立数据库和独立端口，不要在日常开发库中注入故障。前端开发代理支持通过环境变量覆盖后端与 Agent 地址，默认值保持不变：
+业务联调时，建议使用独立数据库和独立端口，不要在日常开发库中注入故障。前端开发代理支持通过环境变量覆盖后端与 Agent 地址，默认值保持不变：
 
 ```powershell
 $env:KTG_API_TARGET = 'http://127.0.0.1:18080'
@@ -291,7 +291,7 @@ Set-Location E:\ktg_agent\ktg_agent_v1\ktg-mes-ui
 npm run dev -- --port 18081
 ```
 
-对应的后端应连接专用验收库，Agent 的 `KTG_BASE_URL` 应指向同一后端。验收至少包括：原生页面创建/编辑/刷新、悬浮助手预览/确认/回读、BOM 一致性、重复编号、同名产品、无效数量、非草稿编辑、并发版本冲突、批量删除事务和写入响应丢失后的核验。确认、完工、取消和库存扣减不属于本轮草稿能力范围。
+对应的后端应连接专用验收库，Agent 的 `KTG_BASE_URL` 应指向同一后端。本版本 Agent 仅两项只读工具，验收包括账号权限、候选工具精确白名单、查询输入与真实返回、会话/SSE，以及退役确认/探索接口不再可用。原生页面创建/编辑/刷新、BOM 一致性、工单下达和生产执行仍按各自 MES 验收任务核对；不得使用旧 Agent 草稿或库存确认脚本执行测试。
 
 可复跑的自动化检查：
 

@@ -9,7 +9,8 @@ from ktg_agent.ktg.client import KTGClient, KTGError
 from ktg_agent.providers.base import ModelConfig
 from ktg_agent.providers.fake import FakeProvider
 from ktg_agent.service import QueryService
-from ktg_agent.tools.catalog import CatalogIdentity, CatalogSwitches
+from ktg_agent.tools.catalog import CatalogIdentity, CatalogSwitches, ToolCatalog, ToolManifest
+from ktg_agent.tools.permissions import PermissionLeaf
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
 from ktg_agent.tools.registry import (
     ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolRegistry,
@@ -30,7 +31,7 @@ def test_candidate_active_permission_and_switch_are_checked_per_call() -> None:
     async def scenario() -> None:
         execute = Counter()
         tool = ToolDefinition(
-            name="ktg_query_stock", version="1.0", description="Read stock", label="Stock",
+            name="ktg_query_stock_summary", version="1.0", description="Read stock", label="Stock",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             output_schema=None, required_permissions=("mes:wm:wmstock:list",),
             effect=ToolEffect.READ, execution_mode=ExecutionMode.PARALLEL,
@@ -87,17 +88,26 @@ def test_hidden_confirmation_rechecks_permission_and_switch() -> None:
     async def scenario() -> None:
         execute = Counter()
         tool = ToolDefinition(
-            name="ktg_execute_item_receipt", version="1.0", description="Execute receipt",
+            name="sample_confirm", version="1.0", description="Execute receipt",
             label="Receipt", input_schema={"type": "object", "properties": {},
                                            "additionalProperties": False},
-            output_schema=None, required_permissions=("mes:wm:itemrecpt:edit",),
+            output_schema=None, required_permissions=("sample:confirm",),
             effect=ToolEffect.WRITE, execution_mode=ExecutionMode.SEQUENTIAL,
             timeout_seconds=1, execute=execute, expose_to_model=False,
         )
-        catalog = build_legacy_catalog((tool,))
+        factory = lambda: tool
+        catalog = ToolCatalog({"test:confirm": factory})
+        catalog.register_factory(ToolManifest(
+            name=tool.name, version=tool.version, module="wm", domain="test",
+            label=tool.label, description=tool.description, permission_policy=PermissionLeaf("sample:confirm"),
+            effect=tool.effect, execution_mode=tool.execution_mode, retry_policy=tool.retry_policy,
+            timeout_seconds=tool.timeout_seconds, expose_to_model=False,
+            confirmation_policy="trusted_confirmation", proposal_store_effect=False,
+            handler_ref="test:confirm",
+        ), factory)
         switches = CatalogSwitches({"wm": True}, {tool.name: True})
         permissions: dict[str, frozenset[str] | None] = {
-            "value": frozenset({"mes:wm:itemrecpt:edit", "mes:wm:itemrecpt:query",
+            "value": frozenset({"sample:confirm", "sample:query",
                                 "mes:wm:wmstock:list"})}
         current_switches = {"value": switches}
 
@@ -119,8 +129,8 @@ def test_hidden_confirmation_rechecks_permission_and_switch() -> None:
         assert (await runner.run(call, trusted)).error_code == "PERMISSION_DENIED"
         permissions["value"] = None
         assert (await runner.run(call, trusted)).error_code == "PERMISSION_UNAVAILABLE"
-        permissions["value"] = frozenset({"mes:wm:itemrecpt:edit",
-                                          "mes:wm:itemrecpt:query", "mes:wm:wmstock:list"})
+        permissions["value"] = frozenset({"sample:confirm",
+                                          "sample:query", "mes:wm:wmstock:list"})
         current_switches["value"] = CatalogSwitches({"wm": True}, {tool.name: False})
         assert (await runner.run(call, trusted)).error_code == "TOOL_DISABLED"
         assert execute.calls == 1
@@ -134,7 +144,7 @@ def test_service_rechecks_getinfo_before_each_handler() -> None:
         granted: dict[str, list[str] | None] = {"value": ["mes:wm:wmstock:list"]}
         switches: dict[str, CatalogSwitches] = {"value": CatalogSwitches(
             {"md": True, "wm": True, "pro": True},
-            {"ktg_query_stock": True},
+            {"ktg_query_stock_summary": True},
         )}
         business_reads = 0
 
@@ -146,7 +156,9 @@ def test_service_rechecks_getinfo_before_each_handler() -> None:
                     raise KTGError("KTG_UNAVAILABLE", "permission service unavailable")
                 return {"code": 200, "user": user, "permissions": granted["value"]}
             business_reads += 1
-            return {"code": 200, "rows": [], "total": 0}
+            return {"code": 200, "data": {"itemCode": "A-01", "warehouseId": None,
+                                           "hasRecords": False, "groups": [],
+                                           "queriedAt": "2026-11-24T00:00:00+00:00"}}
 
         client = KTGClient(base_url="http://localhost", authorization="Bearer test",
                            transport=transport)
@@ -158,7 +170,7 @@ def test_service_rechecks_getinfo_before_each_handler() -> None:
         candidate = service._catalog.candidate_snapshot(
             CatalogIdentity(frozenset({"mes:wm:wmstock:list"}), "run-1"), switches["value"])
         runner = service._tool_runner(candidate)
-        call = ToolCall("call-1", "ktg_query_stock", {"item_code": "A-01"})
+        call = ToolCall("call-1", "ktg_query_stock_summary", {"item_code": "A-01"})
         context = ToolContext(run_id="run-1", tool_call_id=call.id,
                               identity=user, ktg_client=client)
 
@@ -169,11 +181,11 @@ def test_service_rechecks_getinfo_before_each_handler() -> None:
         granted["value"] = None
         assert (await runner.run(call, context)).error_code == "PERMISSION_UNAVAILABLE"
         granted["value"] = ["mes:wm:wmstock:list"]
-        switches["value"] = CatalogSwitches({"wm": True}, {"ktg_query_stock": False})
+        switches["value"] = CatalogSwitches({"wm": True}, {"ktg_query_stock_summary": False})
         assert (await runner.run(call, context)).error_code == "TOOL_DISABLED"
         wrong_user = ToolContext(run_id="run-1", tool_call_id=call.id,
                                  identity={"userId": 8}, ktg_client=client)
-        switches["value"] = CatalogSwitches({"wm": True}, {"ktg_query_stock": True})
+        switches["value"] = CatalogSwitches({"wm": True}, {"ktg_query_stock_summary": True})
         assert (await runner.run(call, wrong_user)).error_code == "PERMISSION_UNAVAILABLE"
         assert business_reads == 1
 

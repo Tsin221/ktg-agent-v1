@@ -22,20 +22,9 @@ from ktg_agent.core.messages import JsonObject, Message
 from ktg_agent.context.spill import SpillSettings
 from ktg_agent.context.window import ContextPolicy
 from ktg_agent.ktg import KTGClient, KTGError
-from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
-from ktg_agent.ktg.workorders import PreviewStore
-from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
-from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
-from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
-from ktg_agent.ktg.dv_checkplan_writes import DvCheckPlanPreviewStore
-from ktg_agent.ktg.dv_repair_writes import DvRepairPreviewStore
-from ktg_agent.ktg.tm_tooltype_writes import TmToolTypePreviewStore
-from ktg_agent.ktg.tm_tool_writes import TmToolPreviewStore
 from ktg_agent.providers import OpenAICompatibleProvider
 from ktg_agent.providers.base import ModelConfig, ProviderError
 from ktg_agent.service import QueryService
-from ktg_agent.exploration.references import ReferenceStore
-from ktg_agent.exploration.runtime import ExplorationRuntime
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.coordinator import RunCoordinator, RegisterAgent
 from ktg_agent.sessions.repository import (ControlConflictError, ControlStateError,
@@ -55,11 +44,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8001
     scope_by_token: bool = False
-    inventory_db_path: str = ""
     session_db_path: str = ""
-    enable_item_receipt: bool = False
-    enable_production_issue: bool = False
-    enable_workorder_progress: bool = False
     max_total_tokens: int | None = None
     max_tool_calls: int = 24
     max_model_turns: int = 16
@@ -72,25 +57,7 @@ class Settings:
     spill_dir: str = ""
     max_active_tools: int = 8
     max_schema_tokens: int = 6000
-    workorder_db_path: str = ""
-    dv_machinerytype_db_path: str = ""
-    enable_dv_machinerytype_write: bool = False
-    dv_machinery_db_path: str = ""
-    enable_dv_machinery_write: bool = False
-    dv_subject_db_path: str = ""
-    enable_dv_subject_write: bool = False
-    dv_checkplan_db_path: str = ""
-    enable_dv_checkplan_write: bool = False
-    dv_repair_db_path: str = ""
-    enable_dv_repair_write: bool = False
-    tm_tooltype_db_path: str = ""
-    enable_tm_tooltype_write: bool = False
-    tm_tool_db_path: str = ""
-    enable_tm_tool_write: bool = False
     max_output_tokens: int = 1024
-    enable_exploration: bool = False
-    exploration_db_path: str = ""
-
     @classmethod
     def from_env(cls) -> "Settings":
         api_key = os.environ.get("MODEL_API_KEY", "").strip()
@@ -167,10 +134,9 @@ class Settings:
             spill_path = Path(spill_dir)
             if not spill_path.is_absolute():
                 raise RuntimeError("AGENT_SPILL_DIR must be an absolute path")
-            for db_name in ("AGENT_SESSION_DB", "AGENT_INVENTORY_DB"):
-                db_path = os.environ.get(db_name, "").strip()
-                if db_path and spill_path.resolve() == Path(db_path).resolve():
-                    raise RuntimeError(f"AGENT_SPILL_DIR must differ from {db_name}")
+            db_path = os.environ.get("AGENT_SESSION_DB", "").strip()
+            if db_path and spill_path.resolve() == Path(db_path).resolve():
+                raise RuntimeError("AGENT_SPILL_DIR must differ from AGENT_SESSION_DB")
         return cls(
             model_api_key=api_key,
             model_base_url=model_base_url,
@@ -179,30 +145,7 @@ class Settings:
             host=host,
             port=port,
             scope_by_token=os.environ.get("AGENT_SCOPE_BY_TOKEN", "false").lower() == "true",
-            inventory_db_path=os.environ.get("AGENT_INVENTORY_DB", "").strip(),
             session_db_path=os.environ.get("AGENT_SESSION_DB", "").strip(),
-            workorder_db_path=os.environ.get("AGENT_WORKORDER_DB", "").strip(),
-            dv_machinerytype_db_path=os.environ.get("AGENT_DV_MACHINERYTYPE_DB", "").strip(),
-            enable_dv_machinerytype_write=os.environ.get(
-                "AGENT_ENABLE_DV_MACHINERYTYPE_WRITE", "false").lower() == "true",
-            dv_subject_db_path=os.environ.get("AGENT_DV_SUBJECT_DB", "").strip(),
-            enable_dv_subject_write=os.environ.get("AGENT_ENABLE_DV_SUBJECT_WRITE", "false").lower() == "true",
-            dv_checkplan_db_path=os.environ.get("AGENT_DV_CHECKPLAN_DB", "").strip(),
-            enable_dv_checkplan_write=os.environ.get("AGENT_ENABLE_DV_CHECKPLAN_WRITE", "false").lower() == "true",
-            dv_repair_db_path=os.environ.get("AGENT_DV_REPAIR_DB", "").strip(),
-            enable_dv_repair_write=os.environ.get("AGENT_ENABLE_DV_REPAIR_WRITE", "false").lower() == "true",
-            tm_tooltype_db_path=os.environ.get("AGENT_TM_TOOLTYPE_DB", "").strip(),
-            enable_tm_tooltype_write=os.environ.get("AGENT_ENABLE_TM_TOOLTYPE_WRITE", "false").lower() == "true",
-            tm_tool_db_path=os.environ.get("AGENT_TM_TOOL_DB", "").strip(),
-            enable_tm_tool_write=os.environ.get("AGENT_ENABLE_TM_TOOL_WRITE", "false").lower() == "true",
-            dv_machinery_db_path=os.environ.get("AGENT_DV_MACHINERY_DB", "").strip(),
-            enable_dv_machinery_write=os.environ.get(
-                "AGENT_ENABLE_DV_MACHINERY_WRITE", "false").lower() == "true",
-            enable_item_receipt=os.environ.get("AGENT_ENABLE_ITEM_RECEIPT", "false").lower() == "true",
-            enable_production_issue=os.environ.get("AGENT_ENABLE_PRODUCTION_ISSUE", "false").lower() == "true",
-            enable_workorder_progress=os.environ.get("AGENT_ENABLE_WORKORDER_PROGRESS", "false").lower() == "true",
-            enable_exploration=os.environ.get("AGENT_ENABLE_EXPLORATION", "false").lower() == "true",
-            exploration_db_path=os.environ.get("AGENT_EXPLORATION_DB", "").strip(),
             max_total_tokens=max_total_tokens,
             max_tool_calls=positive_integer("AGENT_MAX_TOOL_CALLS", 24) or 24,
             max_model_turns=positive_integer("AGENT_MAX_MODEL_TURNS", 16) or 16,
@@ -224,8 +167,6 @@ def create_session_repository(settings: Settings) -> SessionRepository:
     session_path = Path(settings.session_db_path)
     if not settings.session_db_path or not session_path.is_absolute():
         raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-    if settings.inventory_db_path and session_path.resolve() == Path(settings.inventory_db_path).resolve():
-        raise RuntimeError("AGENT_SESSION_DB must differ from AGENT_INVENTORY_DB")
     return SessionRepository(session_path)
 
 
@@ -256,222 +197,10 @@ def create_service(settings: Settings) -> QueryService:
             scope_by_token=settings.scope_by_token,
         )
 
-    actions = frozenset(
-        action for action, enabled in (
-            (RECEIPT, settings.enable_item_receipt),
-            (ISSUE, settings.enable_production_issue),
-        ) if enabled
-    )
-    if actions and not Path(settings.inventory_db_path).is_absolute():
-        raise RuntimeError("AGENT_INVENTORY_DB must be an absolute path when inventory actions are enabled")
-    workorder_db_path = settings.workorder_db_path
-    if not workorder_db_path:
-        if settings.session_db_path:
-            session_path = Path(settings.session_db_path)
-            if not session_path.is_absolute():
-                raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-            workorder_db_path = str(session_path.with_name("agent-workorders.sqlite3"))
-        else:
-            workorder_db_path = str(
-                Path.home() / ".ktg-agent" / "agent-workorders.sqlite3")
-    if workorder_db_path:
-        proposal_path = Path(workorder_db_path)
-        if not proposal_path.is_absolute():
-            raise RuntimeError("AGENT_WORKORDER_DB must be an absolute path")
-        for db_name, db_path in (("AGENT_SESSION_DB", settings.session_db_path),
-                                 ("AGENT_INVENTORY_DB", settings.inventory_db_path)):
-            if db_path and proposal_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_WORKORDER_DB must differ from {db_name}")
-    dv_machinerytype_db_path = settings.dv_machinerytype_db_path
-    if settings.enable_dv_machinerytype_write:
-        if not dv_machinerytype_db_path:
-            if settings.session_db_path:
-                session_path = Path(settings.session_db_path)
-                if not session_path.is_absolute():
-                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-                dv_machinerytype_db_path = str(
-                    session_path.with_name("agent-dv-machinerytype.sqlite3"))
-            else:
-                dv_machinerytype_db_path = str(
-                    Path.home() / ".ktg-agent" / "agent-dv-machinerytype.sqlite3")
-        dv_path = Path(dv_machinerytype_db_path)
-        if not dv_path.is_absolute():
-            raise RuntimeError("AGENT_DV_MACHINERYTYPE_DB must be an absolute path")
-        for db_name, db_path in (
-                ("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path)):
-            if db_path and dv_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(
-                    f"AGENT_DV_MACHINERYTYPE_DB must differ from {db_name}")
-    dv_machinery_db_path = settings.dv_machinery_db_path
-    if settings.enable_dv_machinery_write:
-        if not dv_machinery_db_path:
-            if settings.session_db_path:
-                session_path = Path(settings.session_db_path)
-                if not session_path.is_absolute():
-                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-                dv_machinery_db_path = str(session_path.with_name("agent-dv-machinery.sqlite3"))
-            else:
-                dv_machinery_db_path = str(Path.home() / ".ktg-agent" / "agent-dv-machinery.sqlite3")
-        machinery_path = Path(dv_machinery_db_path)
-        if not machinery_path.is_absolute():
-            raise RuntimeError("AGENT_DV_MACHINERY_DB must be an absolute path")
-        for db_name, db_path in (
-                ("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path),
-                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path)):
-            if db_path and machinery_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_DV_MACHINERY_DB must differ from {db_name}")
-    dv_subject_db_path = settings.dv_subject_db_path
-    if settings.enable_dv_subject_write:
-        if not dv_subject_db_path:
-            if settings.session_db_path:
-                session_path = Path(settings.session_db_path)
-                if not session_path.is_absolute():
-                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-                dv_subject_db_path = str(session_path.with_name("agent-dv-subject.sqlite3"))
-            else:
-                dv_subject_db_path = str(Path.home() / ".ktg-agent" / "agent-dv-subject.sqlite3")
-        subject_path = Path(dv_subject_db_path)
-        if not subject_path.is_absolute():
-            raise RuntimeError("AGENT_DV_SUBJECT_DB must be an absolute path")
-        for db_name, db_path in (
-                ("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path),
-                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
-                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path)):
-            if db_path and subject_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_DV_SUBJECT_DB must differ from {db_name}")
-    dv_checkplan_db_path = settings.dv_checkplan_db_path
-    if settings.enable_dv_checkplan_write:
-        if not dv_checkplan_db_path:
-            raise RuntimeError("AGENT_DV_CHECKPLAN_DB must be configured when plan writes are enabled")
-        checkplan_path = Path(dv_checkplan_db_path)
-        if not checkplan_path.is_absolute():
-            raise RuntimeError("AGENT_DV_CHECKPLAN_DB must be an absolute path")
-        for db_name, db_path in (
-                ("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path),
-                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
-                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
-                ("AGENT_DV_SUBJECT_DB", dv_subject_db_path)):
-            if db_path and checkplan_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_DV_CHECKPLAN_DB must differ from {db_name}")
-    dv_repair_db_path = settings.dv_repair_db_path
-    if settings.enable_dv_repair_write:
-        if not dv_repair_db_path:
-            raise RuntimeError("AGENT_DV_REPAIR_DB must be configured when repair writes are enabled")
-        repair_path = Path(dv_repair_db_path)
-        if not repair_path.is_absolute():
-            raise RuntimeError("AGENT_DV_REPAIR_DB must be an absolute path")
-        for db_name, db_path in (("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path),
-                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
-                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
-                ("AGENT_DV_SUBJECT_DB", dv_subject_db_path),
-                ("AGENT_DV_CHECKPLAN_DB", dv_checkplan_db_path)):
-            if db_path and repair_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_DV_REPAIR_DB must differ from {db_name}")
-    tm_tooltype_db_path = settings.tm_tooltype_db_path
-    prospective_tm_tool_db_path = settings.tm_tool_db_path
-    if settings.enable_tm_tool_write and not prospective_tm_tool_db_path:
-        if settings.session_db_path:
-            session_path = Path(settings.session_db_path)
-            if not session_path.is_absolute():
-                raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-            prospective_tm_tool_db_path = str(session_path.with_name("agent-tm-tool.sqlite3"))
-        else:
-            prospective_tm_tool_db_path = str(Path.home() / ".ktg-agent" / "agent-tm-tool.sqlite3")
-    if settings.enable_tm_tooltype_write:
-        if not tm_tooltype_db_path:
-            if settings.session_db_path:
-                session_path = Path(settings.session_db_path)
-                if not session_path.is_absolute():
-                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-                tm_tooltype_db_path = str(session_path.with_name("agent-tm-tooltype.sqlite3"))
-            else:
-                tm_tooltype_db_path = str(Path.home() / ".ktg-agent" / "agent-tm-tooltype.sqlite3")
-        tm_tooltype_path = Path(tm_tooltype_db_path)
-        if not tm_tooltype_path.is_absolute():
-            raise RuntimeError("AGENT_TM_TOOLTYPE_DB must be an absolute path")
-        for db_name, db_path in (
-                ("AGENT_SESSION_DB", settings.session_db_path),
-                ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-                ("AGENT_WORKORDER_DB", workorder_db_path),
-                ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
-                ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
-                ("AGENT_DV_SUBJECT_DB", dv_subject_db_path),
-                ("AGENT_DV_CHECKPLAN_DB", dv_checkplan_db_path),
-                ("AGENT_DV_REPAIR_DB", dv_repair_db_path),
-                ("AGENT_TM_TOOL_DB", prospective_tm_tool_db_path)):
-            if db_path and tm_tooltype_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_TM_TOOLTYPE_DB must differ from {db_name}")
-    tm_tool_db_path = settings.tm_tool_db_path
-    if settings.enable_tm_tool_write:
-        if not tm_tool_db_path:
-            if settings.session_db_path:
-                session_path = Path(settings.session_db_path)
-                if not session_path.is_absolute():
-                    raise RuntimeError("AGENT_SESSION_DB must be an absolute path")
-                tm_tool_db_path = str(session_path.with_name("agent-tm-tool.sqlite3"))
-            else:
-                tm_tool_db_path = str(Path.home() / ".ktg-agent" / "agent-tm-tool.sqlite3")
-        tm_tool_path = Path(tm_tool_db_path)
-        if not tm_tool_path.is_absolute():
-            raise RuntimeError("AGENT_TM_TOOL_DB must be an absolute path")
-        existing_paths = (
-            ("AGENT_SESSION_DB", settings.session_db_path),
-            ("AGENT_INVENTORY_DB", settings.inventory_db_path),
-            ("AGENT_WORKORDER_DB", workorder_db_path),
-            ("AGENT_DV_MACHINERYTYPE_DB", dv_machinerytype_db_path),
-            ("AGENT_DV_MACHINERY_DB", dv_machinery_db_path),
-            ("AGENT_DV_SUBJECT_DB", dv_subject_db_path),
-            ("AGENT_DV_CHECKPLAN_DB", dv_checkplan_db_path),
-            ("AGENT_DV_REPAIR_DB", dv_repair_db_path),
-            ("AGENT_TM_TOOLTYPE_DB", tm_tooltype_db_path),
-        )
-        for db_name, db_path in existing_paths:
-            if db_path and tm_tool_path.resolve() == Path(db_path).resolve():
-                raise RuntimeError(f"AGENT_TM_TOOL_DB must differ from {db_name}")
-    exploration_runtime = None
-    if settings.enable_exploration:
-        exploration_path = Path(settings.exploration_db_path)
-        if not settings.exploration_db_path or not exploration_path.is_absolute():
-            raise RuntimeError("AGENT_EXPLORATION_DB must be an absolute path")
-        other_paths = (settings.session_db_path, settings.inventory_db_path, workorder_db_path,
-                       dv_machinerytype_db_path, dv_machinery_db_path, dv_subject_db_path,
-                       dv_checkplan_db_path, dv_repair_db_path, tm_tooltype_db_path, tm_tool_db_path)
-        if any(value and exploration_path.resolve() == Path(value).resolve() for value in other_paths):
-            raise RuntimeError("AGENT_EXPLORATION_DB must differ from other stores")
-        exploration_runtime = ExplorationRuntime(ReferenceStore(exploration_path))
     return QueryService(
         provider=provider,
         model_config=model_config,
         ktg_client_factory=client_factory,
-        inventory_store=InventoryStore(settings.inventory_db_path) if actions else None,
-        inventory_actions=actions,
-        workorder_store=PreviewStore(path=workorder_db_path or ":memory:"),
-        dv_machinerytype_store=(
-            DvMachineryTypePreviewStore(path=dv_machinerytype_db_path)
-            if settings.enable_dv_machinerytype_write else None),
-        dv_subject_store=(DvSubjectPreviewStore(path=dv_subject_db_path)
-                          if settings.enable_dv_subject_write else None),
-        dv_checkplan_store=(DvCheckPlanPreviewStore(path=dv_checkplan_db_path)
-                            if settings.enable_dv_checkplan_write else None),
-        dv_repair_store=(DvRepairPreviewStore(path=dv_repair_db_path)
-                         if settings.enable_dv_repair_write else None),
-        tm_tooltype_store=(TmToolTypePreviewStore(path=tm_tooltype_db_path)
-                           if settings.enable_tm_tooltype_write else None),
-        tm_tool_store=(TmToolPreviewStore(path=tm_tool_db_path)
-                       if settings.enable_tm_tool_write else None),
-        dv_machinery_store=(
-            DvMachineryPreviewStore(path=dv_machinery_db_path)
-            if settings.enable_dv_machinery_write else None),
         spill_settings=(
             SpillSettings(settings.spill_max_inline_tokens, Path(settings.spill_dir))
             if settings.spill_max_inline_tokens is not None and settings.spill_dir else None
@@ -480,8 +209,6 @@ def create_service(settings: Settings) -> QueryService:
         summary_max_tokens=settings.context_summary_max_tokens,
         max_active_tools=settings.max_active_tools,
         max_schema_tokens=settings.max_schema_tokens,
-        enable_workorder_progress=settings.enable_workorder_progress,
-        exploration_runtime=exploration_runtime,
         limits=RunLimits(max_model_turns=settings.max_model_turns, max_tool_calls=settings.max_tool_calls,
                          max_run_seconds=90, max_parallel_reads=3,
                          max_total_tokens=settings.max_total_tokens),
@@ -579,21 +306,6 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         if path == "/agent-api/v1/sessions" or path.startswith("/agent-api/v1/sessions/"):
             self._get_session(path)
             return
-        if self.path.startswith("/agent-api/v1/inventory-operations/"):
-            operation_id = self.path.rsplit("/", 1)[-1]
-            try:
-                response = asyncio.run(self.server.query_service.get_inventory_result(
-                    operation_id=operation_id,
-                    authorization=self.headers.get("Authorization", ""),
-                ))
-            except KTGError as exc:
-                self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
-                return
-            except ValueError as exc:
-                self._write_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
-                return
-            self._write_json(HTTPStatus.OK, response)
-            return
         if self.path == "/health":
             self._write_json(HTTPStatus.OK, {"status": "ok"})
             return
@@ -620,16 +332,6 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
         if not is_run_create and not is_title and not is_compact and not is_cancel and not is_input and self.path not in {
             "/agent-api/v1/query",
-            "/agent-api/v1/exploration/view",
-            "/agent-api/v1/workorder-drafts/confirm",
-            "/agent-api/v1/inventory-operations/confirm",
-            "/agent-api/v1/dv-machinerytype/confirm",
-            "/agent-api/v1/dv-machinery/confirm",
-            "/agent-api/v1/dv-subject/confirm",
-            "/agent-api/v1/dv-checkplan/confirm",
-            "/agent-api/v1/dv-repair/confirm",
-            "/agent-api/v1/tm-tooltype/confirm",
-            "/agent-api/v1/tm-tool/confirm",
             "/agent-api/v1/sessions",
         }:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
@@ -653,19 +355,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         authorization = self.headers.get("Authorization", "")
         try:
-            if self.path == "/agent-api/v1/exploration/view":
-                if set(payload) != {"session_id", "tool", "arguments"}:
-                    raise ValueError("查看请求只允许会话、工具和参数。")
-                session_id, tool, arguments = payload["session_id"], payload["tool"], payload["arguments"]
-                if (not isinstance(session_id, str) or not session_id or len(session_id) > 128
-                        or not isinstance(tool, str) or not isinstance(arguments, dict)):
-                    raise ValueError("查看请求参数无效。")
-                async def view() -> JsonObject:
-                    await self.server.session_service.get(authorization, session_id)
-                    return await self.server.query_service.exploration_view(
-                        session_id=session_id, tool=tool, arguments=arguments, authorization=authorization)
-                response = asyncio.run(view())
-            elif self.path == "/agent-api/v1/sessions":
+            if self.path == "/agent-api/v1/sessions":
                 title = payload.get("title")
                 if title is not None and (not isinstance(title, str) or not title.strip()):
                     raise ValueError("title 必须是非空文本。")
@@ -708,85 +398,6 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                         authorization=authorization,
                     )
                 )
-            elif self.path == "/agent-api/v1/workorder-drafts/confirm":
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(
-                    self.server.query_service.confirm(
-                        preview_id=preview_id,
-                        authorization=authorization,
-                    )
-                )
-            elif self.path == "/agent-api/v1/dv-machinerytype/confirm":
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(
-                    self.server.query_service.confirm_dv_machinerytype(
-                        preview_id=preview_id, authorization=authorization,
-                    )
-                )
-            elif self.path == "/agent-api/v1/dv-machinery/confirm":
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(
-                    self.server.query_service.confirm_dv_machinery(
-                        preview_id=preview_id, authorization=authorization,
-                    )
-                )
-            elif self.path == "/agent-api/v1/dv-subject/confirm":
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(
-                    self.server.query_service.confirm_dv_subject(
-                        preview_id=preview_id, authorization=authorization,
-                    )
-                )
-            elif self.path == "/agent-api/v1/dv-checkplan/confirm":
-                if set(payload) != {"preview_id"}:
-                    raise ValueError("确认请求仅允许 preview_id。")
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(
-                    self.server.query_service.confirm_dv_checkplan(
-                        preview_id=preview_id, authorization=authorization,
-                    )
-                )
-            elif self.path == "/agent-api/v1/dv-repair/confirm":
-                if set(payload) != {"preview_id"}:
-                    raise ValueError("确认请求仅允许 preview_id。")
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(self.server.query_service.confirm_dv_repair(
-                    preview_id=preview_id, authorization=authorization))
-            elif self.path == "/agent-api/v1/tm-tooltype/confirm":
-                if set(payload) != {"preview_id"}:
-                    raise ValueError("确认请求仅允许 preview_id。")
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(self.server.query_service.confirm_tm_tooltype(
-                    preview_id=preview_id, authorization=authorization))
-            elif self.path == "/agent-api/v1/tm-tool/confirm":
-                if set(payload) != {"preview_id"}:
-                    raise ValueError("确认请求仅允许 preview_id。")
-                preview_id = payload.get("preview_id")
-                if not isinstance(preview_id, str):
-                    raise ValueError("preview_id 必须是文本。")
-                response = asyncio.run(self.server.query_service.confirm_tm_tool(
-                    preview_id=preview_id, authorization=authorization))
-            else:
-                operation_id = payload.get("operation_id")
-                if not isinstance(operation_id, str):
-                    raise ValueError("operation_id 必须是文本。")
-                response = asyncio.run(self.server.query_service.confirm_inventory(
-                    operation_id=operation_id, authorization=authorization,
-                ))
         except KTGError as exc:
             self._write_error(HTTPStatus(exc.status), exc.code, str(exc))
             return

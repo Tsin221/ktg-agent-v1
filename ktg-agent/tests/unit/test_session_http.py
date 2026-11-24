@@ -41,20 +41,9 @@ class FakeClient:
         return {"userId": users[self.authorization]}
 
 
-class FakeLegacyService:
+class FakeQueryService:
     async def query(self, *, message: str, authorization: str) -> dict[str, object]:
         return {"kind": "query", "message": message}
-
-    async def confirm(self, *, preview_id: str, authorization: str) -> dict[str, object]:
-        return {"kind": "workorder", "preview_id": preview_id}
-
-    async def confirm_inventory(self, *, operation_id: str,
-                                authorization: str) -> dict[str, object]:
-        return {"kind": "inventory", "operation_id": operation_id}
-
-    async def confirm_dv_machinery(self, *, preview_id: str,
-                                   authorization: str) -> dict[str, object]:
-        return {"kind": "dv_machinery", "preview_id": preview_id}
 
 
 @contextmanager
@@ -161,18 +150,20 @@ def test_session_http_pagination_and_auth(tmp_path: Path) -> None:
             assert request(server, "GET", f"/agent-api/v1/sessions/{ids[0]}", token=token)[0] == 401
 
 
-def test_existing_post_routes_still_dispatch(tmp_path: Path) -> None:
+def test_query_route_dispatches_and_retired_post_routes_return_404(tmp_path: Path) -> None:
     repo = SessionRepository(tmp_path / "sessions.sqlite3")
     with running_server(repo) as server:
-        server.query_service = cast(QueryService, FakeLegacyService())
-        for path, body, kind in (
-            ("/agent-api/v1/query", {"message": "hello"}, "query"),
-            ("/agent-api/v1/workorder-drafts/confirm", {"preview_id": "p1"}, "workorder"),
-            ("/agent-api/v1/inventory-operations/confirm", {"operation_id": "i1"}, "inventory"),
-            ("/agent-api/v1/dv-machinery/confirm", {"preview_id": "p2"}, "dv_machinery"),
+        server.query_service = cast(QueryService, FakeQueryService())
+        assert request(server, "POST", "/agent-api/v1/query", body={"message": "hello"}) == (
+            200, {"kind": "query", "message": "hello"})
+        for path, body in (
+            ("/agent-api/v1/workorder-drafts/confirm", {"preview_id": "p1"}),
+            ("/agent-api/v1/inventory-operations/confirm", {"operation_id": "i1"}),
+            ("/agent-api/v1/dv-machinery/confirm", {"preview_id": "p2"}),
+            ("/agent-api/v1/exploration/view", {"session_id": "s", "tool": "retired", "arguments": {}}),
         ):
             status, response = request(server, "POST", path, body=body)
-            assert status == 200 and response["kind"] == kind
+            assert status == 404 and response == {"error": "NOT_FOUND"}
 
 
 class BlockingFakeProvider(FakeProvider):

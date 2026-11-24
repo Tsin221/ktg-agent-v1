@@ -13,16 +13,7 @@ if ([string]::IsNullOrWhiteSpace($env:MODEL_ID) -or $env:MODEL_ID -eq 'CHANGE_ME
 }
 
 if ([string]::IsNullOrWhiteSpace($env:AGENT_SESSION_DB)) {
-    $env:AGENT_SESSION_DB = Join-Path $workspaceRoot '.runtime\agent-sessions.sqlite3'
-}
-if ([string]::IsNullOrWhiteSpace($env:AGENT_WORKORDER_DB)) {
-    $env:AGENT_WORKORDER_DB = Join-Path $workspaceRoot '.runtime\agent-workorders.sqlite3'
-}
-if ([string]::IsNullOrWhiteSpace($env:AGENT_ENABLE_EXPLORATION)) {
-    $env:AGENT_ENABLE_EXPLORATION = 'true'
-}
-if ([string]::IsNullOrWhiteSpace($env:AGENT_EXPLORATION_DB)) {
-    $env:AGENT_EXPLORATION_DB = Join-Path $workspaceRoot '.runtime\agent-exploration.sqlite3'
+    $env:AGENT_SESSION_DB = Join-Path $workspaceRoot '.runtime\agent-readonly-sessions.sqlite3'
 }
 
 Set-Location .\ktg-agent

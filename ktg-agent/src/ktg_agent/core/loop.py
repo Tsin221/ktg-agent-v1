@@ -1084,7 +1084,7 @@ class AgentLoop:
             old_stock_calls = {
                 block.id for message in history[:baseline] if isinstance(message, AssistantMessage)
                 for block in message.content if isinstance(block, ToolCall)
-                and block.name in {"ktg_query_stock", "ktg_query_stock_summary"}
+                and block.name == "ktg_query_stock_summary"
             }
             # Historic totals and rows remain in the transcript for audit. Use
             # scoped evidence to decide which, if any, may be reused on resume.
@@ -1180,18 +1180,6 @@ class AgentLoop:
                 visible_ids = {message.tool_call_id for message in projected
                                if isinstance(message, ToolResultMessage)}
                 historical_ids = {str(record["tool_call_id"]) for record in fallback} & visible_ids
-                stock_results = {}
-                for record in fallback:
-                    data = record.get("evidence")
-                    if (record["tool"] == "ktg_query_stock" and isinstance(data, dict)
-                            and not data.get("details_omitted")):
-                        stock_results[str(record["tool_call_id"])] = json.dumps(record, ensure_ascii=False)
-                if stock_results:
-                    projected = tuple(
-                        replace(message, content=(TextBlock(stock_results[message.tool_call_id]),))
-                        if isinstance(message, ToolResultMessage) and message.tool_call_id in stock_results
-                        else message for message in projected
-                    )
                 fallback = [
                     record for record in fallback
                     if record["tool_call_id"] not in visible_ids or "stock_usage" in record

@@ -153,9 +153,8 @@
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
-          <h3>{{ demoMode ? '今天想处理什么？' : '今天想查询什么？' }}</h3>
-          <p v-if="demoMode">查询记录，或告诉我你想办理的业务。</p>
-          <p v-else>你可以查询产品、分仓库存、生产工单和设备分类。启用库存操作后，还可预览已准备的物料入库单和生产领料单。</p>
+          <h3>今天想查询什么？</h3>
+          <p>目前可查询产品总数和分仓现存量；其他生产业务请使用 MES 相应页面。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"
@@ -178,106 +177,7 @@
             v-for="(result, index) in message.results || []"
             :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
           >
-            <div v-if="message.evidenceCount && index === message.evidenceStart" class="agent-option-summary">
-              <button type="button" :aria-expanded="openQueryDetails[message.id + '-evidence'] ? 'true' : 'false'" @click="$set(openQueryDetails, message.id + '-evidence', !openQueryDetails[message.id + '-evidence'])">
-                {{ openQueryDetails[message.id + '-evidence'] ? '收起查询依据' : '查看查询依据' }} · {{ message.evidenceCount }} 项
-              </button>
-            </div>
-            <div v-show="!message.evidenceCount || index < message.evidenceStart || openQueryDetails[message.id + '-evidence']">
-            <div v-if="message.resultPresentation[index]" class="agent-option-summary">
-              <button type="button" :aria-expanded="message.resultPresentation[index].open ? 'true' : 'false'" :aria-controls="message.resultPresentation[index].id" @click="toggleOptions(message.resultPresentation[index])">
-                {{ message.resultPresentation[index].title }} · {{ message.resultPresentation[index].open ? '收起' : '展开完整内容' }}
-              </button>
-              <p>{{ message.resultPresentation[index].summary }}<span v-if="message.resultPresentation[index].queriedAt"> · 查询时间 {{ message.resultPresentation[index].queriedAt }}</span></p>
-            </div>
-            <div v-show="!message.resultPresentation[index] || message.resultPresentation[index].open" :id="message.resultPresentation[index] ? message.resultPresentation[index].id : null">
-              <exploration-result
-                v-if="result && typeof result.kind === 'string' && result.kind.startsWith('exploration_')"
-                class="agent-result-surface"
-                :result="result"
-                :session-id="sessionId"
-                :selection-required="message.resultSelection && message.resultSelection[index] === true"
-                @selected="continueExploration($event, message.sourceText)"
-              />
-              <agent-workorder-draft-card
-                v-else-if="isWorkorderResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingPreviewId === result.preview_id"
-                :completed="completedPreviewIds.includes(result.preview_id)"
-                @confirm="confirmPreview"
-                @select-product="selectProduct($event, message.sourceText)"
-                @view-workorder="viewWorkorder"
-              />
-              <agent-inventory-card
-                v-else-if="isInventoryResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingInventoryId === result.operation_id"
-                :completed="completedInventoryIds.includes(result.operation_id)"
-                @confirm="confirmInventory"
-                @refresh="refreshInventory"
-                @view="viewInventory"
-              />
-              <agent-dv-machinery-type-card
-                v-else-if="isDvMachineryTypeResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingDvPreviewId === result.preview_id"
-                :completed="completedDvPreviewIds.includes(result.preview_id)"
-                @confirm="confirmDvPreview"
-              />
-              <agent-dv-machinery-card
-                v-else-if="isDvMachineryResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingMachineryPreviewId === result.preview_id"
-                :completed="completedDvMachineryPreviewIds.includes(result.preview_id)"
-                @confirm="confirmDvMachineryPreview"
-              />
-              <agent-dv-subject-card
-                v-else-if="isDvSubjectResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingSubjectPreviewId === result.preview_id"
-                :completed="completedDvSubjectPreviewIds.includes(result.preview_id)"
-                @confirm="confirmDvSubjectPreview"
-              />
-              <agent-tm-tool-type-card
-                v-else-if="isTmToolTypeResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingTmToolTypePreviewId === result.preview_id"
-                :completed="completedTmToolTypePreviewIds.includes(result.preview_id)"
-                @confirm="confirmTmToolTypePreview"
-              />
-              <agent-tm-tool-card
-                v-else-if="isTmToolResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingTmToolPreviewId === result.preview_id"
-                :completed="completedTmToolPreviewIds.includes(result.preview_id)"
-                @confirm="confirmTmToolPreview"
-              />
-              <agent-dv-check-plan-card
-                v-else-if="isDvCheckPlanResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingCheckPlanPreviewId === result.preview_id"
-                :completed="completedDvCheckPlanPreviewIds.includes(result.preview_id)"
-                @confirm="confirmDvCheckPlanPreview"
-              />
-              <agent-dv-repair-card
-                v-else-if="isDvRepairResult(result)"
-                class="agent-result-surface"
-                :result="result"
-                :confirming="confirmingRepairPreviewId === result.preview_id"
-                :completed="completedDvRepairPreviewIds.includes(result.preview_id)"
-                @confirm="confirmDvRepairPreview"
-              />
-              <agent-result-card v-else class="agent-result-surface" :result="result" />
-            </div>
-            </div>
+            <agent-result-card v-if="result" class="agent-result-surface" :result="result" />
           </div>
           <p v-if="message.queryError" class="agent-message agent-message--error" role="alert">查询失败 · {{ message.queryError }}</p>
           <details
@@ -329,7 +229,7 @@
       </div>
 
       <div
-        v-if="activeRun || loading || contextStatusText(contextStatus) || confirmingPreviewId || confirmingInventoryId || pendingSubmission || panelError"
+        v-if="activeRun || loading || contextStatusText(contextStatus) || pendingSubmission || panelError"
         class="agent-panel__status"
       >
         <div v-if="activeRun || loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
@@ -357,7 +257,6 @@
             <div>{{ contextStatusText(contextStatus) }}</div>
           </div>
         </details>
-        <p v-if="confirmingPreviewId || confirmingInventoryId" class="agent-business-status" role="status">独立业务确认仍在核验结果；停止聊天运行不会撤销已发出的确认。</p>
         <div v-if="pendingSubmission" class="agent-message agent-message--assistant" role="status">
           问题提交回执未确认。<button type="button" :disabled="loading" @click="retryPendingRun">用同一请求重试</button>
         </div>
@@ -372,7 +271,7 @@
           v-model="draft"
           rows="2"
           maxlength="2000"
-          :placeholder="demoMode ? '例如：查一下设备 DEV-001 的维修记录' : '例如：查询产品 A 的库存'"
+          placeholder="例如：查询 CELL-18650-2200 的分仓现存量"
           :disabled="composerBusy"
           @keydown.enter.exact.prevent="send"
         />
@@ -391,22 +290,9 @@
 
 <script>
 import { agentSession, createAgentSession, renameAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
-  listAgentTasks, getAgentTask, getAgentRun, confirmWorkorderDraft, confirmInventoryOperation, getInventoryOperation,
-  confirmDvMachineryType, confirmDvMachinery, confirmDvSubject, confirmDvCheckPlan, confirmDvRepair,
-  confirmTmToolType, confirmTmTool } from '@/api/agent'
+  listAgentTasks, getAgentTask, getAgentRun } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
-import ExplorationResult from './ExplorationResult.vue'
-import AgentInventoryCard from './InventoryCard.vue'
-import AgentWorkorderDraftCard from './WorkorderDraftCard.vue'
-import AgentDvMachineryTypeCard from './DvMachineryTypeCard.vue'
-import AgentDvMachineryCard from './DvMachineryCard.vue'
-import AgentDvSubjectCard from './DvSubjectCard.vue'
-import AgentTmToolTypeCard from './TmToolTypeCard.vue'
-import AgentTmToolCard from './TmToolCard.vue'
-import AgentDvCheckPlanCard from './DvCheckPlanCard.vue'
-import AgentDvRepairCard from './DvRepairCard.vue'
-import { isWorkorderAssistantResult } from './workorderPresentation'
-import { isTerminalRun, pageContext, presentMessages, optionCardPresentation, compactResultPresentation, progressFromEvent, runStatusText, usageText,
+import { isTerminalRun, pageContext, presentMessages, compactResultPresentation, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText, queryCardPresentation, toolProgressText,
   visibleInputs, inputStatusText } from './sessionPresentation'
 
@@ -435,7 +321,7 @@ export function clampPanelSize(size, viewport) {
 
 export default {
   name: 'AgentAssistant',
-  components: { ExplorationResult, AgentResultCard, AgentInventoryCard, AgentWorkorderDraftCard, AgentDvMachineryTypeCard, AgentDvMachineryCard, AgentDvSubjectCard, AgentTmToolTypeCard, AgentTmToolCard, AgentDvCheckPlanCard, AgentDvRepairCard },
+  components: { AgentResultCard },
   data() {
     return {
       open: false,
@@ -479,31 +365,9 @@ export default {
       streamError: false,
       epoch: 0,
       unsubscribeStore: null,
-      confirmingPreviewId: '',
-      confirmingInventoryId: '',
-      confirmingDvPreviewId: '',
-      completedInventoryIds: [],
-      completedPreviewIds: [],
-      completedDvPreviewIds: [],
-      completedDvMachineryPreviewIds: [],
-      confirmingMachineryPreviewId: '',
-      confirmingSubjectPreviewId: '',
-      completedDvSubjectPreviewIds: [],
-      confirmingTmToolTypePreviewId: '',
-      completedTmToolTypePreviewIds: [],
-      confirmingTmToolPreviewId: '',
-      completedTmToolPreviewIds: [],
-      confirmingCheckPlanPreviewId: '',
-      completedDvCheckPlanPreviewIds: [],
-      confirmingRepairPreviewId: '',
-      completedDvRepairPreviewIds: [],
       messages: [],
-      expandedOptions: {},
       openQueryDetails: {},
-      demoMode: process.env.VUE_APP_DEMO_MODE === 'true',
-      examples: process.env.VUE_APP_DEMO_MODE === 'true'
-        ? ['查一下设备 DEV-001 的维修记录', '查看工单 WO-002 的生产情况', '查询 BRG-6204 的分仓库存']
-        : ['查询编码为 A-01 的产品', '查询 A-01 的库存', '为产品 A 创建 100 件、指定日期的工单草稿']
+      examples: ['查询当前产品总数', '查询 CELL-18650-2200 的分仓库存', '查询 PCB-BMS-1S 的分仓库存']
     }
   },
   computed: {
@@ -542,7 +406,7 @@ export default {
       return { width: `${size.width}px`, height: `${size.height}px` }
     },
     displayedMessages() {
-      return compactResultPresentation(optionCardPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]), this.expandedOptions))
+      return compactResultPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]))
     },
     liveMessage() { return this.progress.messages.slice().reverse().find(message => message.text && !message.queryPreface) },
     toolActivity() { return this.canInput ? toolProgressText(this.progress.tools) : '' },
@@ -567,10 +431,7 @@ export default {
         (this.activeRun && ['queued', 'cancelling'].includes(this.activeRun.status))
     },
     busy() {
-      return this.loading || this.sessionLoading || (this.activeRun && !isTerminalRun(this.activeRun.status)) ||
-        Boolean(this.confirmingPreviewId) || Boolean(this.confirmingInventoryId) ||
-        Boolean(this.confirmingDvPreviewId)
-        || Boolean(this.confirmingTmToolTypePreviewId)
+      return this.loading || this.sessionLoading || (this.activeRun && !isTerminalRun(this.activeRun.status))
     }
   },
   mounted() {
@@ -681,10 +542,6 @@ export default {
         if (request === this.titleRequest) this.titleSaving = false
       }
     },
-    toggleOptions(card) {
-      this.$set(this.expandedOptions, card.id, !card.open)
-      this.saveLocalState()
-    },
     isTerminalRun, inputStatusText,
     runStatusText, usageText, contextStatusText, contextPressureText,
     localKey() {
@@ -693,16 +550,7 @@ export default {
     saveLocalState() {
       if (!this.sessionId || !window.sessionStorage) return
       window.sessionStorage.setItem(this.localKey(), JSON.stringify({
-        expandedOptions: this.expandedOptions,
         businessMessages: this.businessMessages,
-        completedPreviewIds: this.completedPreviewIds,
-        completedInventoryIds: this.completedInventoryIds,
-        completedDvPreviewIds: this.completedDvPreviewIds,
-        completedDvMachineryPreviewIds: this.completedDvMachineryPreviewIds,
-        completedDvSubjectPreviewIds: this.completedDvSubjectPreviewIds,
-        completedTmToolTypePreviewIds: this.completedTmToolTypePreviewIds,
-        completedDvCheckPlanPreviewIds: this.completedDvCheckPlanPreviewIds,
-        completedDvRepairPreviewIds: this.completedDvRepairPreviewIds,
         pastInputs: this.pastInputs,
         pendingSubmission: this.pendingSubmission,
         inputAttempt: this.inputAttempt,
@@ -714,16 +562,7 @@ export default {
       const saved = window.sessionStorage.getItem(this.localKey())
       if (!saved) return
       const state = JSON.parse(saved)
-      this.expandedOptions = state.expandedOptions || {}
       this.businessMessages = state.businessMessages || []
-      this.completedPreviewIds = state.completedPreviewIds || []
-      this.completedInventoryIds = state.completedInventoryIds || []
-      this.completedDvPreviewIds = state.completedDvPreviewIds || []
-      this.completedDvMachineryPreviewIds = state.completedDvMachineryPreviewIds || []
-      this.completedDvSubjectPreviewIds = state.completedDvSubjectPreviewIds || []
-      this.completedTmToolTypePreviewIds = state.completedTmToolTypePreviewIds || []
-      this.completedDvCheckPlanPreviewIds = state.completedDvCheckPlanPreviewIds || []
-      this.completedDvRepairPreviewIds = state.completedDvRepairPreviewIds || []
       this.pastInputs = state.pastInputs || []
       this.pendingSubmission = state.pendingSubmission || null
       this.inputAttempt = state.inputAttempt || null
@@ -733,7 +572,6 @@ export default {
     },
     resetIdentity() {
       this.cancelTitle()
-      this.expandedOptions = {}
       this.openQueryDetails = {}
       this.sessionStats = null
       this.epoch++
@@ -759,22 +597,6 @@ export default {
       this.streamError = false
       this.loading = false
       this.sessionLoading = false
-      this.completedInventoryIds = []
-      this.completedPreviewIds = []
-      this.completedDvPreviewIds = []
-      this.completedDvMachineryPreviewIds = []
-      this.completedDvSubjectPreviewIds = []
-      this.completedTmToolTypePreviewIds = []
-      this.completedDvCheckPlanPreviewIds = []
-      this.completedDvRepairPreviewIds = []
-      this.confirmingInventoryId = ''
-      this.confirmingPreviewId = ''
-      this.confirmingDvPreviewId = ''
-      this.confirmingMachineryPreviewId = ''
-      this.confirmingSubjectPreviewId = ''
-      this.confirmingTmToolTypePreviewId = ''
-      this.confirmingCheckPlanPreviewId = ''
-      this.confirmingRepairPreviewId = ''
     },
     async bootstrap() {
       if (!agentSession.checkIdentity()) return
@@ -798,7 +620,6 @@ export default {
     async loadSession(sessionId, epoch = ++this.epoch) {
       if (sessionId !== this.sessionId) this.resetTasks()
       this.cancelTitle()
-      this.expandedOptions = {}
       this.openQueryDetails = {}
       agentSession.close()
       this.sessionLoading = true
@@ -1030,12 +851,6 @@ export default {
       this.open = false
       this.sessionsOpen = false
       this.$nextTick(() => this.$refs.launcher && this.$refs.launcher.focus())
-    },
-    continueExploration(candidate, sourceText) {
-      if (!candidate.resume || !sourceText || this.draft.trim() || this.pendingSubmission || this.inputAttempt || this.loading) return
-      const object = [candidate.code, candidate.name].filter(Boolean).join(' ')
-      this.draft = `已选择${object || '该对象'}，请继续完成刚才的问题：${sourceText}`
-      this.send()
     },
     submitExample(example) {
       this.draft = example
@@ -1269,422 +1084,6 @@ export default {
           if (this.open && !this.busy) this.$nextTick(() => this.$refs.input && this.$refs.input.focus())
         }
       }
-    },
-    isWorkorderResult(result) {
-      return isWorkorderAssistantResult(result)
-    },
-    isInventoryResult(result) {
-      return result && ['inventory_preview', 'inventory_result'].includes(result.kind)
-    },
-    isDvMachineryTypeResult(result) {
-      return result && ['dv_machinerytype_tree', 'dv_machinerytype_detail',
-        'dv_machinerytype_preview', 'dv_machinerytype_create_result',
-        'dv_machinerytype_update_result', 'dv_machinerytype_result'].includes(result.kind)
-    },
-    isDvMachineryResult(result) {
-      return result && ['dv_machinery_list', 'dv_machinery_detail', 'md_machinery_workshop_options',
-        'dv_machinery_preview', 'dv_machinery_create_result', 'dv_machinery_update_result',
-        'dv_machinery_delete_result', 'dv_machinery_result'].includes(result.kind)
-    },
-    isDvCheckPlanResult(result) {
-      return result && ['dv_checkplan_list', 'dv_checkplan_detail', 'dv_checkplan_options',
-        'dv_checkplan_links', 'dv_checkplan_machinery_candidates', 'dv_checkplan_subject_candidates',
-        'dv_checkplan_preview', 'dv_checkplan_result'].includes(result.kind)
-    },
-    isDvRepairResult(result) {
-      return result && ['dv_repair_list', 'dv_repair_detail', 'dv_repair_lines', 'dv_repair_options',
-        'dv_repair_machinery_candidates', 'dv_repair_subject_candidates', 'dv_repair_preview', 'dv_repair_result'].includes(result.kind)
-    },
-    isDvSubjectResult(result) {
-      return result && ['dv_subject_list', 'dv_subject_detail',
-        'dv_subject_preview', 'dv_subject_create_result', 'dv_subject_update_result',
-        'dv_subject_delete_result', 'dv_subject_result'].includes(result.kind)
-    },
-    isTmToolTypeResult(result) {
-      return result && ['tm_tooltype_list', 'tm_tooltype_detail', 'tm_tooltype_options', 'tm_tooltype_preview',
-        'tm_tooltype_create_result', 'tm_tooltype_update_result', 'tm_tooltype_delete_result', 'tm_tooltype_result'].includes(result.kind)
-    },
-    isTmToolResult(result) {
-      return result && ['tm_tool_list','tm_tool_detail','tm_tool_options','tm_tool_preview',
-        'tm_tool_create_result','tm_tool_update_result','tm_tool_delete_result','tm_tool_result'].includes(result.kind)
-    },
-    showInventoryResult(result) {
-      const id = `confirm-inventory-${result.operation_id}`
-      const entry = { id, role: 'assistant', text: '', results: [result] }
-      const index = this.businessMessages.findIndex(item => item.id === id)
-      if (index >= 0) this.businessMessages.splice(index, 1, entry)
-      else this.businessMessages.push(entry)
-      this.saveLocalState()
-      if (result.kind === 'inventory_result' && !this.completedInventoryIds.includes(result.operation_id)) {
-        this.completedInventoryIds.push(result.operation_id)
-      }
-      if (result.outcome === 'succeeded') {
-        window.dispatchEvent(new CustomEvent('ktg:inventory-changed', { detail: result }))
-      }
-      this.scrollToBottom()
-    },
-    async refreshInventory(operationId) {
-      if (this.confirmingInventoryId) return
-      const epoch = this.epoch
-      this.confirmingInventoryId = operationId
-      try {
-        const response = await getInventoryOperation(operationId)
-        if (epoch === this.epoch) this.showInventoryResult(response.result)
-      } catch (_) {
-        if (epoch === this.epoch) this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '回执暂时无法读取，请稍后查询。' })
-      } finally { if (epoch === this.epoch) this.confirmingInventoryId = '' }
-    },
-    async confirmInventory(operationId) {
-      if (!operationId || this.confirmingInventoryId || this.completedInventoryIds.includes(operationId)) return
-      const epoch = this.epoch
-      this.confirmingInventoryId = operationId
-      this.completedInventoryIds.push(operationId)
-      this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown',
-        label: '确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmInventoryOperation(operationId)
-        if (epoch === this.epoch) this.showInventoryResult(response.result)
-      } catch (_) {
-        try {
-          const response = await getInventoryOperation(operationId)
-          if (epoch === this.epoch) this.showInventoryResult(response.result)
-        } catch (_) {
-          if (epoch === this.epoch) this.showInventoryResult({ kind: 'inventory_result', operation_id: operationId, outcome: 'unknown', label: '请求结果待核实，请查询同一操作回执。' })
-        }
-      } finally { if (epoch === this.epoch) this.confirmingInventoryId = '' }
-    },
-    viewInventory(result) {
-      const isReceipt = result.action_type === 'ITEM_RECEIPT_EXECUTE'
-      this.$router.push({ path: isReceipt ? '/mes/wm/itemrecpt' : '/mes/wm/issue',
-        query: isReceipt ? { recptId: result.document_id } : { issueId: result.document_id }}).catch(() => {})
-    },
-    async confirmDvPreview(previewId) {
-      if (!previewId || this.confirmingDvPreviewId || this.completedDvPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingDvPreviewId = previewId
-      this.completedDvPreviewIds.push(previewId)
-      const entryId = `confirm-dv-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '设备分类确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmDvMachineryType(previewId)
-        if (epoch !== this.epoch) return
-        const result = response.result
-        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
-          id: entryId,
-          role: 'assistant',
-          text: result.outcome === 'succeeded' ? '设备分类已写入并完成回读核验。' : (result.label || '设备分类操作未完成。'),
-          results: [result]
-        })
-        this.saveLocalState()
-        if (result.outcome === 'succeeded') {
-          window.dispatchEvent(new CustomEvent('ktg:dv-machinerytype-changed', { detail: result }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
-          id: entryId,
-          role: 'assistant',
-          text: message || '确认请求失败。系统不会自动重新提交，请先核对设备类型列表。'
-        })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) {
-          this.confirmingDvPreviewId = ''
-          this.scrollToBottom()
-        }
-      }
-    },
-    async confirmDvMachineryPreview(previewId) {
-      if (!previewId || this.confirmingMachineryPreviewId || this.completedDvMachineryPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingMachineryPreviewId = previewId
-      this.completedDvMachineryPreviewIds.push(previewId)
-      const entryId = `confirm-machinery-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '设备台账确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmDvMachinery(previewId)
-        if (epoch !== this.epoch) return
-        const result = response.result
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) {
-          this.businessMessages.splice(index, 1, {
-            id: entryId,
-            role: 'assistant',
-            text: result.outcome === 'succeeded' ? '设备台账已写入并完成回读核验。' : (result.label || '设备台账操作未完成。'),
-            results: [result]
-          })
-        }
-        this.saveLocalState()
-        if (result.outcome === 'succeeded') {
-          window.dispatchEvent(new CustomEvent('ktg:dv-machinery-changed', { detail: result }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) {
-          this.businessMessages.splice(index, 1, {
-            id: entryId, role: 'assistant',
-            text: message || '确认请求失败。系统不会自动重新提交，请先核对设备台账。'
-          })
-        }
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) {
-          this.confirmingMachineryPreviewId = ''
-          this.scrollToBottom()
-        }
-      }
-    },
-    async confirmDvCheckPlanPreview(previewId) {
-      if (!previewId || this.confirmingCheckPlanPreviewId || this.completedDvCheckPlanPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingCheckPlanPreviewId = previewId
-      this.completedDvCheckPlanPreviewIds.push(previewId)
-      const entryId = `confirm-checkplan-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '计划确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmDvCheckPlan(previewId)
-        if (epoch !== this.epoch) return
-        const result = response && response.result
-        const verified = result && result.outcome === 'succeeded' && result.verified === true
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, {
-          id: entryId, role: 'assistant',
-          text: verified ? '点检保养计划操作已完成回读核验。' : (result && result.outcome === 'unknown' ? '结果尚未确认，请先核对。系统不会自动重新提交。' : (result && result.outcome === 'succeeded' && result.verified !== true ? '结果未核实，请先核对MES中的计划。' : result && result.label || '计划操作未能确认成功，请重新预览后再试。')),
-          results: result ? [result] : []
-        })
-        this.saveLocalState()
-        if (verified) window.dispatchEvent(new CustomEvent('ktg:dv-checkplan-changed', {
-          detail: { result, plan_id: result.plan_id || result.plan && result.plan.planId || null, action: result.action }
-        }))
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
-          text: message || '确认结果尚未确认，请先核对计划。系统不会自动重新提交。' })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) { this.confirmingCheckPlanPreviewId = ''; this.scrollToBottom() }
-      }
-    },
-    async confirmDvRepairPreview(previewId) {
-      if (!previewId || this.confirmingRepairPreviewId || this.completedDvRepairPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingRepairPreviewId = previewId
-      this.completedDvRepairPreviewIds.push(previewId)
-      const entryId = `confirm-repair-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '维修确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmDvRepair(previewId)
-        if (epoch !== this.epoch) return
-        const result = response && response.result
-        const verified = result && result.outcome === 'succeeded' && result.verified === true
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, {
-          id: entryId, role: 'assistant',
-          text: verified ? '维修操作已完成回读核验。' : (result && result.outcome === 'unknown' ?
-            '结果未知，请先核对MES中的维修单。系统不会自动重新提交。' :
-            result && result.outcome === 'succeeded' ? '结果未核实，请先核对MES中的维修单。' :
-            result && result.label || '操作未能确认成功，请重新预览后再试。'),
-          results: result ? [result] : []
-        })
-        this.saveLocalState()
-        if (verified) window.dispatchEvent(new CustomEvent('ktg:dv-repair-changed', { detail: result }))
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
-          text: message || '确认结果未知，请先核对维修单。系统不会自动重新提交。' })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) { this.confirmingRepairPreviewId = ''; this.scrollToBottom() }
-      }
-    },
-    async confirmDvSubjectPreview(previewId) {
-      if (!previewId || this.confirmingSubjectPreviewId || this.completedDvSubjectPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingSubjectPreviewId = previewId
-      this.completedDvSubjectPreviewIds.push(previewId)
-      const entryId = `confirm-subject-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '点检保养项目确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmDvSubject(previewId)
-        if (epoch !== this.epoch) return
-        const result = response.result
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) {
-          this.businessMessages.splice(index, 1, {
-            id: entryId,
-            role: 'assistant',
-            text: result.outcome === 'succeeded' ? '点检保养项目已写入并完成回读核验。' : (result.label || '点检保养项目操作未完成。'),
-            results: [result]
-          })
-        }
-        this.saveLocalState()
-        if (result.outcome === 'succeeded') {
-          window.dispatchEvent(new CustomEvent('ktg:dv-subject-changed', { detail: result }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) {
-          this.businessMessages.splice(index, 1, {
-            id: entryId, role: 'assistant',
-            text: message || '确认请求失败。系统不会自动重新提交，请先核对点检保养项目。'
-          })
-        }
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) {
-          this.confirmingSubjectPreviewId = ''
-          this.scrollToBottom()
-        }
-      }
-    },
-    async confirmTmToolPreview(previewId) {
-      if (!previewId || this.confirmingTmToolPreviewId || this.completedTmToolPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingTmToolPreviewId = previewId
-      this.completedTmToolPreviewIds.push(previewId)
-      const entryId = `confirm-tm-tool-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '工装夹具台账确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmTmTool(previewId)
-        if (epoch !== this.epoch) return
-        const result = response && response.result
-        const verified = result && result.outcome === 'succeeded' && result.verified === true
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, {
-          id: entryId, role: 'assistant',
-          text: verified ? '工装夹具台账操作已完成回读核验。' :
-            result && result.outcome === 'unknown' ? '操作结果未知，请先核对MES；系统不会自动重新提交。' :
-            result && result.label || '工装夹具台账操作未能确认成功，请重新预览。',
-          results: result ? [result] : []
-        })
-        this.saveLocalState()
-        if (verified) {
-          const item = result[({ create: 'verified_record', update: 'verified_record', delete: 'deleted' })[result.action]] || {}
-          window.dispatchEvent(new CustomEvent('ktg:tm-tool-changed', {
-            detail: { result, action: result.action, tool_id: item.toolId || null }
-          }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
-          text: message || '确认结果尚未核实。系统不会自动重新提交，请先核对工装夹具。' })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) { this.confirmingTmToolPreviewId = ''; this.scrollToBottom() }
-      }
-    },
-    async confirmTmToolTypePreview(previewId) {
-      if (!previewId || this.confirmingTmToolTypePreviewId || this.completedTmToolTypePreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingTmToolTypePreviewId = previewId
-      this.completedTmToolTypePreviewIds.push(previewId)
-      const entryId = `confirm-tm-tooltype-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '工装夹具类型确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmTmToolType(previewId)
-        if (epoch !== this.epoch) return
-        const result = response && response.result
-        const verified = result && result.outcome === 'succeeded' && result.verified === true
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, {
-          id: entryId, role: 'assistant',
-          text: verified ? '工装夹具类型操作已完成回读核验。' :
-            result && result.outcome === 'unknown' ? '操作结果未知，请先核对MES；系统不会自动重新提交。' :
-            result && result.label || '工装夹具类型操作未能确认成功，请重新预览。',
-          results: result ? [result] : []
-        })
-        this.saveLocalState()
-        if (verified) {
-          const item = result[({ create: 'created', update: 'updated', delete: 'deleted' })[result.action]] || {}
-          window.dispatchEvent(new CustomEvent('ktg:tm-tooltype-changed', {
-            detail: { result, action: result.action, tool_type_id: item.toolTypeId || null }
-          }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        const index = this.businessMessages.findIndex(item => item.id === entryId)
-        if (index >= 0) this.businessMessages.splice(index, 1, { id: entryId, role: 'assistant',
-          text: message || '确认结果尚未核实。系统不会自动重新提交，请先核对工装夹具类型。' })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) { this.confirmingTmToolTypePreviewId = ''; this.scrollToBottom() }
-      }
-    },
-    async confirmPreview(previewId) {
-      if (!previewId || this.confirmingPreviewId || this.completedPreviewIds.includes(previewId)) return
-      const epoch = this.epoch
-      this.confirmingPreviewId = previewId
-      this.completedPreviewIds.push(previewId)
-      const entryId = `confirm-preview-${previewId}`
-      this.businessMessages.push({ id: entryId, role: 'assistant', text: '工单确认请求已发出，仍在核验结果。请勿再次提交。' })
-      this.saveLocalState()
-      try {
-        const response = await confirmWorkorderDraft(previewId)
-        if (epoch !== this.epoch) return
-        const result = response.result
-        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
-          id: entryId,
-          role: 'assistant',
-          text: result.outcome === 'succeeded' ? '工单草稿已写入并完成回读核验。' : (result.label || '工单操作未完成。'),
-          results: [result]
-        })
-        this.saveLocalState()
-        if (result.outcome === 'succeeded') {
-          window.dispatchEvent(new CustomEvent('ktg:workorder-changed', { detail: result }))
-        }
-      } catch (error) {
-        if (epoch !== this.epoch) return
-        const data = error && error.response && error.response.data
-        const message = data && data.error && data.error.message
-        this.businessMessages.splice(this.businessMessages.findIndex(item => item.id === entryId), 1, {
-          id: entryId,
-          role: 'assistant',
-          text: message || '确认请求失败。系统不会自动重新提交，请先核对工单列表。'
-        })
-        this.saveLocalState()
-      } finally {
-        if (epoch === this.epoch) {
-          this.confirmingPreviewId = ''
-          this.scrollToBottom()
-        }
-      }
-    },
-    selectProduct(candidate, sourceText) {
-      const code = candidate && candidate.itemCode
-      if (!code || this.busy) return
-      this.draft = `${sourceText || '继续生成工单草稿'}\n产品请使用编码 ${code}。`
-      this.send()
-    },
-    viewWorkorder(result) {
-      window.dispatchEvent(new CustomEvent('ktg:workorder-changed', { detail: result }))
-      this.$router.push({ path: '/mes/pro/workorder', query: { workorderId: result.workorderId }}).catch(() => {})
     },
     scrollToBottom() {
       this.$nextTick(() => {
@@ -1952,10 +1351,6 @@ export default {
 .agent-query-attempt__meta:empty { display: none; }
 .agent-query-attempt + .agent-query-attempt { margin-top: 10px; }
 .agent-query-error { color: #b83232; overflow-wrap: anywhere; }
-.agent-option-summary { margin-top: 10px; padding: 10px 12px; border: 1px solid #dfe4ed; border-radius: 6px; background: #fff; color: #303133; }
-.agent-option-summary button { padding: 0; border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; text-align: left; min-height: 32px; }
-.agent-option-summary button:focus-visible { outline: 2px solid var(--current-color, #409eff); outline-offset: 2px; }
-.agent-option-summary p { margin: 4px 0 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .agent-message {
   color: var(--assistant-text);
@@ -1968,7 +1363,6 @@ export default {
 .agent-message--error { margin: 8px 0 0; padding: 7px 9px; border-radius: 8px; color: #922e38; background: #fff1f2; font-size: 12px; }
 .agent-input-status { margin-top: 4px; color: var(--assistant-muted); font-size: 12px; text-align: right; }
 .agent-input-status button { border: 0; background: transparent; color: var(--assistant-action); cursor: pointer; }
-.agent-business-status { margin: 8px 0; color: var(--assistant-muted); font-size: 12px; }
 .agent-progress { margin-top: 14px; padding-left: 10px; border-left: 2px solid var(--assistant-accent); }
 .agent-progress__status { margin-top: 3px; color: var(--assistant-muted); font-size: 12px; }
 .agent-panel__status {

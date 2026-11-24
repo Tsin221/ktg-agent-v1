@@ -20,14 +20,7 @@ if ($Service -eq 'backend') {
     $env:AGENT_HOST = '127.0.0.1'
     $env:AGENT_PORT = '8002'
     $env:AGENT_SCOPE_BY_TOKEN = 'true'
-    $env:AGENT_ENABLE_EXPLORATION = 'true'
-    $env:AGENT_EXPLORATION_DB = Join-Path $demoRuntime 'exploration.sqlite3'
-    foreach ($name in @('SESSION','WORKORDER','INVENTORY','DV_MACHINERYTYPE','DV_MACHINERY','DV_SUBJECT','DV_CHECKPLAN','DV_REPAIR','TM_TOOLTYPE','TM_TOOL')) {
-        [Environment]::SetEnvironmentVariable("AGENT_${name}_DB", (Join-Path $demoRuntime "$($name.ToLower()).sqlite3"), 'Process')
-    }
-    foreach ($name in @('ITEM_RECEIPT','PRODUCTION_ISSUE','DV_MACHINERYTYPE_WRITE','DV_MACHINERY_WRITE','DV_SUBJECT_WRITE','DV_CHECKPLAN_WRITE','DV_REPAIR_WRITE','TM_TOOLTYPE_WRITE','TM_TOOL_WRITE')) {
-        [Environment]::SetEnvironmentVariable("AGENT_ENABLE_$name", 'true', 'Process')
-    }
+    $env:AGENT_SESSION_DB = Join-Path $demoRuntime 'readonly-sessions.sqlite3'
     $env:AGENT_SPILL_DIR = Join-Path $demoRuntime 'spill'
     Set-Location (Join-Path $projectRoot 'ktg-agent')
     & uv run --locked python -m ktg_agent.server

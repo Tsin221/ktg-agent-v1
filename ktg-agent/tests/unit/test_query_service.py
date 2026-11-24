@@ -19,7 +19,7 @@ def test_legacy_query_returns_token_stop_reasons_without_running_tools() -> None
                     "permissions": ["*:*:*"]}
 
         provider = FakeProvider([ScriptedTurn((ResponseCompleted(FinalResponse(
-            AssistantMessage((ToolCall("call-1", "ktg_query_stock", {"item_code": "A-01"}),)),
+            AssistantMessage((ToolCall("call-1", "ktg_query_stock_summary", {"item_code": "A-01"}),)),
             StopReason.TOOL_CALL, usage,
         )),))])
         service = QueryService(
@@ -50,156 +50,30 @@ def test_query_service_validates_identity_runs_tool_and_returns_business_results
     asyncio.run(_query_service_scenario())
 
 
-def test_query_service_exposes_preview_but_not_write_tools_to_model() -> None:
-    asyncio.run(_query_service_exposes_preview_but_not_write_tools_to_model())
+def test_query_service_does_not_expose_retired_business_write_tools() -> None:
+    async def scenario() -> None:
+        async def transport(url: str, _headers: Mapping[str, str], _params: Mapping[str, object],
+                            _timeout: float) -> object:
+            assert url.endswith("/getInfo")
+            return {"code": 200, "user": {"userId": 7, "userName": "alice"}, "permissions": ["*:*:*"]}
 
-
-async def _query_service_exposes_preview_but_not_write_tools_to_model() -> None:
-    receipt: dict[str, object] | None = None
-
-    async def ktg_transport(
-        url: str,
-        _headers: Mapping[str, str],
-        _params: Mapping[str, object],
-        _timeout_seconds: float,
-    ) -> object:
-        if "/mes/pro/workorder/operations/" in url:
-            return {"code": 200, "data": receipt} if receipt else {"code": 404}
-        if url.endswith("/getInfo"):
-            return {"code": 200, "user": {"userId": 7, "userName": "alice"},
-                    "permissions": ["*:*:*"]}
-        if url.endswith("/mes/md/mditem/list"):
-            return {
-                "code": 200,
-                "total": 1,
-                "rows": [{
-                    "itemId": 11,
-                    "itemCode": "A-01",
-                    "itemName": "产品 A",
-                    "unitOfMeasure": "件",
-                }],
-            }
-        if url.endswith("/system/autocode/get/WORKORDER_CODE"):
-            return "WO-001"
-        if url.endswith("/mes/pro/workorder/51"):
-            return {
-                "code": 200,
-                "data": {
-                    "workorderId": 51,
-                    "workorderCode": "WO-001",
-                    "workorderName": "产品 A 客户订单",
-                    "workorderType": "SELF",
-                    "orderSource": "ORDER",
-                    "productId": 11,
-                    "productName": "产品 A",
-                    "unitOfMeasure": "件",
-                    "quantity": 100,
-                    "requestDate": "2026-10-31",
-                    "parentId": 0,
-                    "status": "PREPARE",
-                    "version": 0,
-                },
-            }
-        if url.endswith("/mes/pro/workorderbom/list"):
-            return {"code": 200, "total": 0, "rows": []}
-        if url.endswith("/mes/md/bom/list"):
-            return {"code": 200, "total": 0, "rows": []}
-        raise AssertionError(url)
-
-    async def write_transport(
-        method: str,
-        url: str,
-        _headers: Mapping[str, str],
-        body: Mapping[str, object],
-        _timeout_seconds: float,
-    ) -> dict[str, object]:
-        nonlocal receipt
-        assert method == "POST"
-        assert url.endswith("/mes/pro/workorder/operations")
-        receipt = {"operationId": body["operationId"], "action": body["action"],
-                   "requestDigest": body["requestDigest"], "expectedVersion": body["expectedVersion"],
-                   "outcome": "succeeded", "workorderId": 51, "workorderCode": "WO-001"}
-        return {"code": 200, "data": receipt}
-
-    provider = FakeProvider(
-        (
+        provider = FakeProvider((
             ScriptedTurn((ResponseCompleted(FinalResponse(
-                message=AssistantMessage((ToolCall(
-                    id="load-preview", name="load_tools",
-                    arguments={"tools": [{"name": "ktg_preview_create_workorder_draft",
-                                           "version": "1.0"}]},
-                ),)), stop_reason=StopReason.TOOL_CALL, usage=Usage(2, 1))),)),
-            ScriptedTurn(
-                (
-                    ResponseCompleted(FinalResponse(
-                        message=AssistantMessage((ToolCall(
-                            id="preview",
-                            name="ktg_preview_create_workorder_draft",
-                            arguments={
-                                "code_mode": "auto",
-                                "workorder_name": "产品 A 客户订单",
-                                "order_source": "ORDER",
-                                "product_code": "A-01",
-                                "quantity": 100,
-                                "request_date": "2026-10-31",
-                            },
-                        ),)),
-                        stop_reason=StopReason.TOOL_CALL,
-                        usage=Usage(4, 2),
-                    )),
-                )
-            ),
-            ScriptedTurn(
-                (
-                    ResponseCompleted(FinalResponse(
-                        message=AssistantMessage((TextBlock("请确认预览。"),)),
-                        stop_reason=StopReason.COMPLETED,
-                        usage=Usage(8, 3),
-                    )),
-                )
-            ),
-        )
-    )
+                AssistantMessage((ToolCall("old", "load_tools", {"tools": [
+                    {"name": "ktg_preview_create_workorder_draft", "version": "1.0"}]}),)),
+                StopReason.TOOL_CALL)),)),
+            ScriptedTurn((ResponseCompleted(FinalResponse(
+                AssistantMessage((TextBlock("未开放该操作。"),)), StopReason.COMPLETED)),)),
+        ))
+        service = QueryService(provider=provider, model_config=ModelConfig("fake", 64),
+            ktg_client_factory=lambda token: KTGClient(
+                base_url="http://localhost", authorization=token, transport=transport))
+        result = await service.query(message="创建工单", authorization="Bearer test")
+        assert result["stop_reason"] == "completed"
+        assert {schema.name for schema in provider.requests[1].tools} == {"search_tools", "load_tools"}
+        assert not hasattr(service, "confirm")
 
-    def client_factory(authorization: str) -> KTGClient:
-        return KTGClient(
-            base_url="http://127.0.0.1:8080",
-            authorization=authorization,
-            transport=ktg_transport,
-            write_transport=write_transport,
-        )
-
-    service = QueryService(
-        provider=provider,
-        model_config=ModelConfig(model="test-model", max_output_tokens=256),
-        ktg_client_factory=client_factory,
-    )
-    response = await service.query(
-        message="为 A-01 创建 100 件工单草稿，需求日期 2026-10-31",
-        authorization="Bearer current-user-token",
-    )
-
-    assert {tool.name for tool in provider.requests[0].tools} == {"search_tools", "load_tools"}
-    tool_names = {tool.name for tool in provider.requests[1].tools}
-    assert "ktg_preview_create_workorder_draft" in tool_names
-    assert "ktg_preview_edit_workorder_draft" not in tool_names
-    assert "ktg_create_workorder_draft" not in tool_names
-    assert "ktg_edit_workorder_draft" not in tool_names
-    results = response["results"]
-    assert isinstance(results, list)
-    assert isinstance(results[0], dict)
-    assert results[0]["kind"] == "workorder_draft_preview"
-    preview_id = results[0]["preview_id"]
-    assert isinstance(preview_id, str)
-
-    confirmation = await service.confirm(
-        preview_id=preview_id,
-        authorization="Bearer current-user-token",
-    )
-    result = confirmation["result"]
-    assert isinstance(result, dict)
-    assert result["outcome"] == "succeeded"
-    assert result["workorderId"] == 51
+    asyncio.run(scenario())
 
 
 async def _query_service_scenario() -> None:
@@ -234,7 +108,7 @@ async def _query_service_scenario() -> None:
             ScriptedTurn((ResponseCompleted(FinalResponse(
                 message=AssistantMessage((ToolCall(
                     id="load-stock", name="load_tools",
-                    arguments={"tools": [{"name": "ktg_query_stock", "version": "1.0"}]},
+                    arguments={"tools": [{"name": "ktg_count_products", "version": "1.0"}]},
                 ),)), stop_reason=StopReason.TOOL_CALL, usage=Usage(2, 1))),)),
             ScriptedTurn(
                 (
@@ -243,8 +117,8 @@ async def _query_service_scenario() -> None:
                             (
                                 ToolCall(
                                     id="call-stock",
-                                    name="ktg_query_stock",
-                                    arguments={"item_code": "A-01"},
+                                    name="ktg_count_products",
+                                    arguments={},
                                 ),
                             )
                         ),
@@ -257,7 +131,7 @@ async def _query_service_scenario() -> None:
                 (
                     ResponseCompleted(FinalResponse(
                         message=AssistantMessage(
-                            (TextBlock("产品 A 在成品仓有 8 件库存。"),)
+                            (TextBlock("共有 1 个产品。"),)
                         ),
                         stop_reason=StopReason.COMPLETED,
                         usage=Usage(8, 6),
@@ -281,17 +155,17 @@ async def _query_service_scenario() -> None:
     )
 
     response = await service.query(
-        message="查询 A-01 库存",
+        message="有几个产品",
         authorization="Bearer current-user-token",
     )
 
-    assert response["answer"] == "产品 A 在成品仓有 8 件库存。"
+    assert response["answer"] == "共有 1 个产品。"
     assert response["stop_reason"] == "completed"
     assert response["current_user"] == "alice"
     results = response["results"]
     assert isinstance(results, list)
     first_result = results[0]
     assert isinstance(first_result, dict)
-    assert first_result["kind"] == "stock"
-    assert requested_urls[-1] == "http://127.0.0.1:8080/mes/wm/wmstock/list"
+    assert first_result["kind"] == "product_count"
+    assert requested_urls[-1] == "http://127.0.0.1:8080/mes/md/mditem/list"
     assert all(url.endswith("/getInfo") for url in requested_urls[:-1])

@@ -5,12 +5,6 @@ export const isTerminalRun = status => terminal.includes(status)
 export function pageContext(route) {
   const context = { captured_at: new Date().toISOString() }
   if (route && typeof route.name === 'string') context.route_name = route.name.slice(0, 100)
-  if (route && (route.path === '/tm/tooltype' || route.path === '/mes/tm/tooltype' || route.name === 'Tooltype')) {
-    context.module = 'tm'
-  }
-  if (route && (route.path === '/tm/tool' || route.path === '/mes/tm/tool' || route.name === 'Tool')) {
-    context.module = 'tm'
-  }
   const query = route && route.query || {}
   const filters = {}
   for (const key of ['itemCode', 'warehouseId', 'workorderCode']) {
@@ -27,17 +21,8 @@ export function pageContext(route) {
 const textOf = message => (message.content || []).filter(block => block.type === 'text' && block.model_visible !== false)
   .map(block => block.text).join('')
 
-const queryLabels = {
-  product_count: '产品总数', items: '产品查询', workorders: '工单查询',
-  workorder: '工单详情', protask: '生产任务', feedback: '报工记录',
-  stock: '库存查询', stock_summary: '分仓库存汇总', workorder_progress: '工单进度试验视图'
-}
-const queryTools = {
-  ktg_count_products: 'product_count', ktg_search_items: 'items', ktg_list_workorders: 'workorders',
-  ktg_pro_workorder_get: 'workorder', ktg_pro_task_list: 'protask', ktg_pro_task_get: 'protask',
-  ktg_pro_feedback_list: 'feedback', ktg_pro_feedback_get: 'feedback', ktg_query_stock: 'stock',
-  ktg_query_stock_summary: 'stock_summary', ktg_pro_workorder_progress: 'workorder_progress'
-}
+const queryLabels = { product_count: '产品总数', stock_summary: '分仓库存汇总' }
+const queryTools = { ktg_count_products: 'product_count', ktg_query_stock_summary: 'stock_summary' }
 const taskTools = ['create_task', 'update_task']
 const progressTools = [...taskTools, 'search_tools', 'load_tools']
 const toolKind = name => Object.prototype.hasOwnProperty.call(queryTools, name) ? queryTools[name] : undefined
@@ -81,7 +66,7 @@ export function presentMessages(items) {
         if (call && taskTools.includes(call.name) && result && typeof result.task_id === 'string' && !item.is_error) {
           entry.taskIds = [...new Set([...(entry.taskIds || []), result.task_id])]
         }
-        if (kind && kind !== 'exploration_catalog') {
+        if (kind) {
           entry.results.push(result)
           entry.resultIds.push(id)
         }
@@ -108,137 +93,30 @@ function canonical(value) {
   return value
 }
 
-// These are read-only reference cards. Previews, confirmations and outcomes
-// remain in the main result area and are never hidden by this projection.
-const referenceKinds = new Set([
-  'dv_machinerytype_tree', 'dv_machinerytype_detail', 'dv_machinery_list', 'dv_machinery_detail',
-  'md_machinery_workshop_options', 'dv_subject_list', 'dv_subject_detail',
-  'dv_checkplan_list', 'dv_checkplan_detail', 'dv_checkplan_options', 'dv_checkplan_links',
-  'dv_checkplan_machinery_candidates', 'dv_checkplan_subject_candidates',
-  'dv_repair_list', 'dv_repair_detail', 'dv_repair_lines', 'dv_repair_options',
-  'dv_repair_machinery_candidates', 'dv_repair_subject_candidates',
-  'tm_tooltype_list', 'tm_tooltype_detail', 'tm_tooltype_options',
-  'tm_tool_list', 'tm_tool_detail', 'tm_tool_options'
-])
-
-// A search can return evidence from several business entities. Keep it
-// expandable after a specific answer, but never hide an actual choice or list.
-const asksForChoice = text => /(?:请|需要您?|麻烦您?|可以)(?:先|您|你|从中|在下方|在下面|点击|点选|帮我)*\s*(?:选择|选定|确认|指定|告诉我)|(?:选择|选中|确认)(?:一下)?(?:哪|具体|对应)|(?:哪[个台张项种件条]|哪一[个台张项种件条])[^\n。！？!?]{0,20}[？?]/.test(text)
-const asksForList = text => /列出|列一下|罗列|清单|名单|候选|表格|有哪些|哪[些几]|分别|所有|全部/.test(text)
-function resolvedSearch(result, text, detailRecords) {
-  const rows = result.records
-  if (!Array.isArray(rows) || !rows.length) return false
-  const answeredCodes = new Set(text.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]*/g) || [])
-  const matches = new Set()
-  for (const row of rows) {
-    if (!row || typeof row !== 'object') continue
-    for (const code of [row.code, row.item_code, row.bom_item_code, row.machinery_code, row.workorder_code, row.product_code, row.tool_code]) {
-      if (typeof code === 'string' && code.length >= 3 && answeredCodes.has(code.toUpperCase())) matches.add(code.toUpperCase())
-    }
-  }
-  if (matches.size) return matches.size === 1
-  const resolved = detailRecords.filter(record => record && rows.some(row => row && row.entity === record.entity && row.id === record.id))
-  return resolved.length === 1 || (rows.length === 1 && result.coverage === 'complete')
-}
-
 export function compactResultPresentation(messages) {
   return messages.map(message => {
     if (message.role !== 'assistant') return message
     const text = message.text || ''
-    const choice = asksForChoice(text)
-    const answered = !!text.trim() && !message.queryPreface && !choice && !asksForList(message.sourceText || '')
-    const results = (message.results || []).map((result, index) => ({ result,
-      id: message.resultIds && message.resultIds[index] || `${message.id}-${index}`,
-      presentation: message.resultPresentation && message.resultPresentation[index] || null,
-      reference: referenceKinds.has(result.kind) && !result.error
-    }))
-    const detailRecords = results.filter(entry => entry.result.kind === 'exploration_record')
-      .flatMap(entry => Array.isArray(entry.result.records) ? entry.result.records : [])
-    if (answered) {
-      const resolved = results.filter(entry => entry.result.kind === 'exploration_search' && resolvedSearch(entry.result, text, detailRecords))
-      resolved.forEach(entry => { entry.reference = true })
-      if (resolved.length) results.filter(entry => entry.result.kind === 'items' && entry.result.total === 0)
-        .forEach(entry => { entry.reference = true })
-    }
-    const candidates = new Set()
-    for (let index = results.length - 1; index >= 0; index--) {
-      const entry = results[index]
-      const rows = entry.result.records
-      if (entry.result.kind !== 'exploration_search' || !Array.isArray(rows) || !rows.length ||
-          !rows.every(row => row && typeof row.entity === 'string' && Number.isInteger(row.id))) continue
-      const signature = JSON.stringify([entry.result.coverage, entry.result.offset || 0,
-        rows.map(row => JSON.stringify([row.entity, row.id])).sort()])
-      if (candidates.has(signature)) entry.reference = true
-      else candidates.add(signature)
-    }
-    const main = results.filter(item => !item.reference)
-    const references = results.filter(item => item.reference)
-    const ordered = [...main, ...references]
     const long = text.length > 160 || /\n\s*\|/.test(text)
     const firstParagraph = (text.trim().split(/\n\s*\n/)[0] || '').replace(/^\s*\|.*$/gm, '').trim() || '查询结果见下方。'
     const preview = long ? firstParagraph.slice(0, 120) + (firstParagraph.length > 120 ? '…' : '') : text
-    return { ...message, results: ordered.map(item => item.result), resultIds: ordered.map(item => item.id),
-      resultSelection: ordered.map(item => !item.reference && choice && item.result.kind === 'exploration_search'),
-      resultPresentation: ordered.map(item => item.presentation), evidenceStart: main.length,
-      evidenceCount: references.length, textPreview: preview, hasFullText: long && preview !== text }
+    return { ...message, textPreview: preview, hasFullText: long && preview !== text }
   })
 }
 
 function queryScope(args) {
-  const labels = { workorder_id: '工单 ID', workorder_code: '工单编号', workorder_name: '工单名称',
-    workorder_type: '工单类型', item_code: '产品编码', item_name: '产品名称', warehouse_id: '仓库 ID',
-    task_id: '任务 ID', record_id: '报工 ID', status: '状态', from_time: '开始时间', to_time: '结束时间',
-    page: '页码', page_size: '每页条数' }
+  const labels = { item_code: '物料编码', warehouse_id: '仓库 ID' }
   return Object.keys(labels).filter(key => args[key] != null).map(key => `${labels[key]} ${args[key]}`).join(' · ')
 }
 
-const queryRows = result => result ? result.rows || [result.workorder || result.data].filter(Boolean) : []
-
-function workorderGroups(queries, priorQueries) {
-  const orders = new Map()
-  const codes = new Map()
-  const products = new Map()
-  const tasks = new Map()
-  const orderId = value => value == null ? '' : String(value)
-  for (const { result } of [...priorQueries, ...queries]) {
-    for (const row of queryRows(result)) {
-      const id = orderId(row.workorderId)
-      if (!id) continue
-      if (row.workorderCode) {
-        orders.set(id, row.workorderCode)
-        codes.set(row.workorderCode, id)
-      }
-      if (row.productCode) {
-        const matches = products.get(row.productCode) || new Set()
-        matches.add(id)
-        products.set(row.productCode, matches)
-      }
-      if (row.taskId != null) tasks.set(orderId(row.taskId), id)
-    }
-  }
-
+function queryGroups(queries) {
   const groups = new Map()
   for (const item of queries) {
     const { kind, result, call, error } = item
     const args = (call && call.arguments) || {}
-    const rows = queryRows(result)
-    const rowIds = new Set(rows.map(row => orderId(row.workorderId)))
-    let id = orderId(args.workorder_id) || (rowIds.size === 1 ? [...rowIds][0] : '')
-    if (!id && (kind === 'protask' || kind === 'feedback')) id = tasks.get(orderId(args.task_id))
-    if (!id && kind === 'workorders' && !rows.length) id = codes.get(args.workorder_code)
-
-    const stock = kind === 'stock' || kind === 'stock_summary'
-    const rowProducts = new Set(rows.map(row => row.itemCode))
-    const product = stock && (args.item_code || (result && result.filters && result.filters.item_code) ||
-      (rowProducts.size === 1 ? [...rowProducts][0] : ''))
-    const matches = products.get(product)
-    if (!id && matches && matches.size === 1) id = [...matches][0]
-
-    const key = id ? `order:${id}` : product ? `product:${product}` : 'general'
-    if (!groups.has(key)) {
-      groups.set(key, { id: key, title: id ? orders.get(id) || `工单 ID ${id}` : product ? `产品 ${product}` : '通用查询',
-        queries: [], duplicates: new Map() })
-    }
+    const product = kind === 'stock_summary' && (args.item_code || (result && result.filters && result.filters.item_code))
+    const key = product ? `product:${product}` : 'general'
+    if (!groups.has(key)) groups.set(key, { id: key, title: product ? `物料 ${product}` : '通用查询', queries: [], duplicates: new Map() })
     const group = groups.get(key)
     let signature
     if (!error && call && call.arguments && result) {
@@ -270,14 +148,6 @@ export function queryCardPresentation(messages) {
     run.last = entry
     if (entry.text && !entry.queryPreface) run.answer = entry
   }
-  const taskQueries = new Map()
-  for (const run of runs.values()) {
-    run.priorQueries = []
-    if (run.taskIds.size !== 1) continue
-    const taskId = [...run.taskIds][0]
-    run.priorQueries = taskQueries.get(taskId) || []
-    taskQueries.set(taskId, [...run.priorQueries, ...run.queries])
-  }
   return messages.map(entry => {
     const run = entry.role === 'assistant' && runs.get(entry.runId)
     if (!run || !run.queries.length) return entry
@@ -292,7 +162,7 @@ export function queryCardPresentation(messages) {
         output.queryError = single.error
       } else {
         output.queryDetails = { count: run.queries.length, failed: run.queries.filter(query => query.error).length,
-          groups: workorderGroups(run.queries, run.priorQueries) }
+          groups: queryGroups(run.queries) }
       }
     }
     return output
@@ -311,30 +181,6 @@ export function toolProgressText(tools) {
     return running.length === 1 ? label : `${label} · 另有 ${running.length - 1} 项正在执行`
   }
   return all.length ? `已执行 ${all.length} 项操作` : ''
-}
-
-export function optionCardPresentation(messages, expanded = {}) {
-  const previous = new Map()
-  return messages.map(message => ({ ...message,
-    resultPresentation: (message.results || []).map((result, index) => {
-      if (!['tm_tool_options', 'tm_tooltype_options'].includes(result.kind)) return null
-      const id = message.resultIds && message.resultIds[index] || `${message.id}-result-${index}`
-      const scope = JSON.stringify(canonical([result.kind, result.filters || null]))
-      const data = JSON.stringify(canonical(result.options))
-      const seen = previous.has(scope)
-      const same = seen && previous.get(scope) === data
-      previous.set(scope, data)
-      const explicit = /重新查询|重新查|再查|最新|展开/.test(message.sourceText || '')
-      const title = result.kind === 'tm_tool_options' ? '工装夹具基础选项' : '工装夹具类型选项'
-      const count = result.options && result.options.tool_types
-      return {
-        id, title,
-        open: Object.prototype.hasOwnProperty.call(expanded, id) ? expanded[id] : !same || explicit,
-        summary: `${same ? '与上次查询内容相同' : seen ? '选项内容已更新' : '首次查询结果'}${count ? ` · 本次返回${count.length}个类型` : ''}`,
-        queriedAt: result.queried_at || ''
-      }
-    })
-  }))
 }
 
 export function progressFromEvent(progress, event) {

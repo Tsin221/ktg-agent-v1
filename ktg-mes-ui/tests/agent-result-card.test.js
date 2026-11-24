@@ -13,36 +13,43 @@ const componentModule = { exports: {} }
 new Function('exports', 'module', 'require', script)(componentModule.exports, componentModule, require)
 const options = componentModule.exports.default || componentModule.exports
 const compiled = compiler.compileToFunctions(component.template.content)
-const result = {
-  kind: 'workorder_progress',
-  workorder: { workorderCode: 'WO-12', workorderName: 'Demo', quantity: '10' },
-  metrics: { unit: '件', workorder_produced_fact: '4', remaining_raw: '6', ratio_percent: '40' },
-  completeness: {
-    observation_grade: 'MULTI_REQUEST_NON_ATOMIC',
-    snapshot_consistent: false,
-    business_progress_available: false,
-    business_progress_reason: 'BUSINESS_RULE_UNCONFIRMED'
-  }
+function render(result) {
+  const vm = new Vue({ ...options, propsData: { result }, render: compiled.render,
+    staticRenderFns: compiled.staticRenderFns })
+  const vnode = vm._render()
+  vm.$destroy()
+  return vnode
 }
-const vm = new Vue({ ...options, propsData: { result }, render: compiled.render,
-  staticRenderFns: compiled.staticRenderFns })
-const vnode = vm._render()
 function text(node) {
   if (Array.isArray(node)) return node.map(text).join(' ')
   if (!node || typeof node !== 'object') return ''
   return [node.text || '', ...(node.children || []).map(text)].join(' ')
 }
-const rendered = text(vnode)
-assert.match(rendered, /MULTI_REQUEST_NON_ATOMIC/)
-assert.match(rendered, /BUSINESS_RULE_UNCONFIRMED/)
-assert.match(rendered, /非同一快照/)
-assert.doesNotMatch(rendered, /来源已核验/)
-vm.$destroy()
+function tags(node) {
+  if (!node || typeof node !== 'object') return []
+  return [node.tag, ...(node.children || []).flatMap(tags)].filter(Boolean)
+}
 
-const feedbackVm = new Vue({ ...options,
-  propsData: { result: { kind: 'feedback', rows: [{ recordId: 3, quantityQualified: 0, unitOfMeasure: '件' }] } },
-  render: compiled.render, staticRenderFns: compiled.staticRenderFns })
-const feedbackText = text(feedbackVm._render())
-assert.match(feedbackText, /合格 0 件/)
-feedbackVm.$destroy()
-console.log('Agent result card renders progress completeness and preserves zero report quantities')
+const countText = text(render({ kind: 'product_count', total: 1 }))
+assert.match(countText, /产品总数/)
+assert.match(countText, /共 1 条/)
+assert.match(countText, /不含物料/)
+
+const stockText = text(render({ kind: 'stock_summary', groups: [
+  { itemId: 38, itemCode: 'CELL-18650-2200', warehouseId: 1, warehouseName: '原料仓',
+    quantityOnhand: '0', unitOfMeasure: 'PCS' }
+], queried_at: '2026-11-24T01:00:00Z' }))
+assert.match(stockText, /分仓库存汇总/)
+assert.match(stockText, /原料仓/)
+assert.match(stockText, /CELL-18650-2200.*0 PCS/)
+assert.match(stockText, /查询时间/)
+assert.match(text(render({ kind: 'stock_summary', no_records: true, groups: [] })), /不代表库存量为零/)
+
+for (const kind of ['workorder_draft_preview', 'inventory_preview', 'exploration_search', 'workorder_progress']) {
+  const historical = render({ kind, url: 'https://example.invalid', label: '<script>test</script>' })
+  assert.match(text(historical), /历史结果（仅供查看，不可执行）/)
+  assert.ok(tags(historical).includes('pre'))
+  assert.ok(!tags(historical).some(tag => ['button', 'a', 'iframe', 'script', 'form'].includes(tag)))
+  assert.match(text(historical), /<script>test<\/script>/)
+}
+console.log('Agent result card renders retained read-only cards and inert historical results')

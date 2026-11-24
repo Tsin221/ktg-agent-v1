@@ -1,7 +1,7 @@
 """Public permission subsets from the 2026-11-21 showcase account audit.
 
-The 56 count is employee permission eligibility under audited feature flags,
-not evidence of a running employee Agent. Cloud demo's actual catalog was 67.
+The historical permission export remains a MES page fixture. This test checks
+that the narrowed Agent catalogue is distinct for employee and demo identities.
 No account credentials or private runtime files are used by these fixtures.
 """
 
@@ -14,12 +14,11 @@ import runpy
 import subprocess
 import sys
 import types
-from typing import Any, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
-from ktg_agent.ktg.inventory import ISSUE, RECEIPT
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.providers.base import ModelConfig
 from ktg_agent.providers.fake import FakeProvider
@@ -102,16 +101,10 @@ def test_malformed_fixed_config_fails_closed(tmp_path: Path, payload: object) ->
 
 
 def test_audited_employee_and_demo_tool_eligibility_stays_distinct() -> None:
-    # Construct definitions only. Dummy stores are never invoked or persisted.
-    stores: dict[str, Any] = {name + "_store": object() for name in (
-        "inventory", "workorder", "dv_machinerytype", "dv_machinery", "dv_subject",
-        "dv_checkplan", "dv_repair", "tm_tooltype", "tm_tool",
-    )}
+    # Construct only current definitions; no external calls or proposal stores.
     service = QueryService(
         provider=FakeProvider(()), model_config=ModelConfig("offline", 32),
         ktg_client_factory=lambda token: KTGClient(base_url="http://mes.invalid", authorization=token),
-        inventory_actions=frozenset({ISSUE, RECEIPT}),
-        **stores,
     )
     demo = frozenset(load_export()(None))
     employee = demo - EMPLOYEE_MISSING
@@ -120,7 +113,6 @@ def test_audited_employee_and_demo_tool_eligibility_stays_distinct() -> None:
         CatalogIdentity(demo, "cloud-permission-fixture"), service._switches_provider()).candidates
     employee_tools = service._catalog.candidate_snapshot(
         CatalogIdentity(employee, "employee-permission-fixture"), service._switches_provider()).candidates
-    assert len(cloud_tools) == 67 and len(employee_tools) == 56
+    assert set(cloud_tools) == {"ktg_count_products", "ktg_query_stock_summary"}
+    assert set(employee_tools) == {"ktg_count_products"}
     assert set(employee_tools) < set(cloud_tools)
-    assert "ktg_pro_task_list" not in employee_tools and "ktg_pro_task_list" in cloud_tools
-    assert "ktg_query_stock" not in employee_tools and "ktg_query_stock" in cloud_tools

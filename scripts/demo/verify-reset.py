@@ -9,8 +9,6 @@ live=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(live)
 visitor=live.Visitor()
 _,session=visitor.call('/agent-api/v1/sessions',{'title':'恢复验证'})
-_,before=visitor.call('/demo-api/mes/dv/repair/list')
-if before.get('total',0)<4: raise AssertionError('Run live write verification before reset verification')
 root=Path(__file__).resolve().parents[2]
 subprocess.run(['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File',str(root/'scripts/demo/stop.ps1')],check=True)
 subprocess.run(['python',str(root/'scripts/demo/reset.py')],check=True)

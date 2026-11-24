@@ -16,12 +16,11 @@ from ktg_agent.context.window import ContextPolicy
 from ktg_agent.core.events import AgentEvent, AgentEventType
 from ktg_agent.core.loop import RunLimits
 from ktg_agent.core.messages import (
-    AssistantMessage, JsonObject, Message, StopReason, SystemMessage, TextBlock, ToolCall, ToolResultMessage, UserMessage,
+    AssistantMessage, JsonObject, JsonValue, Message, StopReason, SystemMessage, TextBlock, ToolCall, ToolResultMessage, UserMessage,
     message_to_dict,
 )
 from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.ktg import KTGClient
-from ktg_agent.ktg.workorders import PreviewStore
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ResponseCompleted, ToolCallCompleted
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.service import QueryService
@@ -168,7 +167,6 @@ def test_session_model_tool_is_advertised_and_emits_after_save(tmp_path: Path) -
     service = QueryService(
         provider=provider, model_config=ModelConfig("fake", 128),
         ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
-        workorder_store=PreviewStore(),
     )
     saved_versions: list[object] = []
 
@@ -368,7 +366,6 @@ def test_task_can_save_and_answer_after_work_budget_runs_out(
     service = QueryService(
         provider=provider, model_config=ModelConfig("fake", 128), limits=limits,
         ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
-        workorder_store=PreviewStore(),
     )
     def configure(run_id: str, identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str, TaskBudget]:
         tools, prompt, budget = task_run_configuration(repo, run_id, identity)
@@ -403,18 +400,18 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
     repo, session, original = setup_run(tmp_path / "evidence.sqlite")
     task_id = repo.save_task("id:1", session, original, [
         step("first", status="in_progress"), step("next"),
-    ], title="Workorders")["task_id"]
+    ], title="Product and stock")["task_id"]
     assert isinstance(task_id, str)
     history: list[Message] = []
     records: list[tuple[ToolCall, JsonObject | None, str, str | None]] = [
-        (ToolCall("early", "ktg_pro_workorder_get", {"workorder_id": 17}),
-         {"data": {"workorderId": 17, "productCode": "PRODUCT-EARLY"}, "queried_at": "now"},
-         "PRODUCT-EARLY", "first"),
-        (ToolCall("stock", "ktg_query_stock", {"item_code": "PRODUCT-OTHER", "page_size": 20}),
-         {"rows": [{"materialStockId": i, "itemCode": "PRODUCT-OTHER", "itemName": "物料" * 30,
-                    "specification": "规格" * 25, "warehouseName": "ZERO-WH", "quantityOnhand": 0,
-                    "unitOfMeasure": None, "batchCode": f"batch-{i}"} for i in range(20)],
-          "page": 1, "page_size": 20, "total": 49}, "ZERO-WH " * 1000, "next"),
+        (ToolCall("early", "ktg_count_products", {}),
+         {"kind": "product_count", "total": 17, "queried_at": "now"},
+         "COUNT-EARLY", "first"),
+        (ToolCall("stock", "ktg_query_stock_summary", {"item_code": "PRODUCT-OTHER"}),
+         {"kind": "stock_summary", "filters": {"item_code": "PRODUCT-OTHER", "warehouse_id": None},
+          "queried_at": "before", "no_records": False,
+          "groups": [{"warehouseName": "ZERO-WH", "quantityOnhand": "0", "unitOfMeasure": "pcs"}]},
+         "ZERO-WH " * 1000, "next"),
         (ToolCall("unrelated", "unrelated_read", {}), None, "unrelated " * 3500, None),
     ]
     for seq, (call, details, content, step_id) in enumerate(records, start=1):
@@ -445,7 +442,7 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
         ktg_client_factory=lambda _: Mock(get_current_user=get_identity),
     )
     result = asyncio.run(service.run_session(
-        run_id=run.id, message="Resume current workorder", history=tuple(history),
+        run_id=run.id, message="Resume current stock check", history=tuple(history),
         authorization="authorization", event_sink=lambda _: None,
         task_configuration=partial(task_run_configuration, repo),
     ))
@@ -456,46 +453,37 @@ def test_resume_keeps_early_step_evidence_and_user_input_under_window(tmp_path: 
     assert system.count('"current_step_id": "next"') == 1
     assert system.count('"version": 2') == 1
     assert system.index('"tool_call_id": "stock"') < system.index('"tool_call_id": "early"')
-    assert '"quantityOnhand": 0' not in system
+    assert '"quantityOnhand"' not in system
     assert '"stock_usage": "historical_only"' in system
-    assert '"page_count": 3' in system and '"page_size": 20' in system
-    assert '"covered_rows"' not in system
-    assert '"coverage": "partial"' in system
-    assert UserMessage((TextBlock("Resume current workorder"),)) in messages
+    assert '"item_code": "PRODUCT-OTHER"' in system
+    assert '"total": 17' in system
+    assert UserMessage((TextBlock("Resume current stock check"),)) in messages
     assert not any(isinstance(m, ToolResultMessage) and m.tool_call_id == "unrelated" for m in messages)
     for message in messages:
         if isinstance(message, ToolResultMessage):
-            assert message.content[0].text not in {"PRODUCT-EARLY", "ZERO-WH " * 1000}
+            assert message.content[0].text not in {"COUNT-EARLY", "ZERO-WH " * 1000}
     assert result.messages[1:1 + len(history)] == tuple(history)
 
 
-@pytest.mark.parametrize(("page", "total", "row_count", "truncated", "verified", "covered", "empty"), [
-    (1, 0, 0, False, True, None, True),
-    (3, 49, 9, False, True, [41, 49], False),
-    (3, 49, 0, False, False, None, False),
-    (1, 0, 0, True, False, None, False),
-    (2, 1, 0, False, True, None, False),
-])
-def test_stock_page_evidence_distinguishes_empty_and_missing_pages(
-    page: int, total: int, row_count: int, truncated: bool, verified: bool,
-    covered: list[int] | None, empty: bool,
-) -> None:
-    evidence = _read_evidence("ktg_query_stock", {
-        "page": page, "page_size": 20, "total": total, "truncated": truncated,
-        "spill": {"omitted_chars": 100},
-        "rows": [{"itemCode": "PRODUCT", "warehouseId": 17, "quantityOnhand": 0}] * row_count,
-    }, {"item_code": " PRODUCT ", "warehouse_id": 17})
+@pytest.mark.parametrize("groups", [[], [{"warehouseName": "WH", "quantityOnhand": "0"}]])
+def test_stock_summary_evidence_distinguishes_zero_and_no_records(groups: list[JsonValue]) -> None:
+    details: JsonObject = {
+        "kind": "stock_summary",
+        "filters": {"item_code": "PRODUCT", "warehouse_id": 17},
+        "queried_at": "now",
+        "no_records": not groups,
+        "groups": groups,
+    }
+    evidence = _read_evidence("ktg_query_stock_summary", details,
+                              {"item_code": "PRODUCT", "warehouse_id": 17})
     assert evidence is not None
     assert evidence["filters"] == {"item_code": "PRODUCT", "warehouse_id": 17}
-    assert evidence["page_verified"] is verified
-    assert evidence["covered_rows"] == covered
-    assert evidence["no_records"] is empty
-    assert evidence["coverage"] == ("complete" if empty else "partial")
-    if row_count:
-        assert evidence["shared"] == {"itemCode": "PRODUCT", "warehouseId": 17, "quantityOnhand": 0}
+    assert evidence["queried_at"] == "now"
+    assert evidence["no_records"] is (not groups)
+    assert evidence["groups"] == groups
 
 
-def test_task_workorder_to_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
+def test_task_product_and_stock_keeps_tool_activation_and_links_evidence(tmp_path: Path) -> None:
     repo, _, run = setup_run(tmp_path / "chain.sqlite")
     requests: list[tuple[str, Mapping[str, object]]] = []
 
@@ -504,21 +492,25 @@ def test_task_workorder_to_stock_keeps_tool_activation_and_links_evidence(tmp_pa
         if url.endswith("/getInfo"):
             return {"code": 200, "user": {"userId": 1}, "permissions": ["*:*:*"]}
         requests.append((url, params))
-        if url.endswith("/workorder/17"):
-            return {"code": 200, "data": {"workorderId": 17, "workorderCode": "WO-17",
-                                           "productCode": "STOCK-17", "quantity": 12}}
-        return {"code": 200, "total": 1, "rows": [
-            {"itemCode": "STOCK-17", "warehouseName": "MAIN-WH", "quantityOnhand": 0, "unitOfMeasure": "pcs"},
-        ]}
+        if url.endswith("/mditem/list"):
+            return {"code": 200, "total": 17, "rows": []}
+        assert url.endswith("/wmstock/summary")
+        return {"code": 200, "data": {
+            "itemCode": "STOCK-17", "warehouseId": None,
+            "hasRecords": True, "queriedAt": "2026-11-14T00:00:00Z",
+            "groups": [{"itemId": 17, "itemCode": "STOCK-17", "warehouseId": 3,
+                        "warehouseCode": "MAIN-WH", "warehouseName": "MAIN-WH",
+                        "quantityOnhand": "0", "unitOfMeasure": "pcs", "sourceRowCount": 1}],
+        }}
 
     calls = (
-        ToolCall("create", "create_task", {"title": "Check order", "steps": [step(status="in_progress")]}),
+        ToolCall("create", "create_task", {"title": "Check products and stock", "steps": [step(status="in_progress")]}),
         ToolCall("load", "load_tools", {"tools": [
-            {"name": "ktg_pro_workorder_get", "version": "1.0"},
-            {"name": "ktg_query_stock", "version": "1.0"},
+            {"name": "ktg_count_products", "version": "1.0"},
+            {"name": "ktg_query_stock_summary", "version": "1.0"},
         ]}),
-        ToolCall("workorder", "ktg_pro_workorder_get", {"workorder_id": 17}),
-        ToolCall("stock", "ktg_query_stock", {"item_code": "STOCK-17"}),
+        ToolCall("product_count", "ktg_count_products", {}),
+        ToolCall("stock", "ktg_query_stock_summary", {"item_code": "STOCK-17"}),
     )
     provider = FakeProvider((
         *(ScriptedTurn((ResponseCompleted(FinalResponse(
@@ -535,37 +527,23 @@ def test_task_workorder_to_stock_keeps_tool_activation_and_links_evidence(tmp_pa
         ),
     )
     result = asyncio.run(service.run_session(
-        run_id=run, message="Check WO-17 and its stock", history=(), authorization="Bearer test",
+        run_id=run, message="Check products and STOCK-17 stock", history=(), authorization="Bearer test",
         event_sink=lambda _: None, task_configuration=partial(task_run_configuration, repo),
     ))
     assert result.stop_reason is StopReason.LIMIT
     assert result.limit_reason == "task_incomplete"
-    business_tools = {"ktg_pro_workorder_get", "ktg_query_stock"}
+    business_tools = {"ktg_count_products", "ktg_query_stock_summary"}
     assert not business_tools.intersection(tool.name for tool in provider.requests[1].tools)
     assert business_tools <= {tool.name for tool in provider.requests[2].tools}
-    assert requests[0][0].endswith("/workorder/17")
-    assert requests[1][0].endswith("/wmstock/list")
+    assert requests[0][0].endswith("/mditem/list")
+    assert requests[1][0].endswith("/wmstock/summary")
     assert requests[1][1]["itemCode"] == "STOCK-17"
     assert len(requests) == 2
-    assert '"productCode": "STOCK-17"' in system_text(provider.requests[3].messages)
+    assert '"total": 17' in system_text(provider.requests[3].messages)
     final = system_text(provider.requests[4].messages)
-    assert '"warehouseName": "MAIN-WH"' in final and '"quantityOnhand": 0' in final
+    assert '"warehouseName": "MAIN-WH"' in final and '"quantityOnhand": "0"' in final
     starts = [event.payload for event in result.events if event.type is AgentEventType.TOOL_EXECUTION_START]
     assert [payload.get("step_id") for payload in starts] == [None, None, "stable", "stable"]
-
-
-def test_workorder_resume_confirmation_status_is_read_only_and_owner_bound() -> None:
-    store = PreviewStore()
-    ids = [store.create(user_key="id:1", action="create", request={}, preview={}) for _ in range(2)]
-    awaiting, unknown = ids
-    store.begin(preview_id=unknown, user_key="id:1", action="create")
-    store.finish(unknown, ToolResult("Unknown", status=ToolStatus.UNKNOWN, error_code="RESULT_UNKNOWN"))
-    assert store.confirmation_status(awaiting, "id:1") == "awaiting_confirmation"
-    assert store.confirmation_status(unknown, "id:1") == "outcome_unknown"
-    assert store.confirmation_status(unknown, "id:2") == "confirmation_status_unknown"
-    store.begin(preview_id=awaiting, user_key="id:1", action="create")
-    store.finish(awaiting, ToolResult("Saved"))
-    assert store.confirmation_status(awaiting, "id:1") == "succeeded"
 
 
 @pytest.mark.parametrize(("status", "queried_code", "warehouse_id", "save_allowed", "old_completed"), [
@@ -576,23 +554,23 @@ def test_workorder_resume_confirmation_status_is_read_only_and_owner_bound() -> 
     ("not_started", "A-01", None, False, False),
     ("not_started", "A-01", None, True, True),
 ])
-def test_legacy_summary_step_requires_fresh_matching_evidence(
+def test_resumed_stock_summary_step_requires_fresh_matching_evidence(
     tmp_path: Path, status: str, queried_code: str, warehouse_id: int | None, save_allowed: bool,
     old_completed: bool,
 ) -> None:
-    repo = SessionRepository(tmp_path / "legacy-stock.sqlite")
+    repo = SessionRepository(tmp_path / "resumed-stock.sqlite")
     session = repo.create_session("id:1").id
     original = repo.create_run("id:1", session, "start", "digest", {"message": "核对工单的分仓库存"}).id
     repo.update_run_status("id:1", original, "running")
     step_status = "completed" if old_completed else "in_progress"
     task_id = repo.save_task("id:1", session, original, [step(status=step_status)], title="Order")["task_id"]
     assert isinstance(task_id, str)
-    old_call = ToolCall("old", "ktg_query_stock", {"item_code": "A-01"})
+    old_call = ToolCall("old", "ktg_query_stock_summary", {"item_code": "A-01"})
     repo.append_message("id:1", original, AssistantMessage((old_call,)))
     repo.append_message("id:1", original, ToolResultMessage(
         old_call.id, (TextBlock("old quantity"),),
-        details={"page": 1, "page_size": 10, "total": 49,
-                 "rows": [{"itemCode": "A-01", "quantityOnhand": 208}] * 10},
+        details={"kind": "stock_summary", "filters": {"item_code": "A-01", "warehouse_id": None},
+                 "queried_at": "before", "no_records": True, "groups": []},
     ))
     repo.append_event("id:1", original, 1, "tool_execution_start", {
         "tool_call_id": old_call.id, "task_id": task_id, "step_id": "stable",
@@ -625,8 +603,9 @@ def test_legacy_summary_step_requires_fresh_matching_evidence(
     completed = frozenset({"stable"} if old_completed else ())
     preferred, fallback = budget.evidence(task_id, messages, events, None if old_completed else "stable", completed)
     old = next(record for record in (*preferred, *fallback) if record["tool_call_id"] == old_call.id)
-    assert old["stock_usage"] == ("new_summary_required_for_reporting" if old_completed else "historical_only")
-    assert "evidence" not in old
+    assert old["stock_usage"] == ("reuse_only_when_user_explicitly_requests_original_result"
+                                  if old_completed else "historical_only")
+    assert ("evidence" in old) is old_completed
     assert "result" not in old
     async def execute() -> ToolResult:
         return await save.execute(ToolContext(resumed, "save", identity={"userId": 1}), {

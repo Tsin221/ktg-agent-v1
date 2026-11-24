@@ -77,14 +77,13 @@ def test_reserve_must_fit_window(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings.from_env()
 
 
-@pytest.mark.parametrize("db_name", ("AGENT_SESSION_DB", "AGENT_INVENTORY_DB"))
 def test_spill_directory_cannot_be_a_database(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_name: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     _base(monkeypatch)
     same_path = str(tmp_path / "store.sqlite3")
     monkeypatch.setenv("AGENT_SPILL_DIR", same_path)
-    monkeypatch.setenv(db_name, same_path)
+    monkeypatch.setenv("AGENT_SESSION_DB", same_path)
     with pytest.raises(RuntimeError, match="AGENT_SPILL_DIR"):
         Settings.from_env()
 

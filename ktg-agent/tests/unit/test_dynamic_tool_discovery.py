@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
@@ -14,14 +15,6 @@ from ktg_agent.core.events import AgentEventType
 from ktg_agent.core.messages import AssistantMessage, StopReason, TextBlock, ToolCall, ToolResultMessage
 from ktg_agent.core.loop import RunLimits
 from ktg_agent.ktg.client import KTGClient, KTGError
-from ktg_agent.ktg.dv_checkplan_writes import DvCheckPlanPreviewStore
-from ktg_agent.ktg.dv_machinery_writes import DvMachineryPreviewStore
-from ktg_agent.ktg.dv_machinerytype_writes import DvMachineryTypePreviewStore
-from ktg_agent.ktg.dv_repair_writes import DvRepairPreviewStore
-from ktg_agent.ktg.dv_subject_writes import DvSubjectPreviewStore
-from ktg_agent.ktg.inventory import ISSUE, RECEIPT, InventoryStore
-from ktg_agent.ktg.tm_tool_writes import TmToolPreviewStore
-from ktg_agent.ktg.tm_tooltype_writes import TmToolTypePreviewStore
 from ktg_agent.providers.base import FinalResponse, ModelConfig, ResponseCompleted, Usage
 from ktg_agent.providers.fake import FakeProvider, ScriptedTurn
 from ktg_agent.providers.openai_compatible import OpenAICompatibleProvider
@@ -29,12 +22,12 @@ from ktg_agent.service import QueryService
 from ktg_agent.server import AgentHTTPServer
 from ktg_agent.sessions import SessionRepository
 from ktg_agent.sessions.service import SessionService
-from ktg_agent.tools.catalog import CatalogIdentity, CatalogSwitches
+from ktg_agent.tools.catalog import CatalogIdentity, CatalogSwitches, ToolCatalog, ToolManifest
 from ktg_agent.tools.discovery import RunToolDiscovery
 from ktg_agent.tools.legacy_catalog import build_legacy_catalog
-from ktg_agent.tools.registry import ToolRegistry
+from ktg_agent.tools.permissions import PermissionLeaf
+from ktg_agent.tools.registry import ExecutionMode, RetryPolicy, ToolEffect, ToolRegistry
 from ktg_agent.ktg.queries import build_query_tools
-from ktg_agent.ktg.workorders import PreviewStore, build_workorder_tools
 from typing import cast
 
 
@@ -92,7 +85,7 @@ def test_fake_provider_receives_loaded_schema_only_on_next_request() -> None:
         search_result = cast(dict[str, object], search_events[0].payload["result"])
         assert "ktg_count_products" in {
             item["name"] for item in cast(list[dict[str, object]], search_result["items"])}
-        assert "ktg_create_workorder_draft" not in json.dumps(search_result)
+        assert "ktg_query_stock_summary" not in json.dumps(search_result)
         assert result.final_message is not None
         assert result.final_message.content == (TextBlock("共有 3 个产品。"),)
         assert any(event.type is AgentEventType.TOOL_EXECUTION_END
@@ -108,8 +101,8 @@ def test_fake_provider_receives_loaded_schema_only_on_next_request() -> None:
     asyncio.run(scenario())
 
 
-def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
-    name = "ktg_tm_tool_detail"
+def test_loaded_stock_summary_constraint_reaches_model_http_request() -> None:
+    name = "ktg_query_stock_summary"
     requests = []
     mes_requests = []
 
@@ -131,7 +124,7 @@ def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
             }]}
             finish_reason = "tool_calls"
         else:
-            delta = {"content": "请提供 ID 或编码。"}
+            delta = {"content": "请提供物料编码。"}
             finish_reason = "stop"
         frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
         return httpx.Response(
@@ -144,7 +137,7 @@ def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
         assert url.endswith("/getInfo")
         return {
             "code": 200, "user": {"userId": 7, "userName": "alice"},
-            "permissions": ["mes:tm:tool:list", "mes:tm:tool:query"],
+            "permissions": ["mes:wm:wmstock:list"],
         }
 
     provider = OpenAICompatibleProvider(api_key="test-key", base_url="http://model.test/v1")
@@ -162,7 +155,7 @@ def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
         ),
     ):
         result = asyncio.run(service.run_session(
-            run_id="tm-tool-http", message="按编码查询工装夹具详情", history=(),
+            run_id="stock-summary-http", message="查询分仓库存", history=(),
             authorization="Bearer test", event_sink=lambda _event: None,
         ))
 
@@ -170,16 +163,14 @@ def test_loaded_tm_tool_detail_constraint_reaches_model_http_request() -> None:
     functions = [{tool["function"]["name"]: tool["function"] for tool in body["tools"]}
                  for body in requests]
     assert [set(step) for step in functions[:2]] == [{"search_tools", "load_tools"}] * 2
-    assert functions[2][name]["parameters"]["oneOf"] == [
-        {"required": ["tool_id"]}, {"required": ["tool_code"]},
-    ]
+    assert functions[2][name]["parameters"]["required"] == ["item_code"]
     assert functions[2][name]["parameters"]["additionalProperties"] is False
     assert any(event.type is AgentEventType.TOOL_EXECUTION_END
                and event.payload.get("tool_call_id") == "call-2"
                and event.payload.get("error_code") == "VALIDATION_ERROR" for event in result.events)
     tool_message = next(message for message in requests[3]["messages"]
                         if message.get("tool_call_id") == "call-2")
-    assert "必须且只能提供 tool_id 或 tool_code" in tool_message["content"]
+    assert "VALIDATION_ERROR" in tool_message["content"] and "item_code" in tool_message["content"]
     assert mes_requests and all(url.endswith("/getInfo") for url in mes_requests)
 
 
@@ -197,22 +188,22 @@ def test_natural_language_discovery_and_actionable_load_errors() -> None:
 
         discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access)
         cases = {"查询指定物料分仓库存汇总": "ktg_query_stock_summary",
-                 "查询库存明细 批次 库位": "ktg_query_stock"}
+                 "统计产品记录总数量": "ktg_count_products"}
         for query, expected in cases.items():
             result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
             assert result.details is not None
             assert cast(list[dict[str, object]], result.details["items"])[0]["name"] == expected
             assert expected in result.content and "1.0" in result.content
         overview = await discovery.execute(ToolCall("s", "search_tools", {"query": ""}))
-        assert overview.details is not None and len(cast(list[object], overview.details["items"])) == 5
+        assert overview.details is not None and len(cast(list[object], overview.details["items"])) == 2
         invalid = await discovery.execute(ToolCall("s", "search_tools", {"module": "库存"}))
         assert invalid.error_code == "VALIDATION_ERROR" and "wm" in invalid.content
         wrong = await discovery.execute(ToolCall("l", "load_tools", {"tools": [
-            {"name": "ktg_query_stock", "version": "1.0.0"}]}))
+            {"name": "ktg_query_stock_summary", "version": "1.0.0"}]}))
         assert wrong.error_code == "TOOL_VERSION_MISMATCH"
-        assert "1.0" in wrong.content and "ktg_query_stock" in wrong.content
+        assert "1.0" in wrong.content and "ktg_query_stock_summary" in wrong.content
         failed_batch = await discovery.execute(ToolCall("l", "load_tools", {"tools": [
-            {"name": "ktg_query_stock", "version": "1.0"},
+            {"name": "ktg_query_stock_summary", "version": "1.0"},
             {"name": "invented", "version": "1.0"}]}))
         assert "tools[1]" in failed_batch.content
         assert discovery.begin_request("next").names == frozenset({"search_tools", "load_tools"})
@@ -222,177 +213,7 @@ def test_natural_language_discovery_and_actionable_load_errors() -> None:
         assert "not evidence" in fallback.content
         permissions = frozenset()
         empty = await discovery.execute(ToolCall("s", "search_tools", {"query": "anything"}))
-        assert "ktg_query_stock" not in empty.content
-
-    asyncio.run(scenario())
-
-
-def test_tm_search_distinguishes_nearby_intents() -> None:
-    async def scenario() -> None:
-        service = QueryService(
-            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
-            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
-            tm_tool_store=TmToolPreviewStore(),
-            tm_tooltype_store=TmToolTypePreviewStore(),
-        )
-        permissions = frozenset({"*:*:*"})
-        switches = service._switches_provider()
-        catalog = service._catalog
-        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "tm-search"), switches)
-
-        async def access() -> tuple[frozenset[str], CatalogSwitches]:
-            return permissions, switches
-
-        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access, page_module="tm")
-        cases = {
-            "分页查询在库工装夹具台账": "ktg_tm_tool_list",
-            "按完整编码查一条工装夹具详情": "ktg_tm_tool_detail",
-            "查询有哪些工装夹具类型": "ktg_tm_tooltype_list",
-            "查询工装夹具类型详情": "ktg_tm_tooltype_detail",
-            "查询新增夹具可用的类型和台账状态选项": "ktg_tm_tool_options",
-            "查询工装类型的维护方式和一件一码选项": "ktg_tm_tooltype_options",
-            "为工装夹具新增生成预览": "ktg_preview_tm_tool_create",
-            "生成工装夹具类型新增预览": "ktg_preview_tm_tooltype_create",
-            "修改工装夹具品牌生成预览": "ktg_preview_tm_tool_update",
-            "修改工装夹具类型维护周期生成预览": "ktg_preview_tm_tooltype_update",
-            "删除一条在库工装夹具生成预览": "ktg_preview_tm_tool_delete",
-            "生成删除工装夹具类型的预览": "ktg_preview_tm_tooltype_delete",
-        }
-        mismatches = {}
-        for query, expected in cases.items():
-            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
-            assert result.details is not None and result.details["match_type"] == "matched"
-            items = cast(list[dict[str, object]], result.details["items"])
-            assert expected in {item["name"] for item in items}, query
-            if items[0]["name"] != expected:
-                mismatches[query] = (expected, items[0]["name"])
-            assert not any(item["name"] in {
-                f"ktg_tm_{kind}_{action}" for kind in ("tool", "tooltype")
-                for action in ("create", "update", "delete")
-            } for item in items)
-        assert not mismatches
-
-        fallback = await discovery.execute(ToolCall("s", "search_tools", {
-            "query": "火星气候", "module": "tm",
-        }))
-        assert fallback.details is not None
-        assert fallback.details["match_type"] == "available_alternatives"
-
-        permissions = frozenset({"mes:tm:tool:list"})
-        restricted = await discovery.execute(ToolCall("s", "search_tools", {
-            "query": "工装夹具详情", "module": "tm",
-        }))
-        assert restricted.details is not None
-        items = cast(list[dict[str, object]], restricted.details["items"])
-        assert {item["name"] for item in items} == {"ktg_tm_tool_list"}
-
-    asyncio.run(scenario())
-
-
-def test_device_search_distinguishes_records_options_and_previews() -> None:
-    async def scenario() -> None:
-        service = QueryService(
-            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
-            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
-            dv_repair_store=DvRepairPreviewStore(),
-            dv_checkplan_store=DvCheckPlanPreviewStore(),
-            dv_subject_store=DvSubjectPreviewStore(),
-            dv_machinery_store=DvMachineryPreviewStore(),
-            dv_machinerytype_store=DvMachineryTypePreviewStore(),
-        )
-        permissions = frozenset({"*:*:*"})
-        switches = service._switches_provider()
-        catalog = service._catalog
-        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "dv-search"), switches)
-
-        async def access() -> tuple[frozenset[str], CatalogSwitches]:
-            return permissions, switches
-
-        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access, page_module="dv")
-        cases = {
-            "维修单列表 维修结果筛选": "ktg_dv_repair_list",
-            "维修单详情 完工日期 验收": "ktg_dv_repair_detail",
-            "维修内容 故障现象 lineId": "ktg_dv_repair_lines",
-            "维修选项 字典值": "ktg_dv_repair_options",
-            "维修设备候选 关联设备": "ktg_dv_repair_machinery_candidates",
-            "维修项目候选 关联项目": "ktg_dv_repair_subject_candidates",
-            "预览删除维修单 内容行数": "ktg_preview_dv_repair_delete",
-            "预览删除维修内容 内容行ID": "ktg_preview_dv_repair_line_delete",
-            "分页筛选点检保养计划": "ktg_dv_checkplan_list",
-            "查询单条点检保养计划详情": "ktg_dv_checkplan_detail",
-            "查询点检计划已关联设备明细": "ktg_dv_checkplan_links",
-            "查询计划可选设备候选": "ktg_dv_checkplan_machinery_candidates",
-            "查询计划可关联项目候选": "ktg_dv_checkplan_subject_candidates",
-            "查询点检保养项目台账": "ktg_dv_subject_list",
-            "查询点检保养项目详情": "ktg_dv_subject_detail",
-            "查询计划周期类型选项": "ktg_dv_checkplan_options",
-            "分页筛选车间设备台账": "ktg_dv_machinery_list",
-            "按编码查询设备详情": "ktg_dv_machinery_detail",
-            "查询设备分类树": "ktg_dv_machinerytype_tree",
-            "查询设备分类详情与影响面": "ktg_dv_machinerytype_detail",
-            "查询启用车间候选": "ktg_md_machinery_workshop_options",
-            "生成新增设备预览": "ktg_preview_dv_machinery_create",
-            "生成新增设备分类预览": "ktg_preview_dv_machinerytype_create",
-        }
-        mismatches = {}
-        for query, expected in cases.items():
-            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
-            assert result.details is not None and result.details["match_type"] == "matched"
-            items = cast(list[dict[str, object]], result.details["items"])
-            for item in items:
-                assert catalog.manifest(cast(str, item["name"])).expose_to_model
-            if items[0]["name"] != expected:
-                mismatches[query] = (expected, items[0]["name"])
-        assert not mismatches
-
-    asyncio.run(scenario())
-
-
-def test_production_and_inventory_search_separates_nearby_intents(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        service = QueryService(
-            provider=FakeProvider(()), model_config=ModelConfig("fake", 32),
-            ktg_client_factory=lambda token: KTGClient(base_url="http://mes.test", authorization=token),
-            inventory_store=InventoryStore(str(tmp_path / "inventory.sqlite3")),
-            inventory_actions=frozenset({RECEIPT, ISSUE}),
-            enable_workorder_progress=True,
-        )
-        permissions = frozenset({"*:*:*"})
-        switches = service._switches_provider()
-        catalog = service._catalog
-        candidate = catalog.candidate_snapshot(CatalogIdentity(permissions, "pro-wm-search"), switches)
-
-        async def access() -> tuple[frozenset[str], CatalogSwitches]:
-            return permissions, switches
-
-        discovery = RunToolDiscovery(catalog, candidate, ToolRegistry(), access)
-        cases = {
-            "一共有多少产品": "ktg_count_products",
-            "分页查询产品资料明细": "ktg_search_items",
-            "按状态分页查询生产工单列表": "ktg_list_workorders",
-            "查询单张生产工单详情": "ktg_pro_workorder_get",
-            "查询工单生产进度": "ktg_pro_workorder_progress",
-            "生产任务列表 工序": "ktg_pro_task_list",
-            "生产任务详情 开始时间": "ktg_pro_task_get",
-            "报工列表 报工时间": "ktg_pro_feedback_list",
-            "报工详情 不合格数量": "ktg_pro_feedback_get",
-            "生成新增生产工单预览": "ktg_preview_create_workorder_draft",
-            "编辑工单草稿生成预览": "ktg_preview_edit_workorder_draft",
-            "查指定物料的分仓库存": "ktg_query_stock_summary",
-            "预览物料入库单": "ktg_preview_item_receipt",
-            "预览生产领料单": "ktg_preview_production_issue",
-            "查询库存操作执行回执": "ktg_wm_operation_result",
-            "查看生产领料执行回执": "ktg_wm_operation_result",
-        }
-        mismatches = {}
-        for query, expected in cases.items():
-            result = await discovery.execute(ToolCall("s", "search_tools", {"query": query}))
-            assert result.details is not None and result.details["match_type"] == "matched"
-            items = cast(list[dict[str, object]], result.details["items"])
-            assert all(catalog.manifest(cast(str, item["name"])).expose_to_model for item in items)
-            if items[0]["name"] != expected:
-                mismatches[query] = (expected, items[0]["name"])
-        assert not mismatches
+        assert "ktg_query_stock_summary" not in empty.content
 
     asyncio.run(scenario())
 
@@ -416,7 +237,7 @@ def test_capability_budget_limit_preserves_overview_without_business_calls() -> 
         assert result.stop_reason is StopReason.LIMIT
         assert result.final_message is not None
         text = " ".join(block.text for block in result.final_message.content if isinstance(block, TextBlock))
-        assert "尚未完成" in text and "查询产品" in text and "不代表已执行业务" in text
+        assert "尚未完成" in text and "统计产品数量" in text and "不代表已执行业务" in text
         assert len(provider.requests) == 1
 
     asyncio.run(scenario())
@@ -460,7 +281,7 @@ def test_http_tool_diagnostics_are_filtered_by_current_user(tmp_path: Path) -> N
         assert alice_status == bob_status == 200
         assert anonymous_status == 401
         assert {item["name"] for item in cast(list[dict[str, object]], alice["items"])} == {
-            "ktg_count_products", "ktg_search_items"}
+            "ktg_count_products"}
         assert bob["items"] == []
         assert "handler_ref" not in json.dumps(alice)
     finally:
@@ -510,8 +331,29 @@ def test_loaded_names_do_not_cross_runs_or_users() -> None:
 
 def test_load_rejects_hidden_wrong_version_revoked_and_over_budget_atomically() -> None:
     async def scenario() -> None:
-        definitions = (*build_query_tools(), *build_workorder_tools(PreviewStore()))
-        catalog = build_legacy_catalog(definitions)
+        count, summary = sorted(build_query_tools(), key=lambda item: item.name)
+        # Hidden confirmations are a generic runtime feature even though the
+        # current business profile no longer registers any write tools.
+        hidden_definition = replace(
+            count, name="example_hidden_confirmation", expose_to_model=False,
+            effect=ToolEffect.WRITE, execution_mode=ExecutionMode.SEQUENTIAL,
+            retry_policy=RetryPolicy.NEVER,
+        )
+        definitions = (count, summary, hidden_definition)
+        factories = {item.name: lambda item=item: item for item in definitions}
+        catalog = ToolCatalog(factories)
+        for item in definitions:
+            catalog.register_factory(ToolManifest(
+                name=item.name, version=item.version,
+                module="wm" if item.name == summary.name else "md", domain="test",
+                label=item.label, description=item.description,
+                permission_policy=PermissionLeaf(item.required_permissions[0]),
+                effect=item.effect, execution_mode=item.execution_mode,
+                retry_policy=item.retry_policy, timeout_seconds=item.timeout_seconds,
+                expose_to_model=item.expose_to_model,
+                confirmation_policy="none" if item.expose_to_model else "trusted_confirmation",
+                proposal_store_effect=False, handler_ref=item.name,
+            ), factories[item.name])
         switches = CatalogSwitches({"md": True, "wm": True, "pro": True},
                                     {definition.name: True for definition in definitions})
         permissions = frozenset({"*:*:*"})
@@ -524,7 +366,7 @@ def test_load_rejects_hidden_wrong_version_revoked_and_over_budget_atomically() 
         discovery = RunToolDiscovery(catalog, candidate, registry, access,
                                      max_active_tools=1)
         hidden = await discovery.execute(ToolCall("a", "load_tools", {"tools": [
-            {"name": "ktg_create_workorder_draft", "version": "1.0"}]}))
+            {"name": "example_hidden_confirmation", "version": "1.0"}]}))
         assert hidden.error_code == "TOOL_NOT_FOUND"
         wrong = await discovery.execute(ToolCall("b", "load_tools", {"tools": [
             {"name": "ktg_count_products", "version": "2.0"}]}))
@@ -532,7 +374,7 @@ def test_load_rejects_hidden_wrong_version_revoked_and_over_budget_atomically() 
         with patch.object(catalog, "resolve_definition", wraps=catalog.resolve_definition) as resolver:
             over = await discovery.execute(ToolCall("c", "load_tools", {"tools": [
                 {"name": "ktg_count_products", "version": "1.0"},
-                {"name": "ktg_search_items", "version": "1.0"}]}))
+                {"name": "ktg_query_stock_summary", "version": "1.0"}]}))
             assert resolver.call_count == 0
         assert over.error_code == "ACTIVE_LIMIT_EXCEEDED"
         assert discovery.begin_request("one").names == frozenset({"search_tools", "load_tools"})

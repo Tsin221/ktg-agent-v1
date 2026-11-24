@@ -21,15 +21,12 @@ from ktg_agent.tools.registry import (
 )
 
 
-MODULES = ("md", "wm", "pro", "qc", "dv", "cal", "tm", "report", "system")
+MODULES = ("md", "wm", "pro", "qc")
 
 # Capability vocabulary only. These aliases discover tools, never business records.
 _CAPABILITY_ALIASES = {
     "仓储": ("库存",), "stock": ("库存",), "inventory": ("库存",),
     "存货": ("库存",), "存量": ("库存",),
-    "修理": ("维修",), "检修": ("维修",), "坏了": ("维修",),
-    "坏掉": ("维修",), "故障": ("维修",),
-    "机器": ("设备",), "机台": ("设备",),
     "料号": ("物料", "编码"), "生产订单": ("工单",),
     "做到哪": ("进度",), "进展": ("进度",),
 }
@@ -88,7 +85,7 @@ def directory_definitions() -> tuple[ToolDefinition, ToolDefinition]:
         retry_policy=RetryPolicy.NEVER, timeout_seconds=10,
         execute=_not_directly_executable,
     ) for name, label, description, schema in (
-        ("search_tools", "搜索工具", "搜索当前用户可用的工具能力，不搜索业务记录；返回准确名称、版本、边界、total 和 next_offset。询问能力时用 query=空字符串；可按 next_offset 继续浏览，不必为介绍能力执行业务工具。模块只接受 md/wm/pro/qc/dv/cal/tm/report/system。", SEARCH_SCHEMA),
+        ("search_tools", "搜索工具", "搜索当前用户可用的工具能力，不搜索业务记录；返回准确名称、版本、边界、total 和 next_offset。询问能力时用 query=空字符串；可按 next_offset 继续浏览，不必为介绍能力执行业务工具。模块只接受 md/wm/pro/qc。", SEARCH_SCHEMA),
         ("load_tools", "加载工具", "仅复制 search_tools 返回的准确名称和版本，下一次模型请求才可调用。默认 add 保留已加载工具；replace 替换整个活动业务工具集合，可传空数组清空，释放预算后仍可重新加载。禁止猜名称、改版本；只保留当前需要的工具。", LOAD_SCHEMA),
     ))  # type: ignore[return-value]
 
