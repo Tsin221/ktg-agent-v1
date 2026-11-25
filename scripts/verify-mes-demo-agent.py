@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIRECT_MES = "http://127.0.0.1:18090"
 DIRECT_AGENT = "http://127.0.0.1:18091"
 GATEWAY = "http://127.0.0.1:18854"
-EXPECTED = {"ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview", "ktg_query_workorder_materials", "ktg_query_workorder_quality", "ktg_query_production_trace"}
+EXPECTED = {"ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview", "ktg_query_workorder_materials", "ktg_query_workorder_quality", "ktg_query_production_trace", "ktg_resolve_business_reference"}
 EXPECTED_SESSION_TOOLS = EXPECTED | {"ktg_prepare_workorder_operations"}
 PROGRESS_COUNTS = (
     "planned", "allocated", "assembled", "waitingAssembly", "waitingInspection",

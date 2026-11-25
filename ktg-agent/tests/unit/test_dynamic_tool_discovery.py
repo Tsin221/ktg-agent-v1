@@ -40,6 +40,25 @@ def turn(*calls: ToolCall, answer: str | None = None) -> ScriptedTurn:
     )),))
 
 
+def test_bare_reference_initially_exposes_lookup_instead_of_stock_guess():
+    async def scenario() -> None:
+        async def transport(url, _headers, params, _timeout):
+            if url.endswith('/getInfo'):
+                return {'code': 200, 'user': {'userId': 7}, 'permissions': ['*:*:*']}
+            if url.endswith('/units/trace'):
+                return {'code': 200, 'data': {'traceStatus': 'TRACKED', 'snId': '23', 'snCode': 'REF-123',
+                    'workorderId': '98', 'workorderCode': 'WO-98', 'itemCode': 'MODULE', 'unitState': 'WAIT_DISPOSITION'}}
+            return {'code': 200, 'total': 0, 'rows': []}
+        provider = FakeProvider((turn(ToolCall('resolve', 'ktg_resolve_business_reference', {'code': 'REF-123'})),
+                                 turn(answer='结论：这是待处置单件。')))
+        service = QueryService(provider=provider, model_config=ModelConfig('fake', 256),
+            ktg_client_factory=lambda token: KTGClient(base_url='http://mes.test', authorization=token, transport=transport))
+        result = await service.run_session(run_id='resolve-run', message='REF-123', history=(), authorization='Bearer test', event_sink=lambda _: None)
+        assert {x.name for x in provider.requests[0].tools} == {'search_tools', 'load_tools', 'ktg_resolve_business_reference'}
+        assert any(isinstance(m, ToolResultMessage) and m.details and m.details.get('resolution') == 'matched' for m in result.messages)
+    asyncio.run(scenario())
+
+
 def test_fake_provider_receives_loaded_schema_only_on_next_request() -> None:
     async def scenario() -> None:
         requested: list[str] = []

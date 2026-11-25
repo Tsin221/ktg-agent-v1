@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from ktg_agent.core.messages import (
     SystemMessage,
     TextBlock,
     ToolResultMessage,
+    ToolCall,
     UserMessage,
 )
 from ktg_agent.ktg import KTGClient, build_query_tools
@@ -28,6 +30,7 @@ from ktg_agent.ktg.workorder_materials import build_workorder_materials_tool
 from ktg_agent.ktg.workorder_overview import build_workorder_overview_tool
 from ktg_agent.ktg.workorder_quality import build_workorder_quality_tool
 from ktg_agent.ktg.production_trace import build_production_trace_tool
+from ktg_agent.ktg.business_reference import NAME as REFERENCE_TOOL_NAME, build_business_reference_tool
 from ktg_agent.operations.store import OperationPlanStore
 from ktg_agent.operations.tool import TOOL_NAME as OPERATION_TOOL_NAME, build_workorder_operation_tool
 from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
@@ -42,7 +45,8 @@ from ktg_agent.core.task_budget import TASK_CLOSEOUT_TURNS, TASK_SAVE_LIMIT, Tas
 
 type KTGClientFactory = Callable[[str], KTGClient]
 
-SYSTEM_PROMPT = """你是 KTG MES 生产主管助手，仅有六项业务查询，无业务写入、预览确认、召回、隔离或供应商处理。问能力时 search_tools(query="") 只查授权目录；复制搜索返回的工具名和版本，load_tools 后下一次请求才能调用。搜索备选不等于请求受支持。
+SYSTEM_PROMPT = """你是 KTG MES 生产主管助手，仅有七项业务查询，无业务写入、预览确认、召回、隔离或供应商处理。问能力时 search_tools(query="") 只查授权目录；复制搜索返回的工具名和版本，load_tools 后下一次请求才能调用。搜索备选不等于请求受支持。
+业务编码识别：用户仅给一个编码、说“查这个/这个编号是什么”或编码类别不明确，先用 ktg_resolve_business_reference 核对真实对象（若首轮已提供该工具，直接调用，否则搜索“业务编码识别”并加载），不能仅因格式像物料而查库存。已明确对象类型则直接使用对应业务工具。若无类型信息且某单域未匹配，应换用编码识别而非停止。matched 是当前可见范围内唯一核实匹配，matched_partial 表示已核实一项但其他范围未覆盖，ambiguous 要列出各真实候选并结合上下文或澄清；not_found/unconfirmed 不等于全系统不存在。SN 匹配后直接说明所属工单及单件当前状态，必要时按 SN 查追溯、按所属工单+SN查质量；物料用 item_code 查库存，批次用已核实的 item_code+batch_code 查实际生产追溯。批次存在于现存记录或入库单行不等于已入库、实际消耗或库存充足。历史编码身份不代替本轮业务状态。
 事实须来自当前用户授权的实际工具结果，禁止猜编号、数量、状态或扩大权限。未知、失败、不完整或无匹配不当作零/全量。口语工单名称先用概览定位，明确指代沿用最近已核实对象，实时状态重新查询，无需重复问编号；多个候选无法唯一确定才追问。自主组合工具、说明范围和查询时点。源业务时间无时区按MES原样，不能认定UTC或自行加减时差；仅明确含时区的时间可换算并注明。
 ktg_count_products：仅产品总数，不含物料或明细。ktg_query_stock_summary：明确物料编码，按分仓数量/单位/时间报告；不推算跨仓合计，无匹配不等于零。
 ktg_query_workorder_overview：按名称片段、编号、产品、状态、日期筛选，不擅自限今日；进度、完结阻塞或比较时 include_progress=true。依据 total、分页、coverage，区分草稿、未获取进度和已完工。按实际 completionReasons 说明已下达工单阻塞，不给已完工加阻塞或猜缺料报废。
@@ -78,7 +82,7 @@ class QueryService:
             max_run_seconds=90, max_parallel_reads=3,
         )
         definitions = (*build_query_tools(), build_workorder_overview_tool(), build_workorder_materials_tool(),
-                       build_workorder_quality_tool(), build_production_trace_tool())
+                       build_workorder_quality_tool(), build_production_trace_tool(), build_business_reference_tool())
         self._definitions = definitions
         self._operation_store: OperationPlanStore | None = None
         self._registry = ToolRegistry(definitions)
@@ -157,6 +161,17 @@ class QueryService:
         )
         return discovery, registry, self._tool_runner(candidate, discovery, registry)
 
+    @staticmethod
+    async def _prime_reference_tool(discovery: RunToolDiscovery, message: str) -> None:
+        """Make one small read schema readily available for bare code-like input, not by prefix."""
+        value = message.strip().strip('`')
+        if (REFERENCE_TOOL_NAME not in discovery.candidate.candidates
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{1,254}", value)
+                or not (value.isupper() or any(ch.isdigit() or ch in "._:/-" for ch in value))):
+            return
+        await discovery.execute(ToolCall(str(uuid4()), "load_tools", {"tools": [
+            {"name": REFERENCE_TOOL_NAME, "version": discovery.candidate.candidates[REFERENCE_TOOL_NAME]}]}))
+
     async def available_tools(self, authorization: str) -> JsonObject:
         """Authenticated, user-filtered catalog diagnostics (no admin metadata)."""
         client = self._ktg_client_factory(authorization)
@@ -209,8 +224,8 @@ class QueryService:
     def build_system_prompt(self, page_context: JsonObject | None) -> str:
         system_prompt = SYSTEM_PROMPT
         if self.operation_plans_enabled():
-            system_prompt = system_prompt.replace("仅有六项业务查询，无业务写入、预览确认、召回、隔离或供应商处理。",
-                "提供六项查询与受控工单操作准备，不能自行写入；无质量处置、召回、隔离或供应商处理。")
+            system_prompt = system_prompt.replace("仅有七项业务查询，无业务写入、预览确认、召回、隔离或供应商处理。",
+                "提供七项查询与受控工单操作准备，不能自行写入；无质量处置、召回、隔离或供应商处理。")
             system_prompt += ("\n工单操作 ktg_prepare_workorder_operations：先按用户意图查询定位，必要时 inspect 产品/工单及有效下达选项（产品加quantity可查预计备料），"
                               "再 prepare 创建、修改草稿、下达及联合备料的有序方案。需求日期和歧义配置须澄清，确定配置可自动选择；"
                               "同批多个工单条件下达用联合 check_materials 和依赖，并在 release 设置 warehouse_reference_sufficient 复核。"
@@ -286,6 +301,7 @@ class QueryService:
         candidate = self._catalog.candidate_snapshot(
             CatalogIdentity(permissions, run_id), self._switches_provider())
         discovery, registry, runner = self._run_discovery(candidate, client, identity)
+        await self._prime_reference_tool(discovery, clean_message)
         loop = AgentLoop(
             provider=self._provider,
             tool_registry=registry,
@@ -354,6 +370,7 @@ class QueryService:
         )
         discovery, registry, runner = self._run_discovery(
             candidate, client, identity, page_context, session_tools)
+        await self._prime_reference_tool(discovery, message)
         loop = AgentLoop(
             provider=self._provider,
             tool_registry=registry,

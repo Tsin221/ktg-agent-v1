@@ -21,6 +21,7 @@ WORKORDER = "ktg_query_workorder_overview"
 MATERIALS = "ktg_query_workorder_materials"
 QUALITY = "ktg_query_workorder_quality"
 TRACE = "ktg_query_production_trace"
+REFERENCE = "ktg_resolve_business_reference"
 
 
 def test_tools_import_in_fresh_process() -> None:
@@ -69,8 +70,8 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         model_id="test-model", ktg_base_url="http://127.0.0.1:8080")
     service = create_service(settings)
     admin = CatalogIdentity(frozenset({"*:*:*"}), "run")
-    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE}
-    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE}
+    assert set(service._catalog._manifests) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE, REFERENCE}
+    assert set(service._catalog.candidate_snapshot(admin, service._switches_provider()).candidates) == RETAINED | {WORKORDER, MATERIALS, QUALITY, TRACE, REFERENCE}
     assert {schema.name for schema in service.model_tool_schemas} == {"search_tools", "load_tools"}
 
     definition = service._catalog.resolve_definition(WORKORDER, service._catalog.manifest(WORKORDER).version)
@@ -105,6 +106,15 @@ def test_service_assembles_exact_read_only_candidate_set() -> None:
         identity = CatalogIdentity(frozenset(granted), "run")
         candidates = service._catalog.candidate_snapshot(identity, service._switches_provider()).candidates
         assert (TRACE in candidates) is (omitted is None)
+
+    reference_definition = service._catalog.resolve_definition(REFERENCE, service._catalog.manifest(REFERENCE).version)
+    reference_permissions = set(reference_definition.required_permissions)
+    assert reference_definition.effect is ToolEffect.READ
+    assert reference_permissions == trace_permissions | {"mes:pro:workorder:list", "mes:wm:wmstock:list", "mes:wm:itemrecptline:list"}
+    for omitted in [None, *sorted(reference_permissions)]:
+        granted = reference_permissions if omitted is None else reference_permissions - {omitted}
+        candidates = service._catalog.candidate_snapshot(CatalogIdentity(frozenset(granted), "run"), service._switches_provider()).candidates
+        assert (REFERENCE in candidates) is (omitted is None)
 
 
 @pytest.mark.parametrize(("method", "path"), [

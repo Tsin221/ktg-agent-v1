@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from ktg_agent.tools.catalog import ToolCatalog, ToolFactory, ToolManifest
 from ktg_agent.tools.permissions import PermissionAll, PermissionAny, PermissionLeaf, PermissionPolicy
 from ktg_agent.tools.registry import ToolDefinition, ToolDefinitionError
+from ktg_agent.ktg.business_reference import NAME as REFERENCE_TOOL, PERMISSIONS as REFERENCE_PERMISSIONS
 
 
 _DOMAINS: dict[str, tuple[str, str, PermissionPolicy]] = {
@@ -24,6 +25,7 @@ _DOMAINS: dict[str, tuple[str, str, PermissionPolicy]] = {
         PermissionLeaf("mes:pro:execution:trace"), PermissionLeaf("mes:pro:execution:query"),
         PermissionLeaf("mes:md:mditem:list"),
     ))),
+    REFERENCE_TOOL: ("pro", "reference", PermissionAll(tuple(PermissionLeaf(p) for p in REFERENCE_PERMISSIONS))),
     "ktg_prepare_workorder_operations": ("pro", "workorder", PermissionAll((
         PermissionLeaf("mes:pro:workorder:list"), PermissionLeaf("mes:pro:workorder:query"),
         PermissionAny((PermissionLeaf("mes:pro:workorder:add"), PermissionLeaf("mes:pro:workorder:edit"),

@@ -32,7 +32,7 @@ def build_query_tools() -> tuple[ToolDefinition, ...]:
             name=STOCK_SUMMARY_TOOL,
             label="分仓库存汇总",
             description=("按完整物料编码查询分仓现存量，由 MES 一次汇总各仓库和各计量单位。"
-                         "查询当前库存、各仓数量和库存总量时使用。"),
+                         "仅在对象已知为物料/产品且用户询问当前库存、各仓数量和库存总量时使用；未知类型的裸编码应先业务编码识别，不把成品SN、工单或批次当物料。"),
             properties={
                 "item_code": {"type": "string", "minLength": 1, "maxLength": 64,
                               "description": "完整物料业务编码，精确匹配。"},

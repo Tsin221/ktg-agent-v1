@@ -13,6 +13,7 @@ from ktg_agent.core.messages import AssistantMessage, JsonObject, JsonValue, Mes
 from ktg_agent.core.task_budget import TaskBudget
 from ktg_agent.ktg import KTGError
 from ktg_agent.ktg.queries import STOCK_SUMMARY_TOOL
+from ktg_agent.ktg.business_reference import NAME as REFERENCE_TOOL
 from ktg_agent.sessions.repository import SessionRepository, TaskVersionConflict
 from ktg_agent.tools.registry import (
     ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolResult, ToolStatus,
@@ -61,7 +62,7 @@ _WORKORDER_TOOL = "ktg_query_workorder_overview"
 _MATERIALS_TOOL = "ktg_query_workorder_materials"
 _QUALITY_TOOL = "ktg_query_workorder_quality"
 _TRACE_TOOL = "ktg_query_production_trace"
-_EVIDENCE_TOOLS = {"ktg_count_products", STOCK_SUMMARY_TOOL, _WORKORDER_TOOL, _MATERIALS_TOOL, _QUALITY_TOOL, _TRACE_TOOL}
+_EVIDENCE_TOOLS = {"ktg_count_products", STOCK_SUMMARY_TOOL, _WORKORDER_TOOL, _MATERIALS_TOOL, _QUALITY_TOOL, _TRACE_TOOL, REFERENCE_TOOL}
 _EVIDENCE_LIMIT = 3500
 
 def _read_evidence(name: str, details: JsonObject, arguments: JsonObject) -> JsonObject | None:
@@ -85,6 +86,8 @@ def _read_evidence(name: str, details: JsonObject, arguments: JsonObject) -> Jso
         return {key: details.get(key) for key in (
             "direction", "filters", "queried_at", "coverage", "units", "batches", "warnings",
         )}
+    if name == REFERENCE_TOOL and details.get("kind") == "business_reference":
+        return {key: details.get(key) for key in ("code", "resolution", "matches", "coverage", "checks", "queried_at")}
     return None
 
 def _tool_records(

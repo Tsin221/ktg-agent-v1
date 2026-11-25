@@ -34,7 +34,7 @@ def main() -> None:
 
     tools=req('/agent-api/v1/tools')
     names={row['name'] for row in tools['items']}
-    assert 'ktg_prepare_workorder_operations' in names and len(names)==7, names
+    assert {'ktg_prepare_workorder_operations', 'ktg_resolve_business_reference'} <= names and len(names)==8, names
     session=req('/agent-api/v1/sessions', {'title':'D1 HTTP验收'}, 201)['session_id']
     base='/agent-api/v1/sessions/'+session
     run=req(base+'/runs', {'request_id':str(uuid4()), 'message':'创建6件台灯草稿，改为5件，够料就下达。'}, 202)['run_id']

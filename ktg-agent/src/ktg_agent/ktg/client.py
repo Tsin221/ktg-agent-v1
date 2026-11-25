@@ -149,6 +149,8 @@ class KTGClient:
                 raise KTGError("AUTH_EXPIRED", "登录状态已过期。", status=401)
             if code == 403:
                 raise KTGError("PERMISSION_DENIED", "当前用户没有该查询权限。", status=403)
+            if code == 404:
+                raise KTGError("KTG_NOT_FOUND", "当前可见范围内未找到记录。", status=404)
             if code == 409:
                 raise KTGError(
                     "KTG_CONFLICT",

@@ -97,7 +97,7 @@ def build_production_trace_tool() -> ToolDefinition:
     return ToolDefinition(
         name=NAME, version="1.0", label="原料与成品双向追溯",
         description=("查询实际投入的原料物料编码、批次、单件数量及由同批原料实际生产的成品SN、所属工单及当前状态。"
-                     "unit_to_material输入精确SN；material_to_unit输入从实际投入返回的itemCode+sourceBatchCode（批次可能跨物料重名），支持分页。"
+                     "unit_to_material输入精确SN，可核实SN身份、所属工单和当前状态并查询实际投入；material_to_unit输入已核实的itemCode+sourceBatchCode（批次可能跨物料重名），支持分页。"
                      "与工单质量查询组合分析同批成品质量；此处待检不等于不合格，合格状态不代表历史无失败。"
                      "total_units是单物料单批次当前权限范围内实际使用成品去重总数，returned_units、state_counts只统计返回页，跨批次不可相加。"
                      "不查BOM计划、领料或库存推算，不推断根因，不执行召回、隔离或任何业务写入。"),
