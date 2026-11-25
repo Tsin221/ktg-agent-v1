@@ -153,8 +153,8 @@
 
       <div ref="messages" class="agent-panel__messages" aria-live="polite">
         <section v-if="showWelcome" class="agent-welcome" aria-label="开始对话">
-          <h3>今天想查询什么？</h3>
-          <p>目前可查询产品总数、分仓现存量、工单与生产进度、工单用料和缺口、质量异常和检验记录，以及成品与原料批次双向追溯。</p>
+          <h3>今天想处理什么？</h3>
+          <p>可以查询生产、用料、质量与追溯，也可根据权限准备创建、修改及下达工单的方案，由您确认后执行。</p>
           <div class="agent-welcome__examples">
             <button
               v-for="example in examples"
@@ -169,16 +169,23 @@
 
         <div v-for="message in displayedMessages" :key="message.id" :class="['agent-entry', `agent-entry--${message.role}`]">
           <div v-if="message.text && message.role === 'user'" class="agent-message">{{ message.text }}</div>
+          <agent-answer-content v-else-if="message.operationSummary" class="agent-message" :text="message.operationSummary" />
           <agent-answer-content v-else-if="message.text" class="agent-message" :text="message.textPreview || message.text" />
-          <agent-answer-content v-if="message.followUp" class="agent-message agent-message--follow-up" :text="message.followUp" />
-          <agent-answer-content v-if="message.textTables" class="agent-message" :text="message.textTables" />
+          <agent-answer-content v-if="message.followUp && !message.operationSummary" class="agent-message agent-message--follow-up" :text="message.followUp" />
+          <agent-answer-content v-if="message.textTables && !message.operationSummary" class="agent-message" :text="message.textTables" />
           <div
             v-for="(result, index) in message.results || []"
             :key="message.resultIds && message.resultIds[index] || `${message.id}-${index}`"
           >
             <agent-result-card v-if="result" class="agent-result-surface" :result="result" />
           </div>
-          <details v-if="message.hasFullText" class="agent-query-details">
+          <agent-operation-plan-card v-for="plan in message.operationPlans || []" :key="plan.plan_id" :plan="plan"
+            :busy="operationActionId === plan.plan_id" @action="handleOperationAction(plan, $event)" />
+          <details v-if="message.operationSummary && message.text" class="agent-query-details">
+            <summary>查看操作准备时的回复</summary>
+            <agent-answer-content class="agent-message" :text="message.text" />
+          </details>
+          <details v-else-if="message.hasFullText" class="agent-query-details">
             <summary>展开依据与明细</summary>
             <agent-answer-content class="agent-message" :text="message.textDetails" />
           </details>
@@ -213,6 +220,11 @@
             </div>
           </details>
         </div>
+        <agent-operation-plan-card v-for="plan in unmatchedOperationPlans" :key="plan.plan_id" :plan="plan"
+          :busy="operationActionId === plan.plan_id" @action="handleOperationAction(plan, $event)" />
+        <p v-if="operationError" class="agent-message agent-message--error" role="alert">{{ operationError }}
+          <button type="button" @click="refreshOperationPlans()">重新读取方案</button>
+        </p>
         <div v-if="pendingQuestion" class="agent-entry agent-entry--user">
           <div class="agent-message">{{ pendingQuestion }}</div>
         </div>
@@ -294,12 +306,13 @@
 
 <script>
 import { agentSession, createAgentSession, renameAgentSession, listAgentSessions, getAgentSession, getAgentSessionStats, listAgentMessages,
-  listAgentTasks, getAgentTask, getAgentRun } from '@/api/agent'
+  listAgentTasks, getAgentTask, getAgentRun, listAgentOperations, actOnAgentOperation } from '@/api/agent'
 import AgentResultCard from './ResultCard.vue'
 import AgentAnswerContent from './AnswerContent.vue'
+import AgentOperationPlanCard from './OperationPlanCard.vue'
 import { isTerminalRun, pageContext, presentMessages, compactResultPresentation, progressFromEvent, runStatusText, usageText,
   contextStatusText, contextPressureText, queryCardPresentation, toolProgressText,
-  visibleInputs, inputStatusText } from './sessionPresentation'
+  visibleInputs, inputStatusText, attachOperationPlans } from './sessionPresentation'
 
 const requestId = () => (window.crypto && window.crypto.randomUUID)
   ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -326,7 +339,7 @@ export function clampPanelSize(size, viewport) {
 
 export default {
   name: 'AgentAssistant',
-  components: { AgentResultCard, AgentAnswerContent },
+  components: { AgentResultCard, AgentAnswerContent, AgentOperationPlanCard },
   data() {
     return {
       open: false,
@@ -365,6 +378,11 @@ export default {
       cancelRequestId: '',
       cancelLoading: false,
       businessMessages: [],
+      operationPlans: [],
+      operationError: '',
+      operationRefresh: 0,
+      operationPoll: null,
+      operationActionId: '',
       progress: { messages: [], tools: {}},
       panelError: '',
       streamError: false,
@@ -410,9 +428,11 @@ export default {
       const size = clampPanelSize(this.panelSize, this.viewport)
       return { width: `${size.width}px`, height: `${size.height}px` }
     },
-    displayedMessages() {
-      return compactResultPresentation(queryCardPresentation([...this.messages, ...this.businessMessages]))
+    operationPresentation() {
+      return attachOperationPlans(compactResultPresentation(queryCardPresentation([...this.messages, ...this.businessMessages])), this.operationPlans)
     },
+    displayedMessages() { return this.operationPresentation.messages },
+    unmatchedOperationPlans() { return this.operationPresentation.unmatched },
     liveMessage() { return this.progress.messages.slice().reverse().find(message => message.text && !message.queryPreface) },
     toolActivity() { return this.canInput ? toolProgressText(this.progress.tools) : '' },
     contextStatus() {
@@ -457,6 +477,7 @@ export default {
     this.bootstrap()
   },
   beforeDestroy() {
+    this.resetOperations()
     this.finishResize()
     this.cancelTitle()
     window.removeEventListener('resize', this.updateViewport)
@@ -595,6 +616,7 @@ export default {
       this.cancelRequestId = ''
       this.cancelLoading = false
       this.businessMessages = []
+      this.resetOperations()
       this.progress = { messages: [], tools: {}}
       this.messages = []
       this.draft = ''
@@ -638,6 +660,7 @@ export default {
       this.cancelRequestId = ''
       this.cancelLoading = false
       this.businessMessages = []
+      this.resetOperations()
       this.progress = { messages: [], tools: {}}
       this.activeRun = null
       this.sessionStats = null
@@ -650,6 +673,7 @@ export default {
         else this.sessions = this.sessions.map(item => item.session_id === sessionId ? { ...item, ...session } : item)
         if (!agentSession.getState() || agentSession.getState().sessionId !== sessionId) agentSession.setSession(sessionId)
         this.sessionId = sessionId
+        this.refreshOperationPlans(epoch)
         this.refreshTasks(epoch)
         this.restoreLocalState()
         await this.refreshStats(epoch)
@@ -689,6 +713,59 @@ export default {
         if (epoch === this.epoch && sessionId === this.sessionId) this.sessionStats = stats
       } catch (error) {
         if (epoch === this.epoch && sessionId === this.sessionId) this.sessionStats = null
+      }
+    },
+    resetOperations() {
+      this.operationRefresh++
+      if (this.operationPoll !== null) window.clearTimeout(this.operationPoll)
+      this.operationPoll = null
+      this.operationPlans = []
+      this.operationActionId = ''
+      this.operationError = ''
+    },
+    async refreshOperationPlans(epoch = this.epoch) {
+      const sessionId = this.sessionId
+      if (!sessionId) return
+      const refresh = ++this.operationRefresh
+      if (this.operationPoll !== null) window.clearTimeout(this.operationPoll)
+      this.operationPoll = null
+      try {
+        const response = await listAgentOperations(sessionId)
+        if (epoch !== this.epoch || sessionId !== this.sessionId || refresh !== this.operationRefresh) return
+        this.operationPlans = response.items || []
+        this.operationError = ''
+        if (this.operationActionId || this.operationPlans.some(plan => ['executing', 'reconciling'].includes(plan.status))) {
+          this.operationPoll = window.setTimeout(() => this.refreshOperationPlans(epoch), 1500)
+        }
+      } catch (error) {
+        if (epoch !== this.epoch || sessionId !== this.sessionId || refresh !== this.operationRefresh) return
+        if (!(error.response && error.response.status === 404)) this.operationError = this.errorText(error, '操作方案读取失败，请重新读取。')
+      }
+    },
+    async handleOperationAction(plan, action) {
+      if (!this.sessionId || this.operationActionId || !this.operationPlans.some(item => item.plan_id === plan.plan_id && item.digest === plan.digest)) return
+      if (action === 'confirm' && (!plan.confirmable || plan.status !== 'pending')) return
+      if (action === 'cancel' && plan.status !== 'pending') return
+      if (action === 'reconcile' && plan.status !== 'needs_reconciliation') return
+      const sessionId = this.sessionId
+      const epoch = this.epoch
+      this.operationActionId = plan.plan_id
+      this.operationError = ''
+      if (this.operationPoll !== null) window.clearTimeout(this.operationPoll)
+      this.operationPoll = window.setTimeout(() => this.refreshOperationPlans(epoch), 400)
+      try {
+        // The only body is the immutable digest; no tool text, parameters, or retry-as-new.
+        const result = await actOnAgentOperation(sessionId, plan.plan_id, action, plan.digest)
+        if (epoch === this.epoch && sessionId === this.sessionId) {
+          this.operationPlans = this.operationPlans.map(item => item.plan_id === result.plan_id ? { ...item, ...result, confirmable: false } : item)
+        }
+      } catch (error) {
+        if (epoch === this.epoch && sessionId === this.sessionId) this.operationError = this.errorText(error, '请求结果待核实，请查看原方案状态，不要新建重复操作。')
+      } finally {
+        if (epoch === this.epoch && sessionId === this.sessionId) {
+          this.operationActionId = ''
+          await this.refreshOperationPlans(epoch)
+        }
       }
     },
     resetTasks() {
@@ -817,6 +894,7 @@ export default {
             this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
             if (isTerminalRun(snapshot.run.status)) {
               this.refreshTasks(epoch)
+              this.refreshOperationPlans(epoch)
               this.pendingQuestion = ''
               if (snapshot.run.status === 'completed' || snapshot.run.status === 'needs_input') {
                 this.progress = { messages: [], tools: {}}

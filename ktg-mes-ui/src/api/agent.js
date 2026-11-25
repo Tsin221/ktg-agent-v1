@@ -38,6 +38,16 @@ export const listAgentTasks = sessionId => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/tasks', method: 'get'
 })
 
+export const listAgentOperations = sessionId => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/operations', method: 'get', expectedErrorStatuses: [404]
+})
+
+export const actOnAgentOperation = (sessionId, planId, action, digest) => request({
+  baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/operations/' + id(planId) + '/' + action,
+  method: 'post', data: action === 'reconcile' ? {} : { digest },
+  timeout: 120000, headers: { repeatSubmit: false }
+})
+
 export const getAgentTask = (sessionId, taskId) => request({
   baseURL: '', url: sessionUrl + '/' + id(sessionId) + '/tasks/' + id(taskId), method: 'get'
 })

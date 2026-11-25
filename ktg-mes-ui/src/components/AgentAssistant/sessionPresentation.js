@@ -70,7 +70,7 @@ export function presentMessages(items) {
         if (call && taskTools.includes(call.name) && result && typeof result.task_id === 'string' && !item.is_error) {
           entry.taskIds = [...new Set([...(entry.taskIds || []), result.task_id])]
         }
-        if (kind) {
+        if (kind && kind !== 'workorder_operation_preview') {
           entry.results.push(result)
           entry.resultIds.push(id)
         }
@@ -252,6 +252,40 @@ export function queryCardPresentation(messages) {
     }
     return output
   }).filter(entry => entry.role === 'user' || entry.text || (entry.results && entry.results.length) || entry.queryDetails || entry.queryError)
+}
+
+// A historical model result is only a proposal marker; the server-owned, current
+// session plan is the sole source for actionable buttons and receipt status.
+export function attachOperationPlans(messages, plans) {
+  const attached = new Map()
+  const unmatched = []
+  for (const plan of plans) {
+    const index = messages.reduce((last, message, i) => message.role === 'assistant' && message.runId === plan.run_id ? i : last, -1)
+    if (index < 0) unmatched.push(plan)
+    else attached.set(index, [...(attached.get(index) || []), plan])
+  }
+  return { messages: messages.map((message, index) => {
+    const operations = attached.get(index) || []
+    const latest = operations[0]
+    return { ...message, operationPlans: operations, operationSummary: latest && operationOutcomeSummary(latest) }
+  }), unmatched }
+}
+
+function operationOutcomeSummary(plan) {
+  const results = plan.results || []
+  const total = (plan.steps || []).length
+  const succeeded = results.filter(item => item.status === 'succeeded').length
+  const unknown = results.filter(item => item.status === 'unknown').length
+  const counts = `${succeeded} / ${total} 步成功`
+  const summaries = {
+    succeeded: `结论：工单操作方案执行完成，${counts}。`,
+    partial: `结论：方案部分完成，${counts}；其他步骤见实际回执。`,
+    failed: `结论：方案未全部完成，${counts}；请看失败或未执行原因。`,
+    needs_reconciliation: `结论：${counts}，${unknown} 步结果待核实，请核实原回执。`,
+    executing: '结论：方案已确认，正在执行。', reconciling: '结论：正在核实原操作回执。',
+    cancelled: '结论：方案已取消，未执行。', superseded: '结论：此方案已被新方案替代，未执行。', expired: '结论：确认方案已过期，未执行。'
+  }
+  return summaries[plan.status] || ''
 }
 
 export function toolProgressText(tools) {

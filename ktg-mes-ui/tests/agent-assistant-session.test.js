@@ -9,7 +9,17 @@ const moduleRef = { exports: {} }
 new Function('exports', 'module', 'require', transformed.code)(moduleRef.exports, moduleRef, require)
 const { pageContext, presentMessages, progressFromEvent, isTerminalRun, runStatusText,
   visibleInputs, inputStatusText, usageText, contextStatusText, contextPressureText,
-  queryCardPresentation, compactResultPresentation, answerBlocks, toolProgressText } = moduleRef.exports
+  queryCardPresentation, compactResultPresentation, answerBlocks, toolProgressText, attachOperationPlans } = moduleRef.exports
+
+const operationMessages = presentMessages([
+  { message_id: 1, run_id: 'r-op', role: 'user', content: [{ type: 'text', text: '新建工单' }] },
+  { message_id: 2, run_id: 'r-op', role: 'tool', details: { kind: 'workorder_operation_preview', plan_id: 'old-preview' }, content: [] },
+  { message_id: 3, run_id: 'r-op', role: 'assistant', content: [{ type: 'text', text: '结论：等待确认' }] }
+])
+assert.ok(operationMessages.every(message => !(message.results || []).some(result => result.kind === 'workorder_operation_preview')))
+const presentedOperations = attachOperationPlans(operationMessages, [{ plan_id: 'actual-plan', run_id: 'r-op', status: 'succeeded' }])
+assert.strictEqual(presentedOperations.messages.at(-1).operationPlans[0].status, 'succeeded')
+assert.deepStrictEqual(presentedOperations.unmatched, [])
 
 const context = pageContext({ name: 'Workorder', query: {
   workorderId: '42', itemCode: 'A-01', warehouseId: 3, token: 'secret', arbitrary: 'ignore'

@@ -19,6 +19,8 @@ let inputFailure = null
 let runFailure = null
 let taskVersions = [1]
 let statsReads = 0
+let operationSnapshot = []
+const operationActions = []
 const statsSnapshot = { context: { configured: true, window_tokens: 8192,
   threshold_tokens: 6553, estimated_tokens: 100, estimate_kind: 'estimated',
   summary_id: null, spill_count: 0 } }
@@ -68,6 +70,13 @@ const api = {
   listAgentTasks: async () => ({ items: [
     { task_id: 'task-a', title: '任务甲' }, { task_id: 'task-b', title: '任务乙' }
   ] }),
+  listAgentOperations: async () => ({ items: operationSnapshot }),
+  actOnAgentOperation: async (sessionId, planId, action, digest) => {
+    operationActions.push({ sessionId, planId, action, digest })
+    const updated = { ...operationSnapshot.find(plan => plan.plan_id === planId), status: 'succeeded', confirmable: false }
+    operationSnapshot = [updated]
+    return updated
+  },
   getAgentTask: async (_, taskId) => ({
     task_id: taskId,
     current_version: taskVersions[0],
@@ -99,6 +108,7 @@ const browserState = new Map()
 let generatedIds = 0
 const listeners = new Map()
 global.window = { innerWidth: 1200, innerHeight: 900,
+  setTimeout, clearTimeout,
   addEventListener: (name, fn) => listeners.set(name, fn),
   removeEventListener: name => listeners.delete(name),
   localStorage: { getItem: key => browserState.get(key) || null, setItem: (key, value) => browserState.set(key, value) },
@@ -111,7 +121,7 @@ new Function('exports', 'module', 'require', code)(componentModule.exports, comp
 const options = componentModule.exports.default
 const templateContent = compiler.parseComponent(fs.readFileSync(componentPath, 'utf8')).template.content
 assert.deepStrictEqual(compiler.compile(templateContent).errors, [])
-assert.deepStrictEqual(Object.keys(options.components), ['AgentResultCard', 'AgentAnswerContent'])
+assert.deepStrictEqual(Object.keys(options.components), ['AgentResultCard', 'AgentAnswerContent', 'AgentOperationPlanCard'])
 assert.ok(!Object.keys(options.methods).some(name => /^(confirm|refreshInventory|continueExploration|viewWorkorder)/.test(name)))
 assert.ok(!Object.keys(options.data()).some(name => /^(confirming|completed.*Ids)/.test(name)))
 for (const match of templateContent.matchAll(/<(agent-[a-z0-9-]+)/g)) {
@@ -129,7 +139,7 @@ const view = {
 }
 for (const [name, method] of Object.entries(options.methods)) view[name] = method.bind(view)
 Object.defineProperty(view, 'busy', { get: () => options.computed.busy.call(view) })
-for (const name of ['canInput', 'canCancel', 'composerBusy', 'displayedMessages', 'displayedInputs']) {
+for (const name of ['canInput', 'canCancel', 'composerBusy', 'operationPresentation', 'displayedMessages', 'displayedInputs']) {
   Object.defineProperty(view, name, { get: () => options.computed[name].call(view) })
 }
 Object.defineProperty(view, 'contextStatus', { get: () => options.computed.contextStatus.call(view) })
@@ -469,6 +479,21 @@ async function main() {
   assert.strictEqual(view.taskDetail.current_version, 2)
   view.taskVersion = 1
   assert.strictEqual(options.computed.visibleTaskVersion.call(view).steps[0].status, 'pending')
+  const pendingPlan = { plan_id: 'test-plan', digest: 'sha256:plan', status: 'pending', confirmable: true, run_id: view.activeRunId,
+    steps: [{ action: 'create_draft', step_id: 'create' }], results: [{ status: 'pending' }] }
+  operationSnapshot = [pendingPlan]
+  await view.refreshOperationPlans()
+  await view.handleOperationAction({ ...pendingPlan, digest: 'tampered' }, 'confirm')
+  assert.strictEqual(operationActions.length, 0)
+  await view.handleOperationAction(pendingPlan, 'confirm')
+  assert.deepStrictEqual(operationActions, [{ sessionId: view.sessionId, planId: 'test-plan', action: 'confirm', digest: 'sha256:plan' }])
+  await view.handleOperationAction(view.operationPlans[0], 'confirm')
+  assert.strictEqual(operationActions.length, 1)
+  assert.strictEqual(view.operationPlans[0].status, 'succeeded')
+  view.resetOperations()
+  assert.deepStrictEqual(view.operationPlans, [])
+  const operationCard = compiler.parseComponent(fs.readFileSync(path.resolve(__dirname, '../src/components/AgentAssistant/OperationPlanCard.vue'), 'utf8'))
+  assert.deepStrictEqual(compiler.compile(operationCard.template.content).errors, [])
   console.log('agent assistant component state tests passed')
 }
 
