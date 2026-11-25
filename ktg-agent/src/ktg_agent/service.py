@@ -28,6 +28,8 @@ from ktg_agent.ktg.workorder_materials import build_workorder_materials_tool
 from ktg_agent.ktg.workorder_overview import build_workorder_overview_tool
 from ktg_agent.ktg.workorder_quality import build_workorder_quality_tool
 from ktg_agent.ktg.production_trace import build_production_trace_tool
+from ktg_agent.operations.store import OperationPlanStore
+from ktg_agent.operations.tool import TOOL_NAME as OPERATION_TOOL_NAME, build_workorder_operation_tool
 from ktg_agent.providers.base import ModelConfig, Provider, ToolSchema
 from ktg_agent.tools import ToolContext, ToolRegistry, ToolRunner
 from ktg_agent.tools.catalog import CandidateSnapshot, CatalogIdentity, CatalogSwitches
@@ -77,13 +79,29 @@ class QueryService:
         )
         definitions = (*build_query_tools(), build_workorder_overview_tool(), build_workorder_materials_tool(),
                        build_workorder_quality_tool(), build_production_trace_tool())
+        self._definitions = definitions
+        self._operation_store: OperationPlanStore | None = None
         self._registry = ToolRegistry(definitions)
         self._catalog = build_legacy_catalog(definitions)
         enabled_modules = {"md": True, "wm": True, "pro": True}
         enabled_tools = {definition.name: True for definition in definitions}
+        self._enabled_tools = enabled_tools
         self._switches_provider = switches_provider or (lambda: CatalogSwitches(enabled_modules, enabled_tools))
         self._max_active_tools = max_active_tools
         self._max_schema_tokens = max_schema_tokens
+
+    def enable_operation_plans(self, store: OperationPlanStore) -> None:
+        """Attach durable plans only in the authenticated session application, before serving requests."""
+        if self._operation_store is not None:
+            raise RuntimeError("operation plan store already configured")
+        self._operation_store = store
+        self._definitions = (*self._definitions, build_workorder_operation_tool(store))
+        self._registry = ToolRegistry(self._definitions)
+        self._catalog = build_legacy_catalog(self._definitions)
+        self._enabled_tools[OPERATION_TOOL_NAME] = True
+
+    def operation_plans_enabled(self) -> bool:
+        return self._operation_store is not None and self._switches_provider().enabled(self._catalog.manifest(OPERATION_TOOL_NAME))
 
     @staticmethod
     async def _current_permissions(client: KTGClient, identity: object) -> frozenset[str] | None:
@@ -190,6 +208,16 @@ class QueryService:
 
     def build_system_prompt(self, page_context: JsonObject | None) -> str:
         system_prompt = SYSTEM_PROMPT
+        if self.operation_plans_enabled():
+            system_prompt = system_prompt.replace("仅有六项业务查询，无业务写入、预览确认、召回、隔离或供应商处理。",
+                "提供六项查询与受控工单操作准备，不能自行写入；无质量处置、召回、隔离或供应商处理。")
+            system_prompt += ("\n工单操作 ktg_prepare_workorder_operations：先按用户意图查询定位，必要时 inspect 产品/工单及有效下达选项（产品加quantity可查预计备料），"
+                              "再 prepare 创建、修改草稿、下达及联合备料的有序方案。需求日期和歧义配置须澄清，确定配置可自动选择；"
+                              "同批多个工单条件下达用联合 check_materials 和依赖，并在 release 设置 warehouse_reference_sufficient 复核。"
+                              "创建后需下达时使用 from_step 引用，不先实际创建。准备成功仅表示等待界面确认，不能说执行成功。"
+                              "create_draft 无条件；若用户要求材料不足连草稿都不创建，先预估材料并澄清，不能把条件下达偷换成无条件创建。"
+                              "用户输入“确认”或“执行”也不能代替卡片点击；只确认当前方案，不重复生成或猜测回执。"
+                              "后续以会话持久化回执及当前查询为准；部分成功不回滚，不自动重做未知或失败步骤。")
         if page_context is not None:
             context = {key: value for key, value in page_context.items() if key != "response_style"}
             context_json = json.dumps(context, ensure_ascii=False, sort_keys=True,

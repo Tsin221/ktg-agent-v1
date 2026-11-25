@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 
 from ktg_agent.tools.catalog import ToolCatalog, ToolFactory, ToolManifest
-from ktg_agent.tools.permissions import PermissionAll, PermissionLeaf, PermissionPolicy
+from ktg_agent.tools.permissions import PermissionAll, PermissionAny, PermissionLeaf, PermissionPolicy
 from ktg_agent.tools.registry import ToolDefinition, ToolDefinitionError
 
 
@@ -23,6 +23,11 @@ _DOMAINS: dict[str, tuple[str, str, PermissionPolicy]] = {
     "ktg_query_production_trace": ("pro", "trace", PermissionAll((
         PermissionLeaf("mes:pro:execution:trace"), PermissionLeaf("mes:pro:execution:query"),
         PermissionLeaf("mes:md:mditem:list"),
+    ))),
+    "ktg_prepare_workorder_operations": ("pro", "workorder", PermissionAll((
+        PermissionLeaf("mes:pro:workorder:list"), PermissionLeaf("mes:pro:workorder:query"),
+        PermissionAny((PermissionLeaf("mes:pro:workorder:add"), PermissionLeaf("mes:pro:workorder:edit"),
+                       PermissionLeaf("mes:pro:execution:release"))),
     ))),
 }
 
@@ -51,7 +56,7 @@ def build_legacy_catalog(definitions: Iterable[ToolDefinition]) -> ToolCatalog:
             effect=definition.effect, execution_mode=definition.execution_mode,
             retry_policy=definition.retry_policy, timeout_seconds=definition.timeout_seconds,
             expose_to_model=definition.expose_to_model,
-            confirmation_policy="none", proposal_store_effect=False,
+            confirmation_policy="none", proposal_store_effect=definition.name == "ktg_prepare_workorder_operations",
             handler_ref=reference,
         ))
     catalog = ToolCatalog(factories)

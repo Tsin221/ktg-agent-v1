@@ -44,7 +44,8 @@ def _target_state(state: Step) -> Step:
     return {"workorder_code": state["draft"]["workorderCode"], "workorder_id": state["id"],
             "expected_version": state["version"], "quantity": as_quantity(state["draft"]["quantity"]),
             "product_id": str(as_id(state["draft"]["productId"])), "product_code": state["product_code"],
-            "product_name": state["product_name"], "workorder_name": state["draft"]["workorderName"]}
+            "product_name": state["product_name"], "product_unit": state.get("product_unit"),
+            "workorder_name": state["draft"]["workorderName"]}
 
 
 def _generated_code(product_code: str) -> str:
@@ -52,6 +53,20 @@ def _generated_code(product_code: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9-]", "-", product_code)[:24].strip("-") or "PRODUCT"
     stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
     return f"WO-{clean}-{stamp}-{uuid4().hex[:10].upper()}"
+
+
+def material_guards(steps: list[Step], dependencies: list[str]) -> list[Step]:
+    """Find all explicit material prerequisites, even through intermediate steps."""
+    by_id = {step["step_id"]: step for step in steps}
+    seen: set[str] = set()
+    queued = list(dependencies)
+    while queued:
+        key = queued.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        queued.extend(by_id[key]["depends_on"])
+    return [step for step in steps if step["step_id"] in seen and step["action"] == "check_materials"]
 
 
 async def prepare_steps(client: KTGClient, identity: Mapping[str, object], requests: list[Step]) -> list[Step]:
@@ -83,8 +98,9 @@ async def prepare_steps(client: KTGClient, identity: Mapping[str, object], reque
                             "version": as_id(order.get("version"), allow_zero=True),
                             "product_code": as_text(order.get("productCode"), "产品编码", 64),
                             "product_name": as_text(order.get("productName"), "产品名称", 255),
+                            "product_unit": order.get("unitOfMeasure"),
                             "original_product_id": str(as_id(order.get("productId"))), "last": None,
-                            "released": False}
+                            "released": False, "bom_rebuild": False}
         state = states[code]
         if state["released"]:
             raise ValueError(f"方案中工单 {code} 已安排下达，不允许再次修改或下达。")
@@ -110,8 +126,8 @@ async def prepare_steps(client: KTGClient, identity: Mapping[str, object], reque
                 raise ValueError("同一方案不能重复创建相同工单编号。")
             draft = build_draft(raw, product, code=code)
             state = {"draft": draft, "id": None, "version": 0, "product_code": product["itemCode"],
-                     "product_name": product["itemName"], "original_product_id": None, "last": step_id,
-                     "released": False}
+                     "product_name": product["itemName"], "product_unit": product["unitOfMeasure"], "original_product_id": None, "last": step_id,
+                     "released": False, "bom_rebuild": True}
             states[code] = state
             origins[step_id] = code
             step.update(draft=draft, target=_target_state(state), description="创建草稿并生成用料计划")
@@ -145,14 +161,22 @@ async def prepare_steps(client: KTGClient, identity: Mapping[str, object], reque
                     require_permissions(permissions, PRODUCT_READ)
                     product = await get_product(client, as_text(changes["product_code"], "产品编码", 64))
                 draft = edit_draft({**state["draft"], "status": "PREPARE"}, changes, product=product)
-                step.update(draft=draft, before=state["draft"], description="修改草稿工单")
+                rebuild = draft["quantity"] != state["draft"]["quantity"] or draft["productId"] != state["draft"]["productId"]
+                step.update(draft=draft, before=state["draft"], bom_rebuild=rebuild, description="修改草稿工单")
+                state["bom_rebuild"] = state["bom_rebuild"] or rebuild
                 state["draft"] = draft
                 state["version"] += 1
                 state["last"] = step_id
                 if product:
-                    state.update(product_code=product["itemCode"], product_name=product["itemName"])
+                    state.update(product_code=product["itemCode"], product_name=product["itemName"], product_unit=product["unitOfMeasure"])
+                    step["after_product"] = {"code": product["itemCode"], "name": product["itemName"], "unit": product["unitOfMeasure"]}
                 origins[step_id] = code
             else:
+                for guard in material_guards(result, dependencies):
+                    for checked in guard["targets"]:
+                        current = _target_state(states[checked["workorder_code"]])
+                        if current != checked:
+                            raise ValueError("联合备料检查后又计划修改其中工单，须重新安排备料检查。")
                 if state["id"] is not None:
                     # Existing order scope is checked by MES irrespective of the future product choice.
                     options = await release_options(client, order_id=state["id"])
@@ -168,6 +192,11 @@ async def prepare_steps(client: KTGClient, identity: Mapping[str, object], reque
                     require_permissions(permissions, STOCK_READ)
                 step.update(selection=select_release_configuration(options, selection), condition=condition,
                             description="下达工单，生成三道任务及计划数量对应的单件 SN")
+                if state["id"] is not None and not state["bom_rebuild"]:
+                    fingerprint = options.get("bomFingerprint")
+                    if not isinstance(fingerprint, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+                        raise ValueError("MES 未返回可核对的现有草稿 BOM 标识。")
+                    step["bom_fingerprint"] = fingerprint
                 state["released"] = True
         result.append(step)
         seen.add(step_id)

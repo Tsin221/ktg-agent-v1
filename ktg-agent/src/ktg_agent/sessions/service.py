@@ -22,6 +22,9 @@ from ktg_agent.sessions.repository import (
 )
 from ktg_agent.tools.discovery import MODULES
 from ktg_agent.sessions.task_tools import owner_from_identity
+from ktg_agent.operations.executor import OperationExecutor
+from ktg_agent.operations.store import OperationPlanStore, Plan
+from ktg_agent.operations.tool import public_plan
 
 _PRIVATE_FIELD = re.compile(
     r"authorization|api[_-]?key|access[_-]?token|bearer[_-]?token|secret|"
@@ -51,13 +54,53 @@ class SessionService:
                  coordinator: RunCoordinator | None = None, *,
                  context_policy: ContextPolicy | None = None,
                  system_prompt_builder: Callable[[JsonObject | None], str] | None = None,
-                 tool_schemas: tuple[ToolSchema, ...] = ()) -> None:
+                 tool_schemas: tuple[ToolSchema, ...] = (),
+                 operation_store: OperationPlanStore | None = None,
+                 operation_enabled: Callable[[], bool] | None = None) -> None:
         self._repository = repository
         self._client_factory = client_factory
         self._coordinator = coordinator
         self._context_policy = context_policy
         self._system_prompt_builder = system_prompt_builder
         self._tool_schemas = tool_schemas
+        self._operation_store = operation_store
+        self._operation_enabled = operation_enabled or (lambda: False)
+        self._operation_executor = OperationExecutor(operation_store, self._operation_enabled) if operation_store else None
+
+    async def operation_plans(self, authorization: str, session_id: str,
+                              plan_id: str | None = None) -> JsonObject:
+        owner = await self._owner(authorization)
+        if self._repository.get_session(owner, session_id) is None or self._operation_store is None:
+            raise KeyError("operation session not found")
+        def project(plan: Plan) -> JsonObject:
+            run = self._repository.get_run(owner, plan["run_id"])
+            result = public_plan(plan)
+            result["source_run_status"] = run.status if run else "unavailable"
+            result["confirmable"] = bool(run and run.status == "completed" and plan["status"] == "pending" and self._operation_enabled())
+            return result
+        if plan_id is not None:
+            return project(self._operation_store.get(owner, session_id, plan_id))
+        return {"items": [project(plan) for plan in self._operation_store.list_plans(owner, session_id)]}
+
+    async def operation_action(self, authorization: str, session_id: str, plan_id: str,
+                               action: str, payload: JsonObject) -> JsonObject:
+        client = self._client_factory(authorization)
+        identity = await client.get_current_user()
+        owner = owner_from_identity(identity)
+        if self._repository.get_session(owner, session_id) is None or self._operation_store is None or self._operation_executor is None:
+            raise KeyError("operation session not found")
+        if action in {"confirm", "cancel"}:
+            digest = payload.get("digest")
+            if set(payload) != {"digest"} or not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError("仅接受原操作方案摘要，不接受客户端修改方案参数。")
+            if action == "cancel":
+                return public_plan(self._operation_store.cancel(owner, session_id, plan_id, digest))
+            if not self._operation_enabled():
+                raise KTGError("OPERATIONS_DISABLED", "工单操作功能当前已关闭。", status=403)
+            return public_plan(await self._operation_executor.confirm(client, identity, owner, session_id, plan_id, digest))
+        if action == "reconcile" and not payload:
+            return public_plan(await self._operation_executor.reconcile(client, identity, owner, session_id, plan_id))
+        raise ValueError("操作方案请求无效。")
 
     def close(self) -> None:
         if self._coordinator is not None:

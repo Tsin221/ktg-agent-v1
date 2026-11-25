@@ -32,6 +32,8 @@ from ktg_agent.sessions.repository import (ControlConflictError, ControlStateErr
                                            TaskSelectionRequired)
 from ktg_agent.sessions.service import SessionService
 from ktg_agent.sessions.task_tools import owner_from_identity, task_run_configuration
+from ktg_agent.operations.store import OperationPlanStore
+from ktg_agent.operations.tool import TOOL_NAME as OPERATION_TOOL_NAME, context_summary
 from ktg_agent.tools.registry import ToolDefinition
 
 
@@ -223,12 +225,27 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
     repository = create_session_repository(settings)
     repository.recover_interrupted_runs()
     repository.prune_events()
+    operation_store = OperationPlanStore(repository)
+    operation_store.recover_interrupted()
+    service.enable_operation_plans(operation_store)
     def configure_task(run_id: str, identity: JsonObject) -> tuple[tuple[ToolDefinition, ...], str, TaskBudget]:
         run = repository.get_run(owner_from_identity(identity), run_id)
         if run is None:
             raise KeyError("run not found")
         identity["_agent_session_id"] = run.session_id
-        return task_run_configuration(repository, run_id, identity)
+        tools, prompt, budget = task_run_configuration(repository, run_id, identity)
+        owner = owner_from_identity(identity)
+        def operation_status(name: str, operation_id: str) -> str:
+            if name != OPERATION_TOOL_NAME:
+                return "awaiting_confirmation"
+            try:
+                status = operation_store.get(owner, run.session_id, operation_id)["status"]
+            except KeyError:
+                return "outcome_unknown"
+            return {"pending": "awaiting_confirmation", "executing": "outcome_unknown", "reconciling": "outcome_unknown",
+                    "needs_reconciliation": "outcome_unknown", "succeeded": "succeeded"}.get(status, "failed")
+        budget.operation_status = operation_status
+        return tools, prompt + context_summary(operation_store, owner, run.session_id), budget
 
     async def execute(run_id: str, message: str, history: tuple[Message, ...],
                       page_context: JsonObject | None, authorization: str,
@@ -255,7 +272,9 @@ def create_session_service(settings: Settings, service: QueryService) -> Session
                                          summary_budget_snapshot=service.summary_budget_snapshot),
                           context_policy=service.context_policy,
                           system_prompt_builder=service.build_system_prompt,
-                          tool_schemas=service.model_tool_schemas)
+                          tool_schemas=service.model_tool_schemas,
+                          operation_store=operation_store,
+                          operation_enabled=service.operation_plans_enabled)
 
 
 class AgentHTTPServer(ThreadingHTTPServer):
@@ -323,6 +342,10 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_compact = (path.startswith("/agent-api/v1/sessions/")
                       and len(run_segments) == 2 and bool(run_segments[0])
                       and run_segments[1] == "compact" and not urlsplit(self.path).query)
+        is_operation_action = (path.startswith("/agent-api/v1/sessions/") and len(run_segments) == 4
+                               and bool(run_segments[0]) and run_segments[1] == "operations"
+                               and bool(run_segments[2]) and run_segments[3] in {"confirm", "cancel", "reconcile"}
+                               and not urlsplit(self.path).query)
         cancel_segments = path.removeprefix("/agent-api/v1/runs/").split("/")
         is_cancel = (path.startswith("/agent-api/v1/runs/")
                      and len(cancel_segments) == 2 and bool(cancel_segments[0])
@@ -330,7 +353,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         is_input = (path.startswith("/agent-api/v1/runs/")
                     and len(cancel_segments) == 2 and bool(cancel_segments[0])
                     and cancel_segments[1] == "inputs" and not urlsplit(self.path).query)
-        if not is_run_create and not is_title and not is_compact and not is_cancel and not is_input and self.path not in {
+        if not is_run_create and not is_title and not is_compact and not is_cancel and not is_input and not is_operation_action and self.path not in {
             "/agent-api/v1/query",
             "/agent-api/v1/sessions",
         }:
@@ -375,6 +398,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("压缩请求仅允许 request_id。")
                 response = asyncio.run(self.server.session_service.request_compaction(
                     authorization, run_segments[0], payload["request_id"]))
+            elif is_operation_action:
+                response = asyncio.run(self.server.session_service.operation_action(
+                    authorization, run_segments[0], run_segments[2], run_segments[3], payload))
             elif is_cancel:
                 if set(payload) != {"request_id"}:
                     raise ValueError("取消请求仅允许 request_id。")
@@ -598,6 +624,11 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("stats 不接受查询参数。")
                 response = asyncio.run(self.server.session_service.stats(
                     authorization, segments[0]))
+            elif len(segments) in (2, 3) and segments[0] and segments[1] == "operations":
+                if params:
+                    raise ValueError("operations 不接受查询参数。")
+                response = asyncio.run(self.server.session_service.operation_plans(
+                    authorization, segments[0], segments[2] if len(segments) == 3 else None))
             else:
                 self._write_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "接口不存在。")
                 return

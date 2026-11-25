@@ -79,3 +79,23 @@ def test_new_proposal_supersedes_previous_unconfirmed_same_session(tmp_path: Pat
     assert store.get("id:1", session.id, later["plan_id"])["status"] == "pending"
     repository.settle_run("id:1", run.id, "completed", "completed", {}, ())
     assert not store.claim("id:1", session.id, earlier["plan_id"], earlier["digest"])[1]
+
+
+def test_unknown_receipt_remains_listed_and_sent_request_is_immutable(tmp_path: Path) -> None:
+    repository, store, session, run = setup_store(tmp_path)
+    old=store.create('id:1',run.id,[{'action':'create_draft'}])
+    repository.settle_run('id:1',run.id,'completed','completed',{},())
+    old,_=store.claim('id:1',session.id,old['plan_id'],old['digest'])
+    old['results'][0].update(status='started',request={'value':1},request_path='/mes/pro/workorder/operations')
+    store.save_results('id:1',session.id,old['plan_id'],old['results'],'executing')
+    with pytest.raises(ValueError, match='immutable'):
+        old['results'][0]['request']['value']=2
+        store.save_results('id:1',session.id,old['plan_id'],old['results'],'executing')
+    store.interrupt('id:1',session.id,old['plan_id'])
+    for i in range(5):
+        newer=repository.create_run('id:1', session.id, str(i), 'hash',{})
+        repository.update_run_status('id:1',newer.id,'running')
+        proposal=store.create('id:1',newer.id,[{'action':'create_draft'}])
+        store.cancel('id:1',session.id,proposal['plan_id'],proposal['digest'])
+        repository.settle_run('id:1',newer.id,'completed','completed',{},())
+    assert any(p['plan_id']==old['plan_id'] and p['status']=='needs_reconciliation' for p in store.list_plans('id:1',session.id,limit=1))

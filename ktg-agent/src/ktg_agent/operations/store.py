@@ -97,6 +97,10 @@ class OperationPlanStore:
         expires = (datetime.now(UTC) + timedelta(minutes=30)).isoformat()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            source = db.execute("SELECT status FROM runs WHERE id=? AND session_id=? AND owner_user_id=?",
+                                (run_id, run.session_id, owner)).fetchone()
+            if source is None or source["status"] != "running":
+                raise ValueError("准备方案的当前运行已结束。")
             db.execute("UPDATE agent_operation_plans SET status='superseded',updated_at=? "
                        "WHERE session_id=? AND owner_user_id=? AND status='pending'", (now, run.session_id, owner))
             db.execute("INSERT INTO agent_operation_plans VALUES(?,?,?,?,?,?,?,'pending',?,?,?)",
@@ -114,8 +118,12 @@ class OperationPlanStore:
             db.execute("UPDATE agent_operation_plans SET status='expired',updated_at=? "
                        "WHERE owner_user_id=? AND session_id=? AND status='pending' AND expires_at<=?",
                        (now, owner, session_id, now))
-            rows = db.execute("SELECT * FROM agent_operation_plans WHERE owner_user_id=? AND session_id=? "
-                              "ORDER BY created_at DESC LIMIT ?", (owner, session_id, limit)).fetchall()
+            # A historical unknown receipt must stay discoverable even after many new plans.
+            rows = db.execute("SELECT * FROM agent_operation_plans WHERE owner_user_id=? AND session_id=? AND "
+                              "(status IN ('pending','executing','reconciling','needs_reconciliation') OR plan_id IN "
+                              "(SELECT plan_id FROM agent_operation_plans WHERE owner_user_id=? AND session_id=? "
+                              "ORDER BY created_at DESC LIMIT ?)) ORDER BY created_at DESC",
+                              (owner, session_id, owner, session_id, limit)).fetchall()
             return [self._from_row(row) for row in rows]
 
     def claim(self, owner: str, session_id: str, plan_id: str, digest: str) -> tuple[Plan, bool]:
@@ -155,6 +163,16 @@ class OperationPlanStore:
                 raise ValueError("operation-plan is not executing")
             if [r["operation_id"] for r in results] != [r["operation_id"] for r in prior["results"]]:
                 raise ValueError("operation IDs are immutable")
+            transitions = {"pending": {"pending","started","succeeded","failed","skipped"},
+                           "started": {"started","succeeded","failed","unknown"},
+                           "unknown": {"unknown","succeeded","failed"},
+                           "succeeded": {"succeeded"}, "failed": {"failed"}, "skipped": {"skipped"}}
+            for previous, current in zip(prior["results"], results, strict=True):
+                if current["status"] not in transitions[previous["status"]]:
+                    raise ValueError("operation state cannot move backwards")
+                if "request" in previous and any(current.get(key) != previous.get(key)
+                    for key in ("request", "request_path", "request_order_id")):
+                    raise ValueError("sent operation request is immutable")
             db.execute("UPDATE agent_operation_plans SET status=?,results_json=?,updated_at=? WHERE plan_id=?",
                        (status, _safe_json({"results": results}), self._now(), plan_id))
             return self._from_row(self._row(db, owner, session_id, plan_id))
@@ -175,12 +193,23 @@ class OperationPlanStore:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute("SELECT * FROM agent_operation_plans WHERE status IN ('executing','reconciling')").fetchall()
             for row in rows:
-                results: list[Step] = self._from_row(row)["results"]
-                for result in results:
-                    if result["status"] == "started":
-                        result.update(status="unknown", message="执行中断，须核对原操作回执。")
-                    elif result["status"] == "pending":
-                        result.update(status="skipped", message="方案中断，未发送此操作。")
-                db.execute("UPDATE agent_operation_plans SET status=?,results_json=?,updated_at=? WHERE plan_id=?",
-                           (final_status(results), _safe_json({"results": results}), self._now(), row["plan_id"]))
+                self._interrupt_row(db, row)
             return len(rows)
+
+    def _interrupt_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> None:
+        results: list[Step] = self._from_row(row)["results"]
+        for result in results:
+            if result["status"] == "started":
+                result.update(status="unknown", message="执行中断，须核对原操作回执。")
+            elif result["status"] == "pending":
+                result.update(status="skipped", message="方案中断，未发送此操作。")
+        db.execute("UPDATE agent_operation_plans SET status=?,results_json=?,updated_at=? WHERE plan_id=?",
+                   (final_status(results), _safe_json({"results": results}), self._now(), row["plan_id"]))
+
+    def interrupt(self, owner: str, session_id: str, plan_id: str) -> None:
+        """Only the terminating executor may interrupt its own claimed plan."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._row(db, owner, session_id, plan_id)
+            if row["status"] in {"executing", "reconciling"}:
+                self._interrupt_row(db, row)
