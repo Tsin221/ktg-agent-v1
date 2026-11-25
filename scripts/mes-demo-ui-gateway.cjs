@@ -6,12 +6,14 @@ const http = require('http')
 const path = require('path')
 
 const root = path.resolve(process.argv[2] || '')
+const isolatedD1 = process.argv[3] === '--d1-validation'
 const runtime = path.resolve(__dirname, '../.runtime/mes-demo/agent')
-const backendPort = 18090
-const agentPort = 18091
-const uiPort = 18854
-if (!process.argv[2] || !root.startsWith(runtime + path.sep) ||
-    !path.basename(root).startsWith('ui-build-') ||
+const backendPort = isolatedD1 ? 18092 : 18090
+const agentPort = isolatedD1 ? 18093 : 18091
+const uiPort = isolatedD1 ? 18855 : 18854
+const approvedRoot = isolatedD1 ? root === path.resolve(__dirname, '../.runtime/mes-d1-ui-dist')
+  : root.startsWith(runtime + path.sep) && path.basename(root).startsWith('ui-build-')
+if (!process.argv[2] || !approvedRoot ||
     !fs.existsSync(path.join(root, 'index.html'))) {
   throw new Error('Provide a verified independent MES demo UI build directory')
 }
@@ -104,5 +106,5 @@ const server = http.createServer((req, res) => {
 })
 server.timeout = 0
 server.listen(uiPort, '127.0.0.1', () => {
-  console.log('Formal MES demo UI 18854 -> MES 18090 / Agent 18091')
+  console.log(`MES ${isolatedD1 ? 'D1 validation' : 'formal demo'} UI ${uiPort} -> MES ${backendPort} / Agent ${agentPort}`)
 })
