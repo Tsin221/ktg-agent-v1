@@ -1,8 +1,8 @@
 <template>
   <div class="dashboard-editor-container">
 
-    <demo-equipment-summary v-if="demoMode" />
-    <panel-group v-else @handleSetLineChartData="handleSetLineChartData" />
+    <demo-equipment-summary v-if="canSeeEquipment && demoMode" />
+    <panel-group v-else-if="canSeeEquipment" @handleSetLineChartData="handleSetLineChartData" />
 
     <el-row :gutter="32" style="padding:16px 16px 0;margin-bottom:32px;">
         <el-card>
@@ -81,6 +81,7 @@ import {getMyCharts} from "@/api/mes/report/chart";
 import Chart from "./mes/report/chart/chart.vue"
 import PanelGroup from './dashboard/PanelGroup'
 import DemoEquipmentSummary from './dashboard/DemoEquipmentSummary'
+import { checkPermi } from '@/utils/permission'
 import LineChart from './dashboard/LineChart'
 import RaddarChart from './dashboard/RaddarChart'
 import PieChart from './dashboard/PieChart'
@@ -115,6 +116,11 @@ export default {
     RaddarChart,
     PieChart,
     BarChart
+  },
+  computed: {
+    canSeeEquipment() {
+      return checkPermi(['mes:dv:machinery:list'])
+    }
   },
   data() {
     return {
