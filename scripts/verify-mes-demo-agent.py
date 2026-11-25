@@ -24,6 +24,7 @@ DIRECT_MES = "http://127.0.0.1:18090"
 DIRECT_AGENT = "http://127.0.0.1:18091"
 GATEWAY = "http://127.0.0.1:18854"
 EXPECTED = {"ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview", "ktg_query_workorder_materials", "ktg_query_workorder_quality", "ktg_query_production_trace"}
+EXPECTED_SESSION_TOOLS = EXPECTED | {"ktg_prepare_workorder_operations"}
 PROGRESS_COUNTS = (
     "planned", "allocated", "assembled", "waitingAssembly", "waitingInspection",
     "pendingDisposition", "reworkInProgress", "waitingReinspection", "qualified",
@@ -70,7 +71,7 @@ async def check(via_gateway: bool) -> dict[str, Any]:
             "mes:pro:execution:query"} <= permissions
     remote_catalog = request_json(agent_base + "/agent-api/v1/tools", authorization)
     remote_names = {item["name"] for item in remote_catalog["items"]}
-    assert remote_names == EXPECTED, "Unexpected Agent tool catalog"
+    assert remote_names == EXPECTED_SESSION_TOOLS, "Unexpected Agent session tool catalog"
     service = QueryService(
         provider=FakeProvider(()), model_config=ModelConfig("offline-verification", 128),
         ktg_client_factory=lambda _: client,

@@ -8,14 +8,17 @@ $nextJar = Join-Path $root '.runtime/mes-b06-regression/ktg-admin-b06-d1-validat
 $oldJar = [string]$state.jar
 $listeners = @(Get-NetTCPConnection -LocalPort 18090 -State Listen -ErrorAction SilentlyContinue)
 if ($s.mysqlDatabase -ne 'ktg_mes_demo' -or $state.database -ne 'ktg_mes_demo' -or
-    $state.backendPort -ne 18090 -or $listeners.Count -ne 1 -or
-    $listeners[0].LocalAddress -ne '127.0.0.1' -or $listeners[0].OwningProcess -ne $state.backendPid -or
+    $state.backendPort -ne 18090 -or $listeners.Count -gt 1 -or
     !(Test-Path -LiteralPath $nextJar) -or !(Test-Path -LiteralPath $oldJar) -or
     (docker port ktg-mes-b03-disposable-mysql 3306) -ne '127.0.0.1:33308') { throw 'Dedicated demo identity mismatch.' }
-$old = Get-Process -Id $state.backendPid
-$command = (Get-CimInstance Win32_Process -Filter "ProcessId = $($old.Id)").CommandLine
-if ($old.ProcessName -ne 'java' -or !$command.Contains($oldJar) -or !$command.Contains('--server.port=18090')) { throw 'Unexpected demo backend process.' }
-if ($oldJar -eq $nextJar) { Write-Output 'D1 backend already selected.'; return }
+$old = $null
+if ($listeners.Count -eq 1) {
+    if ($listeners[0].LocalAddress -ne '127.0.0.1' -or $listeners[0].OwningProcess -ne $state.backendPid) { throw 'Unexpected listener on demo backend port.' }
+    $old = Get-Process -Id $state.backendPid
+    $command = (Get-CimInstance Win32_Process -Filter "ProcessId = $($old.Id)").CommandLine
+    if ($old.ProcessName -ne 'java' -or !$command.Contains($oldJar) -or !$command.Contains('--server.port=18090')) { throw 'Unexpected demo backend process.' }
+    if ($oldJar -eq $nextJar) { Write-Output 'D1 backend already selected.'; return }
+}
 $env:MYSQL_HOST='127.0.0.1'; $env:MYSQL_PORT='33308'; $env:MYSQL_DATABASE=$s.mysqlDatabase; $env:MYSQL_APP_USER=$s.mysqlUser; $env:MYSQL_APP_PASSWORD=$s.mysqlPassword
 $env:REDIS_HOST='127.0.0.1'; $env:REDIS_PORT='36387'; $env:REDIS_PASSWORD=$s.redisPassword; $env:APP_TOKEN_SECRET=$s.tokenSecret
 $env:DRUID_ADMIN_USERNAME='isolated_disabled'; $env:DRUID_ADMIN_PASSWORD=[guid]::NewGuid().ToString('N'); $env:MINIO_URL='http://127.0.0.1:19000'; $env:MINIO_ACCESS_KEY='isolated-placeholder'; $env:MINIO_SECRET_KEY=[guid]::NewGuid().ToString('N'); $env:MINIO_BUCKET='ktg-mes-demo'
@@ -42,8 +45,10 @@ function Save-Backend($Process, [string]$Jar) {
     $state.backendPid = $Process.Id; $state.jar = $Jar
     $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
 }
-Stop-Process -Id $old.Id
-if (!$old.WaitForExit(5000)) { throw 'Prior backend did not exit.' }
+if ($old) {
+    Stop-Process -Id $old.Id
+    if (!$old.WaitForExit(5000)) { throw 'Prior backend did not exit.' }
+}
 $replacement = $null
 try {
     $replacement = Start-Backend $nextJar
