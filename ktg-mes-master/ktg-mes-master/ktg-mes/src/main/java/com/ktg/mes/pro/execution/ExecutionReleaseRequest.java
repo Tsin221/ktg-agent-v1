@@ -14,6 +14,8 @@ public class ExecutionReleaseRequest {
     public String operationId;
     @JsonDeserialize(using=StrictLong.class) public Long expectedVersion;
     @JsonDeserialize(using=StrictLong.class) public Long routeId;
+    /** Optional optimistic guard for an Agent's read-only material reference. */
+    public String expectedBomFingerprint;
     public List<Step> steps;
     @JsonAnySetter public void unknown(String name, Object value) {
         throw ExecutionException.validation("未知下达字段: " + name);

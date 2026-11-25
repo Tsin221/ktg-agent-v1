@@ -68,6 +68,14 @@ class ProExecutionReleaseMySqlTest {
     }
     @Test void failedSnGenerationRollsBackEveryBusinessRowAndClaim(){when(codes.genSerialCode(anyString(),anyString())).thenReturn(tag+"-duplicate");AjaxResult result=service.release(order,request());assertEquals(202,result.get("code"));assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_order"));assertEquals(0,count("pro_execution_unit"));assertEquals(0,count("pro_execution_operation"));assertEquals(0,db.queryForObject("select count(*) from wm_sn where sn_code=?",Integer.class,tag+"-duplicate"));assertEquals("PREPARE",db.queryForObject("select status from pro_workorder where workorder_id=?",String.class,order));}
     @Test void mismatchedStationAndStaleVersionLeaveNoPartialRows(){ExecutionReleaseRequest r=request();r.steps.get(0).workstationId=stations.get(1);assertEquals(400,service.release(order,r).get("code"));r=request();r.expectedVersion=3L;assertEquals(409,service.release(order,r).get("code"));assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_operation"));}
+    @Test void changedBomAfterMaterialReferenceRejectsBeforeCreatingTasks(){
+        ExecutionReleaseRequest r=request();
+        r.expectedBomFingerprint=(String)service.options(order).get("bomFingerprint");
+        assertTrue(r.expectedBomFingerprint.startsWith("sha256:"));
+        db.update("update pro_workorder_bom set quantity=quantity*2 where workorder_id=?",order);
+        assertEquals(409,service.release(order,r).get("code"));
+        assertEquals(0,count("pro_task"));assertEquals(0,count("pro_execution_operation"));
+    }
     @Test void concurrentSameOperationOnlyAllocatesOnce() throws Exception {ExecutionReleaseRequest r=request();ExecutorService pool=Executors.newFixedThreadPool(2);Callable<AjaxResult> call=()->{login();try{return service.release(order,r);}finally{SecurityContextHolder.clearContext();}};try{Future<AjaxResult>a=pool.submit(call),b=pool.submit(call);assertEquals(200,a.get(20,TimeUnit.SECONDS).get("code"));assertEquals(200,b.get(20,TimeUnit.SECONDS).get("code"));assertEquals(3,count("pro_task"));assertEquals(10,count("pro_execution_unit"));}finally{pool.shutdownNow();}}
     @Test void invalidQuantityRouteAndTemplateRejectWithoutClaim() {
         for(double q:new double[]{0,0.5,-1}) {db.update("update pro_workorder set quantity=? where workorder_id=?",q,order);assertEquals(400,service.release(order,request()).get("code"));}

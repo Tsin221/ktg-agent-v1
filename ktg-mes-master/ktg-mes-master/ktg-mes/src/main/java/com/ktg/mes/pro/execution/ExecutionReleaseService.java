@@ -35,6 +35,8 @@ public class ExecutionReleaseService {
     static void validateRequest(ExecutionReleaseRequest r) {
         if(r==null || r.expectedVersion==null || r.expectedVersion<0 || r.routeId==null || r.routeId<=0
                 || r.steps==null || r.steps.size()!=3) throw ExecutionException.validation("下达须选择版本、路线及三道工位");
+        if(r.expectedBomFingerprint!=null && !r.expectedBomFingerprint.matches("sha256:[0-9a-f]{64}"))
+            throw ExecutionException.validation("BOM核对标识无效");
         Set<Long> ids=new HashSet<>();
         for(ExecutionReleaseRequest.Step s:r.steps) {
             if(s==null || s.routeProcessId==null || s.routeProcessId<=0 || s.workstationId==null
@@ -67,6 +69,8 @@ public class ExecutionReleaseService {
         }
         List<Map<String,Object>> bom=db.queryForList("select * from pro_workorder_bom where workorder_id=? order by line_id for update",id);
         String bomSnapshot=encode(bom);
+        if(r.expectedBomFingerprint!=null && !r.expectedBomFingerprint.equals(fingerprint(bomSnapshot)))
+            throw new ExecutionException(409,"BOM_CONFLICT","工单 BOM 在备料核对后已改变，请重新核对");
         try {
             ExecutionMaterialRequirements.parse(json,count,bomSnapshot);
         } catch (ExecutionException invalid) {
@@ -96,7 +100,9 @@ public class ExecutionReleaseService {
     public Map<String,Object> options(Long id) {
         access.requireOperation(ExecutionAction.RELEASE,id,null,null);
         Map<String,Object> w=one("select * from pro_workorder where workorder_id=?",id);
-        return productOptions(w.get("product_id"));
+        Map<String,Object> out=new LinkedHashMap<>(productOptions(w.get("product_id")));
+        out.put("bomFingerprint",fingerprint(encode(db.queryForList("select * from pro_workorder_bom where workorder_id=? order by line_id",id))));
+        return out;
     }
     public Map<String,Object> optionsForProduct(Long productId) {
         access.requireProductReleaseOptions();
@@ -170,6 +176,14 @@ public class ExecutionReleaseService {
     private List<Map<String,Object>> routeSteps(Long id,boolean lock) { return db.queryForList("select * from pro_route_process where route_id=? order by order_num,record_id"+(lock?" for update":""),id); }
     private Map<String,Object> one(String sql,Object... args) { List<Map<String,Object>> rows=db.queryForList(sql,args); if(rows.size()!=1) throw ExecutionException.validation("所选业务配置不存在或未启用"); return rows.get(0); }
     private String encode(Object value) { try{return json.writeValueAsString(value);}catch(Exception bad){throw new IllegalStateException(bad);} }
+    private String fingerprint(String value) {
+        try {
+            byte[] bytes=java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex=new StringBuilder("sha256:");
+            for(byte item:bytes) hex.append(String.format("%02x",item&255));
+            return hex.toString();
+        } catch(java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
     private static long number(Object value) {return value==null?-1:((Number)value).longValue();}
     private long insert(String sql,Object... args) {GeneratedKeyHolder keys=new GeneratedKeyHolder(); db.update(c->{java.sql.PreparedStatement p=c.prepareStatement(sql,Statement.RETURN_GENERATED_KEYS);for(int i=0;i<args.length;i++)p.setObject(i+1,args[i]);return p;},keys);return keys.getKey().longValue();}
 }
