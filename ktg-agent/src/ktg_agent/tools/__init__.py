@@ -13,13 +13,10 @@ from ktg_agent.tools.registry import (
     ToolResult,
     ToolStatus,
 )
-from ktg_agent.tools.runner import AfterToolHook, BeforeToolHook, ToolRunner
+from ktg_agent.tools.runner import ToolRunner
 from ktg_agent.tools.catalog import (
-    CandidateSnapshot,
-    CatalogIdentity,
     CatalogSwitches,
     ToolCatalog,
-    ToolFactory,
     ToolManifest,
 )
 from ktg_agent.tools.permissions import (
@@ -30,15 +27,9 @@ from ktg_agent.tools.permissions import (
     PermissionPolicy,
     PermissionPolicyError,
     evaluate_permission_policy,
-    legacy_permission_policy,
-    parse_permission_policy,
 )
 
 __all__ = [
-    "AfterToolHook",
-    "BeforeToolHook",
-    "CandidateSnapshot",
-    "CatalogIdentity",
     "CatalogSwitches",
     "DuplicateToolError",
     "ExecutionMode",
@@ -55,13 +46,10 @@ __all__ = [
     "ToolDefinitionError",
     "ToolEffect",
     "ToolExecute",
-    "ToolFactory",
     "ToolManifest",
     "ToolRegistry",
     "ToolResult",
     "ToolRunner",
     "ToolStatus",
     "evaluate_permission_policy",
-    "legacy_permission_policy",
-    "parse_permission_policy",
 ]

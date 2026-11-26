@@ -1,6 +1,7 @@
 """Model-visible inspection and proposal; confirmation is deliberately not a model tool."""
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from typing import Any, cast
@@ -123,7 +124,7 @@ def build_workorder_operation_tool(store: OperationPlanStore) -> ToolDefinition:
             if params["mode"] != "prepare" or not identity.get("_agent_session_id"):
                 raise ValueError("工单操作必须在有持久会话的助手中准备并由用户确认；当前无法写入。")
             steps = await prepare_steps(client, identity, params["steps"])
-            plan = store.create(owner_from_identity(cast(JsonObject, identity)), context.run_id, steps)
+            plan = await asyncio.to_thread(store.create, owner_from_identity(cast(JsonObject, identity)), context.run_id, steps)
             if plan["session_id"] != identity["_agent_session_id"]:
                 raise ValueError("会话身份与方案不一致。")
             details = public_plan(plan)

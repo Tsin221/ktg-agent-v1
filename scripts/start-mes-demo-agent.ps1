@@ -166,8 +166,7 @@ if ($Action -eq 'Agent') {
     $env:AGENT_HOST = '127.0.0.1'
     $env:AGENT_PORT = [string]$agentPort
     $env:AGENT_SCOPE_BY_TOKEN = 'false'
-    $env:AGENT_SESSION_DB = Join-Path $agentRoot 'sessions.sqlite3'
-    $env:AGENT_SPILL_DIR = Join-Path $agentRoot 'spill'
+    $env:AGENT_SESSION_DB = Join-Path $agentRoot 'sessions-v2.sqlite3'
     $pythonExe = Join-Path $projectRoot 'ktg-agent/.venv/Scripts/python.exe'
     if (!(Test-Path -LiteralPath $pythonExe)) { throw 'The local Agent Python environment is missing.' }
     Push-Location (Join-Path $projectRoot 'ktg-agent')

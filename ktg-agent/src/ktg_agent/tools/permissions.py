@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeAlias
@@ -51,21 +51,6 @@ def _validate_children(children: object, label: str) -> None:
         raise PermissionPolicyError(f"{label} must contain permission policies")
 
 
-def parse_permission_policy(value: object) -> PermissionPolicy:
-    """Parse the contract-v1 JSON form, rejecting unknown or empty branches."""
-    if not isinstance(value, Mapping) or len(value) != 1:
-        raise PermissionPolicyError("permission policy must have exactly one operator")
-    if "permission" in value:
-        return PermissionLeaf(value["permission"])
-    for key, policy_type in (("all_of", PermissionAll), ("any_of", PermissionAny)):
-        if key in value:
-            children = value[key]
-            if not isinstance(children, list) or not children:
-                raise PermissionPolicyError(f"{key} must be a non-empty list")
-            return policy_type(tuple(parse_permission_policy(child) for child in children))
-    raise PermissionPolicyError("unknown permission policy operator")
-
-
 class PermissionDecision(StrEnum):
     ALLOWED = "allowed"
     DENIED = "PERMISSION_DENIED"
@@ -93,9 +78,3 @@ def evaluate_permission_policy(
 
     return PermissionDecision.ALLOWED if permits(policy) else PermissionDecision.DENIED
 
-
-def legacy_permission_policy(required_permissions: tuple[str, ...]) -> PermissionPolicy:
-    """Only explicitly non-empty legacy tuples can migrate as an AND policy."""
-    if not required_permissions:
-        raise PermissionPolicyError("empty legacy permissions require review")
-    return PermissionAll(tuple(PermissionLeaf(item) for item in required_permissions))

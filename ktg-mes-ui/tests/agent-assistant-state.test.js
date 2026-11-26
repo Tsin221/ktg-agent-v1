@@ -477,6 +477,11 @@ async function main() {
     payload: { tool_name: 'update_task', status: 'succeeded', result: { task_id: 'task-b', version: 2 } } })
   await new Promise(resolve => setImmediate(resolve))
   assert.strictEqual(view.taskDetail.current_version, 2)
+  taskVersions = [3, 2, 1]
+  handlers.onEvent({ type: 'plan_changed', run_id: view.activeRunId,
+    payload: { task_id: 'task-b', step_id: 'stable', status: 'completed' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.taskDetail.current_version, 3)
   view.taskVersion = 1
   assert.strictEqual(options.computed.visibleTaskVersion.call(view).steps[0].status, 'pending')
   const pendingPlan = { plan_id: 'test-plan', digest: 'sha256:plan', status: 'pending', confirmable: true, run_id: view.activeRunId,

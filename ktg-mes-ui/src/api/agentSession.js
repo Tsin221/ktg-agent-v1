@@ -88,7 +88,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         const saved = JSON.parse(storage.getItem(STORAGE_KEY))
         if (saved && typeof saved.sessionId === 'string') {
           pointer = { sessionId: saved.sessionId, runId: typeof saved.runId === 'string' ? saved.runId : null,
-            seq: Number.isSafeInteger(saved.seq) && saved.seq >= 0 ? saved.seq : 0 }
+            seq: 0 } // Reload has no transient text.
         }
       } catch (_) {
         save()
@@ -123,10 +123,10 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     save()
   }
 
-  function setRun(runId) {
+  function setRun(runId, { replay = false } = {}) {
     requireIdentity()
     if (!pointer) throw new Error('请先选择会话。')
-    if (pointer.runId === runId) return
+    if (pointer.runId === runId && !replay) return
     close()
     pointer.runId = runId
     pointer.seq = 0
@@ -191,7 +191,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     if (!active()) return null
     const inputs = await listInputs(runId)
     if (!active() || !inputs) return null
-    if (Number.isSafeInteger(run.last_seq) && run.last_seq > pointer.seq) {
+    if (terminalStatuses.includes(run.status) && Number.isSafeInteger(run.last_seq) && run.last_seq > pointer.seq) {
       pointer.seq = run.last_seq
       save()
     }
@@ -233,8 +233,28 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
       return result.run
     }
 
+    let pendingTerminal = false
+    const recoverGap = async () => {
+      const run = await api.getRun(runId)
+      if (!active()) return null
+      const resume = run.last_seq // Boundary captured BEFORE snapshot reads.
+      const result = await readSnapshot(runId, sessionId, active, run)
+      if (!result || !active()) return null
+      result.historyIncomplete = true
+      if (onSnapshot) onSnapshot(result)
+      if (!terminalStatuses.includes(run.status)) {
+        if (!Number.isSafeInteger(resume) || resume < 0) throw new Error('Invalid recovery cursor')
+        pointer.seq = resume
+        save()
+      }
+      return run
+    }
     while (active()) {
       try {
+        if (pendingTerminal) {
+          await snapshot()
+          return
+        }
         const url = '/agent-api/v1/runs/' + encodeURIComponent(runId) +
           '/events?after_seq=' + pointer.seq
         const response = await fetchStream(url, {
@@ -244,8 +264,9 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         if (!active()) return
         if (response.status === 410) {
           if (onConnectionRestored) onConnectionRestored()
-          await snapshot()
-          return
+          const run = await recoverGap()
+          if (!run || terminalStatuses.includes(run.status)) return
+          continue
         }
         if (response.status === 401) {
           clear()
@@ -263,20 +284,22 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         const reader = response.body.getReader()
         const decoder = new TextDecoder('utf-8')
         let settled = false
+        let gap = false
         const parser = createSseParser(frame => {
           if (!active()) return
           const envelope = JSON.parse(frame.data)
+          if (frame.event === 'history_expired' && envelope.run_id === runId && envelope.session_id === sessionId) { gap = true; return }
           const seq = envelope.seq
           if (envelope.run_id !== runId || envelope.session_id !== sessionId ||
               !Number.isSafeInteger(seq) || seq <= pointer.seq || String(seq) !== frame.id ||
               envelope.type !== frame.event) return
+          if (onEvent) onEvent(envelope)
           pointer.seq = seq
           save()
-          if (onEvent) onEvent(envelope)
           if (envelope.type === 'run_settled') settled = true
         })
         try {
-          while (active() && !settled) {
+          while (active() && !settled && !gap) {
             const { value, done } = await reader.read()
             if (done) break
             parser.feed(decoder.decode(value, { stream: true }))
@@ -286,13 +309,20 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
           reader.cancel().catch(() => {})
         }
         if (!active()) return
+        if (gap) {
+          const run = await recoverGap()
+          if (!run || terminalStatuses.includes(run.status)) return
+          continue
+        }
         if (settled) {
+          pendingTerminal = true
           await snapshot()
           return
         }
         const run = await api.getRun(runId)
         if (!active()) return
         if (terminalStatuses.includes(run.status)) {
+          pendingTerminal = true
           await snapshot(run)
           return
         }

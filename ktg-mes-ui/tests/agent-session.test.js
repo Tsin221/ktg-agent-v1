@@ -226,6 +226,68 @@ async function main() {
   assert.strictEqual(saved.size, 0)
   releaseStream()
   await pending
+  // Reload discards stored seq because it cannot restore transient text.
+  auth = { token: 'first', userId: 7 }
+  saved.set('ktg-agent-session-pointer', JSON.stringify({ sessionId: 's1', runId: 'r1', seq: 99 }))
+  let gapReads = 0
+  let gapConnections = 0
+  let snapshotFailures = 0
+  const gapUrls = []
+  const gapSnapshots = []
+  const gapClient = createAgentSessionClient({ storage, getIdentity: () => auth, retryDelay: 0,
+    api: { ...api,
+      getRun: async () => ({ run_id: 'r1', session_id: 's1',
+        status: ++gapReads === 1 ? 'running' : gapReads === 2 ? 'running' : 'completed', last_seq: gapReads <= 2 ? 10 : 12 }),
+      listMessages: async () => {
+        if (gapReads >= 3 && snapshotFailures++ === 0) throw new Error('snapshot temporarily unavailable')
+        return { items: [{ message_id: 99 }], next_cursor: null }
+      }
+    },
+    fetchStream: async url => {
+      gapUrls.push(url)
+      if (++gapConnections === 1) return { status: 410, ok: false }
+      return { status: 200, ok: true, body: stream([bytes(frame(11) + frame(12, 'run_settled'))]) }
+    } })
+  assert.strictEqual((await gapClient.restoreSession()).seq, 0)
+  await gapClient.subscribeRun({ onSnapshot: s => gapSnapshots.push(s) })
+  assert.deepStrictEqual(gapUrls, ['/agent-api/v1/runs/r1/events?after_seq=0', '/agent-api/v1/runs/r1/events?after_seq=10'])
+  assert.strictEqual(gapSnapshots[0].historyIncomplete, true)
+  assert.strictEqual(gapSnapshots[1].run.status, 'completed')
+  assert.ok(snapshotFailures >= 2, 'terminal snapshot retries without reopening the stream')
+  assert.strictEqual(gapConnections, 2)
+
+  gapClient.setRun('r1', { replay: true })
+  assert.strictEqual(gapClient.getState().seq, 0)
+
+  let midstreamConnections = 0
+  const midstreamEvents = []
+  const midstreamSnapshots = []
+  let midstreamRunReads = 0
+  const midstream = createAgentSessionClient({ storage: null, getIdentity: () => auth, retryDelay: 0,
+    api: { ...api, getRun: async () => ({ run_id: 'r1', session_id: 's1',
+      status: ++midstreamRunReads === 1 ? 'running' : 'completed', last_seq: midstreamRunReads === 1 ? 5 : 6 }) },
+    fetchStream: async url => {
+      if (++midstreamConnections === 1) return { ok: true, status: 200, body: stream([bytes(frame(1) +
+        'event: history_expired\ndata: {"run_id":"r1","session_id":"s1","type":"history_expired"}\n\n')]) }
+      assert.ok(url.endsWith('after_seq=5'))
+      return { ok: true, status: 200, body: stream([bytes(frame(6, 'run_settled'))]) }
+    } })
+  midstream.setSession('s1'); midstream.setRun('r1')
+  await midstream.subscribeRun({ onEvent: e => midstreamEvents.push(e.seq), onSnapshot: s => midstreamSnapshots.push(s) })
+  assert.deepStrictEqual(midstreamEvents, [1, 6])
+  assert.strictEqual(midstreamSnapshots[0].historyIncomplete, true)
+  assert.strictEqual(midstreamSnapshots[1].run.status, 'completed')
+
+  // A late snapshot may not overwrite a newly selected session.
+  let releaseMessages
+  const staleClient = createAgentSessionClient({ storage: null, getIdentity: () => auth,
+    api: { ...api, listMessages: () => new Promise(resolve => { releaseMessages = resolve }) }, fetchStream })
+  staleClient.setSession('s1'); staleClient.setRun('r1')
+  const oldSnapshot = staleClient.reconcileRun(terminalRun)
+  staleClient.setSession('s2')
+  releaseMessages({ items: [{ message_id: 'old' }], next_cursor: null })
+  assert.strictEqual(await oldSnapshot, null)
+  assert.strictEqual(staleClient.getState().sessionId, 's2')
   console.log('agent session tests passed')
 }
 

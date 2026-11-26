@@ -6,16 +6,12 @@ from collections.abc import Awaitable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
 from ktg_agent.core.messages import JsonObject, _json_object, _required_text
-from ktg_agent.providers.base import ToolSchema
-
-if TYPE_CHECKING:
-    from ktg_agent.core.messages import ToolResultMessage
 
 
 class ToolDefinitionError(ValueError):
@@ -29,7 +25,6 @@ class DuplicateToolError(ToolDefinitionError):
 class ToolEffect(StrEnum):
     READ = "read"
     WRITE = "write"
-    SESSION_WRITE = "session_write"
 
 
 class ExecutionMode(StrEnum):
@@ -49,11 +44,6 @@ class ToolStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-class ToolChannel(StrEnum):
-    MODEL = "model"
-    TRUSTED_CONFIRMATION = "trusted_confirmation"
-
-
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """Server-owned execution data that is never supplied by the model."""
@@ -62,25 +52,13 @@ class ToolContext:
     tool_call_id: str
     operation_id: str | None = None
     identity: object | None = None
-    cancellation: object | None = None
-    progress_publisher: object | None = None
     ktg_client: object | None = None
-    channel: ToolChannel = ToolChannel.MODEL
-    candidate_snapshot_id: str | None = None
-    active_snapshot_id: str | None = None
-    confirmation_id: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run id")
         _required_text(self.tool_call_id, "tool call id")
         if self.operation_id is not None:
             _required_text(self.operation_id, "operation id")
-        if not isinstance(self.channel, ToolChannel):
-            raise ToolDefinitionError("invalid tool channel")
-        for label in ("candidate_snapshot_id", "active_snapshot_id", "confirmation_id"):
-            value = getattr(self, label)
-            if value is not None:
-                _required_text(value, label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,16 +96,6 @@ class ToolResult:
     @property
     def is_error(self) -> bool:
         return self.status is not ToolStatus.SUCCEEDED
-
-    def to_message(self, tool_call_id: str) -> "ToolResultMessage":
-        from ktg_agent.core.messages import TextBlock, ToolResultMessage
-
-        return ToolResultMessage(
-            tool_call_id=tool_call_id,
-            content=(TextBlock(self.content),),
-            is_error=self.is_error,
-            details=self.details,
-        )
 
 
 class ToolExecute(Protocol):
@@ -204,13 +172,6 @@ class ToolDefinition:
         if not isinstance(self.expose_to_model, bool):
             raise ToolDefinitionError("expose_to_model must be a boolean")
 
-    def model_schema(self) -> ToolSchema:
-        return ToolSchema(
-            name=self.name,
-            description=self.description,
-            input_schema=deepcopy(self.input_schema),
-        )
-
 
 class ToolRegistry:
     """The sole allow-list from which the runner resolves executable tools."""
@@ -228,9 +189,3 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDefinition:
         return self._definitions[name]
 
-    def model_schemas(self) -> tuple[ToolSchema, ...]:
-        return tuple(
-            tool.model_schema()
-            for tool in self._definitions.values()
-            if tool.expose_to_model
-        )

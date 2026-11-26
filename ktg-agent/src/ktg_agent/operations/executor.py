@@ -1,6 +1,7 @@
 """Execute only a durable, owner-confirmed MES plan, with independently verified receipts."""
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable, Mapping
 from typing import cast
@@ -126,9 +127,32 @@ class OperationExecutor:
         self.store = store
         self.enabled = enabled or (lambda: True)
 
+    @staticmethod
+    async def _db[T](call: Callable[[], T]) -> T:
+        """Finish the SQLite transaction before cancellation cleanup can read it."""
+        saving = asyncio.create_task(asyncio.to_thread(call))
+        try:
+            return await asyncio.shield(saving)
+        except asyncio.CancelledError:
+            await saving
+            raise
+
+    async def _claim(self, owner: str, session_id: str, plan_id: str,
+                     call: Callable[[], tuple[Plan, bool]]) -> tuple[Plan, bool]:
+        claiming = asyncio.create_task(asyncio.to_thread(call))
+        try:
+            return await asyncio.shield(claiming)
+        except asyncio.CancelledError:
+            _, won = await claiming
+            # Only the actual winner may interrupt a claimed plan.
+            if won:
+                await self._db(lambda: self.store.interrupt(owner, session_id, plan_id))
+            raise
+
     async def confirm(self, client: KTGClient, identity: Mapping[str, object], owner: str,
                       session_id: str, plan_id: str, digest: str) -> Plan:
-        plan, claimed = self.store.claim(owner, session_id, plan_id, digest)
+        plan, claimed = await self._claim(owner, session_id, plan_id,
+            lambda: self.store.claim(owner, session_id, plan_id, digest))
         if not claimed:
             return plan
         try:
@@ -137,7 +161,7 @@ class OperationExecutor:
             # A response/store interruption may happen after MES committed; recover the
             # durable sent intent without ever running a second executor for this plan.
             try:
-                self.store.interrupt(owner, session_id, plan_id)
+                await self._db(lambda: self.store.interrupt(owner, session_id, plan_id))
             except Exception:
                 pass  # If SQLite itself is down, startup recovery handles the durable row.
             raise
@@ -161,7 +185,7 @@ class OperationExecutor:
                             raise ValueError("工单操作功能已关闭，本步骤未发送。")
                         require_permissions(await current_permissions(client, identity), ACTION_PERMISSIONS[step["action"]])
                         # Save exact resolved request and stable operation ID BEFORE any write is sent.
-                        self.store.save_results(owner, session_id, plan_id, results, "executing")
+                        await self._db(lambda: self.store.save_results(owner, session_id, plan_id, results, "executing"))
                         sent_intent = True
                         item.update(await _send(client, identity, step, item))
                 except (ValueError, KTGError) as error:
@@ -170,8 +194,8 @@ class OperationExecutor:
                 except Exception:
                     item.update(status="unknown" if sent_intent else "failed",
                                 message="步骤未能完成；请核对方案或原操作回执。")
-            self.store.save_results(owner, session_id, plan_id, results, "executing")
-        return self.store.save_results(owner, session_id, plan_id, results, final_status(results))
+            await self._db(lambda: self.store.save_results(owner, session_id, plan_id, results, "executing"))
+        return await self._db(lambda: self.store.save_results(owner, session_id, plan_id, results, final_status(results)))
 
     async def _prepare_request(self, client: KTGClient, identity: Mapping[str, object], plan: Plan,
                                step: Step, item: Step) -> None:
@@ -260,14 +284,15 @@ class OperationExecutor:
 
     async def reconcile(self, client: KTGClient, identity: Mapping[str, object], owner: str,
                         session_id: str, plan_id: str) -> Plan:
-        plan, claimed = self.store.claim_reconciliation(owner, session_id, plan_id)
+        plan, claimed = await self._claim(owner, session_id, plan_id,
+            lambda: self.store.claim_reconciliation(owner, session_id, plan_id))
         if not claimed:
             return plan
         try:
             return await self._reconcile_claimed(client, identity, owner, session_id, plan_id, plan)
         except BaseException:
             try:
-                self.store.interrupt(owner, session_id, plan_id)
+                await self._db(lambda: self.store.interrupt(owner, session_id, plan_id))
             except Exception:
                 pass
             raise
@@ -283,4 +308,4 @@ class OperationExecutor:
                 item.update(await _verify_receipt(client, identity, step, item))
             except Exception:
                 item.update(message="尚未获得一致的原操作回执，仍待核实。")
-        return self.store.save_results(owner, session_id, plan_id, results, final_status(results))
+        return await self._db(lambda: self.store.save_results(owner, session_id, plan_id, results, final_status(results)))

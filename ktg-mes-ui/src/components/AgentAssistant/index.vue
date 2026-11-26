@@ -690,7 +690,7 @@ export default {
         const pointer = agentSession.getState()
         const runId = session.active_run_id || pointer && pointer.runId
         if (runId) {
-          agentSession.setRun(runId)
+          agentSession.setRun(runId, { replay: true })
           this.activeRunId = runId
           const run = await getAgentRun(runId)
           if (epoch !== this.epoch) return
@@ -855,6 +855,10 @@ export default {
     applyRunSnapshot(snapshot, epoch) {
       if (epoch !== this.epoch || snapshot.run.run_id !== this.activeRunId) return
       if (this.activeRun && isTerminalRun(this.activeRun.status) && !isTerminalRun(snapshot.run.status)) return
+      if (snapshot.historyIncomplete) {
+        this.progress = { messages: [], tools: {}}
+        this.panelError = '部分实时进度已过期，已恢复保存的状态；完整结果将在结束后同步。'
+      }
       this.activeRun = snapshot.run
       this.refreshStats(epoch)
       this.messages = presentMessages(snapshot.messages.items)
@@ -927,6 +931,9 @@ export default {
                 ['create_task', 'update_task'].includes(event.payload.tool_name)) {
               const taskId = event.payload.result && event.payload.result.task_id
               if (event.payload.tool_name === 'create_task' && taskId) this.selectTask(taskId)
+              this.refreshTasks(epoch)
+            }
+            if (event.type === 'plan_changed') {
               this.refreshTasks(epoch)
             }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
