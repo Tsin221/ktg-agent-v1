@@ -1,8 +1,8 @@
 # KTG Agent
 
-KTG Agent 的 Python 核心包，提供模型事件流、工具发现及受控执行、会话与任务持久化、上下文管理、运行限额和 HTTP/SSE 服务。
+KTG Agent 的 Python 核心包，是面向 MES 生产主管场景的面试展示 Demo。现有实现提供模型事件流、工具发现及受控执行、会话与任务持久化、上下文管理、运行限额和 HTTP/SSE 服务。后续优先评估成熟框架简化通用基础设施，不以生产级 Agent 平台为目标。
 
-2026-11-24：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`）。沿用产品总数及分仓现存量两个已验证工具，新增工单概览与生产进度、工单备料与剩余用料分析、工单质量异常与检验历史、原料与成品双向追溯，只开放这六个业务只读工具。旧业务写入、探索、设备、维修、点检、工装等工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
+截至 2026-11-25（`26e93f5`）：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`），现有六个业务只读工具、一个业务编码识别辅助工具及一个受控工单操作方案工具。旧业务写入、探索、设备、维修、点检、工装等已退役工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
 
 ## 环境和开发验证
 
@@ -50,6 +50,8 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 | `ktg_query_workorder_quality` | 工单列表、全单执行摘要、检验任务当前及历史可访问 SN、单件各轮检验记录 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
 | `ktg_query_production_trace` | `GET /mes/pro/execution/units/trace`、`GET /mes/pro/execution/materials/trace`、物料列表精确定位；实际投入与批次关联 SN | `mes:pro:execution:trace`、`mes:pro:execution:query`、`mes:md:mditem:list` 同时具备 |
 
+此外，`ktg_resolve_business_reference` 用于核实含义不明的业务编码，保留歧义、权限范围和未核实状态；`ktg_prepare_workorder_operations` 用于准备创建、编辑草稿、备料判断和下达方案，实际执行须由用户确认并核实回执。模型不能直接执行 MES 写入。
+
 分仓**现存量**不是本工单可消耗量、预留量或齐套结论。没有匹配的库存记录时明确说明，不编造零数量。工单概览支持名称片段、多编号、多状态、需求日期和分页；执行进度按需读取，未获取的进度不能视为零，部分覆盖不能视为全量。其他生产事实尚未提供 Agent 工具，不得用历史输出推断。
 
 工单用料查询接收 1–5 个准确工单编号，可选批次详情；名称片段先由工单概览定位。草稿比较工单 BOM 总需求与未绑定工单的非虚拟仓账面现存量，仅作原仓备料参考；已下达则使用冻结 BOM 与待装配件数计算剩余需求，对比本工单真实可耗线边库存。不跨工单分配库存，不执行领料或采购。正式数据只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-materials.py`。
@@ -58,13 +60,13 @@ AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqli
 
 生产追溯查询支持 `unit_to_material`（1–5 个精确 SN）和 `material_to_unit`（1–3 个精确原料物料编码+批次，可分页）。只投影实际投入记录，不能用计划、领料或库存替代实耗；反查总数为当前账号范围内去重 SN，状态统计限本页，全部覆盖时才代表整批。跨批次重复 SN 不可累加，关联不等于缺陷或根因；可按实际 SN 自主组合质量工具，质量全工单统计不等于批次统计。
 
-`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录只包含上述六项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史会话应保持只读归档，不能恢复旧确认操作。
+`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录包含上述八项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史退役操作不能作为新的确认操作执行。
 
 ## HTTP 与会话
 
 服务提供 `GET /health`、`GET /agent-api/v1/tools` 和 `POST /agent-api/v1/query`。业务请求必须使用当前 MES 用户的 `Authorization: Bearer <KTG token>`；用户身份与权限由真实 `/getInfo` 核对。模型不能指定 KTG 地址或任意接口。
 
-会话入口包括 `POST/GET /agent-api/v1/sessions`、会话详情/消息/统计/压缩、`POST /agent-api/v1/sessions/{sid}/runs`、run 状态/事件/取消/输入及任务接口。SSE `after_seq` 为已收事件序号，断线续接不重放用户请求；事件历史不可用时读 run 快照和会话消息。持久化会话保持用户隔离和请求幂等，进程重启不自动重放不确定业务操作。旧业务专用确认和探索 HTTP 路由不再开放。
+会话入口包括 `POST/GET /agent-api/v1/sessions`、会话详情/消息/统计/压缩、`POST /agent-api/v1/sessions/{sid}/runs`、run 状态/事件/取消/输入及任务接口。SSE `after_seq` 为已收事件序号，断线续接不重放用户请求；事件历史不可用时读 run 快照和会话消息。持久化会话保持用户隔离和请求幂等，进程重启不自动重放不确定业务操作。D1 通过 `/agent-api/v1/sessions/{sid}/operations` 查询方案，使用 `/{plan_id}/confirm`、`/{plan_id}/cancel`、`/{plan_id}/reconcile` 处理确认、取消和核实；旧业务专用确认和探索 HTTP 路由不再开放。
 
 ## 项目结构
 

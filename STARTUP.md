@@ -312,7 +312,7 @@ Set-Location E:\ktg_agent\ktg_agent_v1\ktg-mes-ui
 npm run test:workorder
 ```
 
-完整验收记录见 `docs/S2-08-端到端联调验收记录.md`。
+该阶段的历史验收记录已归档；独立检出仓库时，可在 Git 提交 `26e93f5` 中查阅原 `docs/S2-08-端到端联调验收记录.md`。
 
 ## 9. 前后端打包
 
