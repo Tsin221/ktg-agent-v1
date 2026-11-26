@@ -65,7 +65,7 @@ _INPUT_SCHEMA: JsonObject = {
         "page": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 1},
         "page_size": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
         "include_progress": {"type": "boolean", "default": False,
-                             "description": "是否同时读取该页各工单的SN全单执行摘要；不返回SN明细。"},
+                             "description": "查询工序任务、任务顺序或实际执行状态时必须为true；同时返回各工单的任务和SN全单执行摘要，不返回SN明细。"},
     },
     "allOf": [
         {"not": {"required": ["workorder_code", "workorder_codes"]}},
@@ -85,7 +85,9 @@ def _strict_schema(properties: JsonObject, required: tuple[str, ...]) -> JsonObj
 
 _TASK_SCHEMA = _strict_schema(
     {"taskId": {"type": "string"}, "stepKind": {"type": "string"},
-     "taskKind": {"type": "string"}, "status": {"type": "string"}},
+     "taskKind": {"type": "string"}, "status": {"type": "string"},
+     "processName": {"type": "string"}, "taskCode": {"type": "string"},
+     "normalStepNo": {"type": "integer", "minimum": 1}},
     ("taskId", "stepKind", "taskKind", "status"),
 )
 _PROGRESS_SCHEMA = _strict_schema({
@@ -124,6 +126,7 @@ def build_workorder_overview_tool() -> ToolDefinition:
             "状态和需求日期来筛选；查在制或未完结工单可用 unfinished_only。"
             "查询哪些工单卡住、已装配、待检、待处置、返工、合格、已包装、报废及完结条件时，"
             "启用 include_progress，读取 MES 的 SN 全单统计而非旧报工总量。"
+            "查询工单有哪些工序任务、工序顺序及实际执行状态也使用本工具，include_progress=true，读取progress.tasks；无需另找工序明细工具。"
             "草稿无执行进度；没有权限或查询失败不推断为零或未开始。已完结不属于阻塞。"
             "多状态或日期范围有界扫描，coverage=partial 不提供完整总数。"
             "需求日期不是开工日期；不返回单个 SN 明细，也不执行或修改工单。"
@@ -387,10 +390,27 @@ def _parse_progress(response: Mapping[str, object], selected: _Workorder) -> Jso
         for task in tasks[:_MAX_TASKS]:
             if not isinstance(task, dict):
                 raise _invalid("MES 执行任务摘要格式无效。")
-            projected.append({
+            item: JsonObject = {
                 "taskId": _id(task.get("taskId")),
                 **{key: _text(task.get(key), key, 64) for key in ("stepKind", "taskKind", "status")},
-            })
+            }
+            # Names and sequence come from the same execution response, joined by ID.
+            details = data.get("tasks", [])
+            if isinstance(details, list):
+                matches = [detail for detail in details if isinstance(detail, dict)
+                           and str(detail.get("taskId")) == item["taskId"]]
+                if len(matches) == 1:
+                    detail = matches[0]
+                    if (_id(detail.get("workorderId")) != row["workorderId"]
+                            or any(detail.get(key) != item[key] for key in ("stepKind", "taskKind", "status"))):
+                        raise _invalid("MES 工序任务明细与摘要不一致。")
+                    for key in ("processName", "taskCode"):
+                        if detail.get(key) is not None:
+                            item[key] = _text(detail[key], key, 255)
+                    sequence = detail.get("normalStepNo")
+                    if type(sequence) is int and sequence > 0:
+                        item["normalStepNo"] = sequence
+            projected.append(item)
         result["tasks"] = projected
         result["tasks_truncated"] = len(tasks) > _MAX_TASKS
     return result

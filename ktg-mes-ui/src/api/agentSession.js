@@ -178,6 +178,43 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     return items
   }
 
+  async function readSnapshot(runId, sessionId, active, knownRun) {
+    const run = knownRun || await api.getRun(runId)
+    if (!active()) return null
+    const messages = { items: [], next_cursor: null }
+    let cursor
+    do {
+      const page = await api.listMessages(sessionId, cursor ? { cursor } : undefined)
+      messages.items.push(...page.items)
+      cursor = page.next_cursor
+    } while (cursor && active())
+    if (!active()) return null
+    const inputs = await listInputs(runId)
+    if (!active() || !inputs) return null
+    if (Number.isSafeInteger(run.last_seq) && run.last_seq > pointer.seq) {
+      pointer.seq = run.last_seq
+      save()
+    }
+    return { run, messages, inputs }
+  }
+
+  // A terminal REST read is authoritative even if its final SSE frames are
+  // delayed. Obtain the persisted answer before aborting the old stream.
+  async function reconcileRun(run) {
+    requireIdentity()
+    if (!pointer || !run || run.run_id !== pointer.runId || !terminalStatuses.includes(run.status)) return null
+    const current = generation
+    const runId = pointer.runId
+    const sessionId = pointer.sessionId
+    const active = () => generation === current && checkIdentity() && pointer &&
+      pointer.runId === runId && pointer.sessionId === sessionId
+    if (run.session_id && run.session_id !== sessionId) return null
+    const result = await readSnapshot(runId, sessionId, active, run)
+    if (!result || !active()) return null
+    close()
+    return result
+  }
+
   async function subscribeRun({ onEvent, onSnapshot, onConnectionError, onConnectionRestored }) {
     requireIdentity()
     if (!pointer || !pointer.runId) throw new Error('没有可订阅的 run。')
@@ -189,24 +226,11 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
     const signal = controller.signal
     const active = () => !signal.aborted && generation === current && checkIdentity() &&
       pointer && pointer.runId === runId && pointer.sessionId === sessionId
-    const snapshot = async() => {
-      const run = await api.getRun(runId)
-      const messages = { items: [], next_cursor: null }
-      let cursor
-      do {
-        const page = await api.listMessages(sessionId, cursor ? { cursor } : undefined)
-        messages.items.push(...page.items)
-        cursor = page.next_cursor
-      } while (cursor && active())
-      if (!active()) return null
-      const inputs = await listInputs(runId)
-      if (!active() || !inputs) return null
-      if (Number.isSafeInteger(run.last_seq) && run.last_seq > pointer.seq) {
-        pointer.seq = run.last_seq
-        save()
-      }
-      if (onSnapshot) onSnapshot({ run, messages, inputs })
-      return run
+    const snapshot = async(knownRun) => {
+      const result = await readSnapshot(runId, sessionId, active, knownRun)
+      if (!result) return null
+      if (onSnapshot) onSnapshot(result)
+      return result.run
     }
 
     while (active()) {
@@ -252,7 +276,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
           if (envelope.type === 'run_settled') settled = true
         })
         try {
-          while (active()) {
+          while (active() && !settled) {
             const { value, done } = await reader.read()
             if (done) break
             parser.feed(decoder.decode(value, { stream: true }))
@@ -269,7 +293,7 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
         const run = await api.getRun(runId)
         if (!active()) return
         if (terminalStatuses.includes(run.status)) {
-          await snapshot()
+          await snapshot(run)
           return
         }
       } catch (error) {
@@ -282,5 +306,5 @@ export function createAgentSessionClient({ api, getIdentity, storage, fetchStrea
   }
 
   return { checkIdentity, getState, restoreSession, setSession, setRun, createRun,
-    cancelRun, addInput, listInputs, subscribeRun, close, clear }
+    cancelRun, addInput, listInputs, subscribeRun, reconcileRun, close, clear }
 }

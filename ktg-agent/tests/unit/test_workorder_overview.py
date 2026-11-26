@@ -253,3 +253,21 @@ def test_invalid_arguments_do_not_make_mes_requests(arguments: JsonObject) -> No
     mes = Mes([])
     result = mes.query(arguments)
     assert result.error_code == "VALIDATION_ERROR" and not mes.requests
+
+
+def test_execution_tasks_include_authoritative_process_name_and_sequence() -> None:
+    mes = Mes([order(1)])
+    mes.details["1"]["data"]["tasks"] = [{
+        "taskId": 500, "workorderId": 1, "stepKind": "ASSEMBLY",
+        "taskKind": "NORMAL", "status": "STARTED", "normalStepNo": 1,
+        "processName": "电池模组装配", "taskCode": "EX-1-1",
+    }]
+    result = mes.query({"include_progress": True})
+    assert result.details is not None
+    task = result.details["rows"][0]["progress"]["tasks"][0]
+    assert task["processName"] == "电池模组装配"
+    assert task["normalStepNo"] == 1 and task["status"] == "STARTED"
+    assert Draft202012Validator(build_workorder_overview_tool().output_schema).is_valid(result.details)
+    mes.details["1"]["data"]["tasks"][0]["status"] = "WAITING"
+    result = mes.query({"include_progress": True})
+    assert result.details["rows"][0]["progress_state"] == "unavailable"

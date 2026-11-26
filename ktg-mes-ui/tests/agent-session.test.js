@@ -136,6 +136,48 @@ async function main() {
   assert.strictEqual((await restored.restoreSession()).sessionId, 's1')
   await restored.subscribeRun({ onSnapshot: value => snapshots.push(value) })
   assert.strictEqual(snapshots.length, 2)
+
+  // A reverse proxy may keep the response open after the server's terminal event.
+  // Synchronize the persisted answer without waiting for EOF.
+  let readerCancelled = false
+  let timeout
+  const terminalRun = { run_id: 'r1', session_id: 's1', status: 'completed', last_seq: 3 }
+  const openAfterSettled = createAgentSessionClient({ api: { ...api, getRun: async () => terminalRun },
+    getIdentity: () => auth, storage: null,
+    fetchStream: async () => ({ ok: true, status: 200, body: new ReadableStream({
+      start(controller) { controller.enqueue(bytes(frame(3, 'run_settled'))) },
+      cancel() { readerCancelled = true }
+    }) }) })
+  openAfterSettled.setSession('s1')
+  openAfterSettled.setRun('r1')
+  let finalSnapshot
+  try {
+    await Promise.race([
+      openAfterSettled.subscribeRun({ onSnapshot: value => { finalSnapshot = value } }),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('terminal SSE frame did not settle promptly')), 500) })
+    ])
+  } finally { clearTimeout(timeout); openAfterSettled.close() }
+  assert.strictEqual(finalSnapshot.run.status, 'completed')
+  assert.deepStrictEqual(finalSnapshot.messages.items.map(item => item.message_id), [1, 2])
+  assert.strictEqual(readerCancelled, true)
+
+  // REST may observe a terminal run before its final SSE frames arrive.
+  let pendingSignal
+  const restFirst = createAgentSessionClient({ api, storage: null, getIdentity: () => auth,
+    fetchStream: async (_url, options) => {
+      pendingSignal = options.signal
+      return { ok: true, status: 200, body: new ReadableStream({ start(controller) {
+        options.signal.addEventListener('abort', () => controller.close(), { once: true })
+      } }) }
+    } })
+  restFirst.setSession('s1'); restFirst.setRun('r1')
+  const pendingStream = restFirst.subscribeRun({})
+  const restSnapshot = await restFirst.reconcileRun(terminalRun)
+  assert.strictEqual(restSnapshot.run.status, 'completed')
+  assert.deepStrictEqual(restSnapshot.messages.items.map(item => item.message_id), [1, 2])
+  assert.strictEqual(pendingSignal.aborted, true)
+  await pendingStream
+
   auth = { token: 'second', userId: 7 }
   restored.checkIdentity()
   assert.strictEqual(restored.getState(), null)

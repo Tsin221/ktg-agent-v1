@@ -1,21 +1,30 @@
 import http from 'node:http';
-import { readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename, stat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
 const project = fileURLToPath(new URL('../../', import.meta.url));
-const runtime = path.join(project, '.runtime/demo');
-const root = path.join(project, 'ktg-mes-ui/dist-demo');
-const credentials = JSON.parse(await readFile(path.join(runtime, 'account.json'), 'utf8'));
-const port = Number(process.env.DEMO_PORT || 4180);
-const backend = 'http://127.0.0.1:8082';
-const agent = 'http://127.0.0.1:8002';
+const formalGuide = process.argv.includes('--formal-guide');
+const runtime = path.join(project, formalGuide ? '.runtime/mes-demo/agent/production-guide-gateway' : '.runtime/demo');
+const root = path.join(project, formalGuide ? '.runtime/mes-demo/agent/ui-build-production-guide-preview' : 'ktg-mes-ui/dist-demo');
+const showcaseRoot = path.resolve(project, '../ktg-showcase');
+let credentials;
+if (formalGuide) {
+  const account = JSON.parse((await readFile(path.join(project, '.runtime/mes-demo/accounts.json'), 'utf8')).replace(/^\uFEFF/, '')).leader;
+  if (account?.username !== 'lamp_leader' || typeof account.password !== 'string' || !account.password) throw new Error('Unexpected formal demo identity');
+  credentials = { username: account.username, password: account.password };
+  await mkdir(runtime, { recursive: true });
+} else credentials = JSON.parse(await readFile(path.join(runtime, 'account.json'), 'utf8'));
+const port = Number(process.env.DEMO_PORT || (formalGuide ? 4175 : 4180));
+const backend = formalGuide ? 'http://127.0.0.1:18090' : 'http://127.0.0.1:8082';
+const agent = formalGuide ? 'http://127.0.0.1:18091' : 'http://127.0.0.1:8002';
 const visitorsFile = path.join(runtime, 'visitors.json');
 let visitors = {};
 let saveQueue = Promise.resolve();
 try { visitors = JSON.parse(await readFile(visitorsFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.json': 'application/json' };
+const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.mjs': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon', '.json': 'application/json', '.md': 'text/plain; charset=utf-8', '.pdf': 'application/pdf' };
+const showcaseFiles = new Set(['/', '/index.html', '/favicon.svg', '/share.jpg', '/site.css', '/experience.css', '/experience.mjs', '/app.mjs', '/content.mjs', '/interactions.mjs', '/stock-guide.mjs', '/engineering.css', '/resume-guide.css', '/workorder-guide.css']);
 function json(res, status, value) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); }
 function cookie(req) { return /(?:^|;\s*)ktg_demo_visitor=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1]; }
 function allowedOrigin(req) { return req.headers.origin === `http://${req.headers.host}` && ['127.0.0.1', 'localhost'].includes(req.headers.host?.split(':')[0]); }
@@ -32,12 +41,12 @@ async function api(url, token, body) {
   return response.json();
 }
 const server = http.createServer(async (req, res) => {
-  res.setHeader('Content-Security-Policy', "frame-ancestors 'self' http://127.0.0.1:4173 http://localhost:4173");
+  res.setHeader('Content-Security-Policy', formalGuide ? "frame-ancestors 'self'" : "frame-ancestors 'self' http://127.0.0.1:4173 http://localhost:4173");
   res.setHeader('X-Content-Type-Options', 'nosniff');
   try {
     const pathname = new URL(req.url, 'http://local').pathname;
     if (pathname === '/demo-health') {
-      if (['http://127.0.0.1:4173', 'http://localhost:4173'].includes(req.headers.origin)) {
+      if (!formalGuide && ['http://127.0.0.1:4173', 'http://localhost:4173'].includes(req.headers.origin)) {
         res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
         res.setHeader('Vary', 'Origin');
       }
@@ -82,12 +91,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, {});
     const decoded = decodeURIComponent(pathname);
-    const file = path.resolve(root, '.' + decoded);
-    const relative = path.relative(root, file);
+    const useShowcase = formalGuide && (showcaseFiles.has(decoded) || decoded === '/demo' || ['/demo/', '/assets/', '/media/', '/vendor/', '/engineering/', '/evidence/'].some(prefix => decoded.startsWith(prefix)));
+    const staticRoot = useShowcase ? showcaseRoot : root;
+    const file = path.resolve(staticRoot, '.' + decoded);
+    const relative = path.relative(staticRoot, file);
     if (relative.startsWith('..') || path.isAbsolute(relative) || relative.split(path.sep).some(part => part.startsWith('.'))) return json(res, 403, {});
     let target = file;
-    try { if (!(await stat(target)).isFile()) target = path.join(root, 'index.html'); }
-    catch { if (path.extname(file)) return json(res, 404, {}); target = path.join(root, 'index.html'); }
+    try { if (!(await stat(target)).isFile()) target = useShowcase ? path.join(target, 'index.html') : path.join(root, 'index.html'); }
+    catch { if (useShowcase || path.extname(file)) return json(res, 404, {}); target = path.join(root, 'index.html'); }
     res.setHeader('Content-Type', mime[path.extname(target)] || 'application/octet-stream');
     res.end(await readFile(target));
   } catch { if (!res.headersSent) json(res, 503, { message: '体验服务暂时不可用' }); else res.end(); }
