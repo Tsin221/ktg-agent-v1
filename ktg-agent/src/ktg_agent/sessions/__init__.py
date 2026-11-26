@@ -4,8 +4,6 @@ from ktg_agent.sessions.repository import (
     ControlConflictError,
     ControlRecord,
     ControlStateError,
-    EventRecord,
-    EventHistoryExpiredError,
     MessageRecord,
     Page,
     RunRecord,
@@ -15,6 +13,6 @@ from ktg_agent.sessions.repository import (
 
 __all__ = [
     "ControlConflictError", "ControlRecord", "ControlStateError",
-    "EventHistoryExpiredError", "EventRecord", "MessageRecord", "Page", "RunRecord", "SessionRecord",
+    "MessageRecord", "Page", "RunRecord", "SessionRecord",
     "SessionRepository",
 ]

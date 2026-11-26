@@ -7,10 +7,14 @@ task; the model may choose plan steps but may not choose a storage scope.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from typing import cast
 
 from pydantic_ai import RunContext
-from pydantic_ai_harness.planning import PlanItem, Planning, SqlitePlanStore
+from pydantic_ai.messages import ModelMessage, ToolReturnPart
+from pydantic_ai_harness.planning import PlanItem, Planning, SqlitePlanStore, TaskStatus
 
+from ktg_agent.core.messages import JsonObject
 from ktg_agent.tools.native import MesToolDeps
 
 
@@ -66,3 +70,47 @@ async def read_plan(database: str, *, owner: str, session_id: str, task_id: str)
     This is a model-maintained snapshot, not a source of business receipts.
     """
     return await _store(database, owner=owner, session_id=session_id, task_id=task_id).get_items()
+
+
+async def active_stock_step(database: str, deps: MesToolDeps) -> PlanItem | None:
+    """Find one unambiguous active step; evidence must never guess the target."""
+    if not deps.session_id:
+        return None
+    items = await read_plan(database, owner=deps.owner, session_id=deps.session_id, task_id=planning_task_id(deps))
+    active = [item for item in items if item.status is TaskStatus.in_progress]
+    return active[0] if len(active) == 1 else None
+
+
+def stock_step_evidence(messages: Sequence[ModelMessage]) -> dict[str, list[JsonObject]]:
+    """Project verified native stock receipts without storing a second plan history.
+
+    The step association is attached by the tool wrapper, not model arguments.
+    A completed Planning state alone never produces evidence.
+    """
+    evidence: dict[str, list[JsonObject]] = {}
+    seen: set[tuple[str | None, str, str]] = set()
+    for message in messages:
+        for part in message.parts:
+            if (not isinstance(part, ToolReturnPart) or part.tool_name != 'ktg_query_stock_summary'
+                    or part.outcome != 'success' or not isinstance(part.metadata, dict)
+                    or part.metadata.get('status') != 'succeeded'):
+                continue
+            link, details = part.metadata.get('planning_evidence'), part.metadata.get('details')
+            if (not isinstance(link, dict) or not isinstance(link.get('step_id'), str)
+                    or not isinstance(link.get('task_id'), str) or not isinstance(link.get('step_description'), str)
+                    or not isinstance(details, dict) or details.get('kind') != 'stock_summary'
+                    or not isinstance(details.get('filters'), dict) or not isinstance(details.get('queried_at'), str)
+                    or not isinstance(details.get('no_records'), bool)):
+                continue
+            step_id = link['step_id']
+            key = (message.run_id, part.tool_call_id, step_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence.setdefault(step_id, []).append({
+                'kind': 'stock_summary', 'task_id': link['task_id'], 'step_id': step_id,
+                'step_description': link['step_description'], 'run_id': message.run_id,
+                'tool_call_id': part.tool_call_id, 'filters': cast(JsonObject, details['filters']),
+                'queried_at': details['queried_at'], 'no_records': details['no_records'],
+            })
+    return evidence

@@ -102,7 +102,7 @@ def test_identity_scope_and_auth_fail_closed(tmp_path: Path, scoped: bool) -> No
 @pytest.mark.parametrize('case', ['cancel','permission','source','cross'])
 def test_operation_rejections(tmp_path: Path, case: str) -> None:
     mes=FakeMES(100)
-    store,plan=asyncio.run(create_plan(tmp_path,mes,plan_requests()))
+    store,plan=asyncio.run(create_plan(tmp_path,mes,plan_requests(),settle=case!='source'))
     app=create_app(config(tmp_path),resource_factory=lambda settings,stack: Resources(store._repository,store))
     app.dependency_overrides[get_mes_client]=lambda:mes.client
     with TestClient(app) as c:
@@ -112,7 +112,7 @@ def test_operation_rejections(tmp_path: Path, case: str) -> None:
         elif case=='permission':
             mes.permissions=[]
         elif case=='source':
-            store._repository.update_run_status('id:1',plan['run_id'],'failed')
+            store._repository.settle_native_run('id:1',plan['run_id'],'failed','execution_failed',{},())
         else:
             async def other(*args: Any) -> object:
                 return {'user':{'userId':2},'permissions':['*:*:*']}
@@ -125,16 +125,17 @@ def test_operation_rejections(tmp_path: Path, case: str) -> None:
 
 
 def test_messages_and_latest_task(tmp_path: Path) -> None:
-    from ktg_agent.core.messages import UserMessage, TextBlock
+    import json
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai_harness.planning import SqlitePlanStore, PlanItem, TaskStatus
     mes=FakeMES(100)
     store,plan=asyncio.run(create_plan(tmp_path,mes,plan_requests()))
     repo=store._repository
-    repo.update_run_status('id:1',plan['run_id'],'running')
-    task=repo.save_task('id:1',plan['session_id'],plan['run_id'],[{'step_id':'one','description':'first','status':'pending'}],title='Task')
-    repo.save_task('id:1',plan['session_id'],plan['run_id'],[{'step_id':'one','description':'first','status':'completed'}],task_id=str(task['task_id']),expected_version=1)
-    for i in range(3):
-        repo.append_message('id:1',plan['run_id'],UserMessage((TextBlock(str(i)),)))
-    repo.settle_run('id:1',plan['run_id'],'completed','completed',{},())
+    run=repo.create_run('id:1',plan['session_id'],'native-history','digest',{'message':'first'})
+    repo.update_run_status('id:1',run.id,'running')
+    task=SqlitePlanStore(str(repo.path),session=json.dumps(['id:1',plan['session_id'],run.id], ensure_ascii=False, separators=(',', ':')),table='agent_native_plan_items')
+    asyncio.run(task.set_items([PlanItem(id='one',content='first',status=TaskStatus.completed)]))
+    repo.settle_native_run('id:1',run.id,'completed','completed',{},tuple(ModelRequest(parts=[UserPromptPart(content=str(i))],run_id=run.id) for i in range(3)))
     app=create_app(config(tmp_path),resource_factory=lambda settings,stack: Resources(repo,store))
     app.dependency_overrides[get_mes_client]=lambda:mes.client
     with TestClient(app) as c:
@@ -144,7 +145,20 @@ def test_messages_and_latest_task(tmp_path: Path) -> None:
         page2=c.get(root+'/messages?cursor='+str(page['next_cursor'])).json()
         assert len(page2['items'])==1
         assert page['items'][-1]['message_id']!=page2['items'][0]['message_id']
-        detail=c.get(root+'/tasks/'+str(task['task_id'])).json()
-        assert len(detail['versions'])==1 and detail['current_version']==2
+        detail=c.get(root+'/tasks/'+run.id).json()
+        assert len(detail['versions'])==1 and detail['current_version']==1
         assert detail['versions'][0]['steps'][0]['status']=='completed'
+
+
+def test_native_history_public_projection_filters_private_parts() -> None:
+    from pydantic_ai.messages import ModelResponse, ModelRequest, ThinkingPart, TextPart, ToolReturnPart
+    from ktg_agent.sessions.repository import MessageRecord
+    from ktg_agent.sessions.service import project_message
+    response = ModelResponse(parts=[ThinkingPart(content='private reasoning'), TextPart(content='visible')])
+    tool = ModelRequest(parts=[ToolReturnPart(tool_name='read', tool_call_id='c',
+        content='{"password":"hidden","data":"ok"}', metadata={'details': {'kind': 'result', 'refresh_token': 'hidden'}})])
+    rows = [*project_message(MessageRecord(1, 's', 'r', response, 'now')),
+            *project_message(MessageRecord(2, 's', 'r', tool, 'now'))]
+    assert 'visible' in str(rows) and 'ok' in str(rows)
+    assert 'private reasoning' not in str(rows) and 'hidden' not in str(rows)
 

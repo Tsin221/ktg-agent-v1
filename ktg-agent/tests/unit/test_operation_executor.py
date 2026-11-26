@@ -112,14 +112,16 @@ def plan_requests() -> list[Step]:
     ]
 
 
-async def create_plan(tmp_path: Path, mes: FakeMES, requests: list[Step]) -> tuple[OperationPlanStore, Step]:
+async def create_plan(tmp_path: Path, mes: FakeMES, requests: list[Step], *,
+                      settle: bool = True) -> tuple[OperationPlanStore, Step]:
     repo = SessionRepository(tmp_path / 'sessions.sqlite3')
     session = repo.create_session('id:1')
     run = repo.create_run('id:1', session.id, 'req', 'hash', {})
     repo.update_run_status('id:1', run.id, 'running')
     store = OperationPlanStore(repo)
     plan = store.create('id:1', run.id, await prepare_steps(mes.client, {'userId': 1}, requests))
-    repo.settle_run('id:1', run.id, 'completed', 'completed', {}, ())
+    if settle:
+        await asyncio.to_thread(repo.settle_native_run, 'id:1', run.id, 'completed', 'completed', {}, ())
     return store, plan
 
 

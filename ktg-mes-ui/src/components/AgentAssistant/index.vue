@@ -933,6 +933,9 @@ export default {
               if (event.payload.tool_name === 'create_task' && taskId) this.selectTask(taskId)
               this.refreshTasks(epoch)
             }
+            if (event.type === 'plan_changed') {
+              this.refreshTasks(epoch)
+            }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
             if (event.type === 'run_settled' && !isTerminalRun(this.activeRun.status)) this.settlingRunId = event.run_id
             if (['model_request_started', 'model_usage_reported', 'model_request_settled'].includes(event.type)) {

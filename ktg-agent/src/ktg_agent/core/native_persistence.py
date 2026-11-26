@@ -1,23 +1,20 @@
-"""Thin process-history adapter for the official Harness StepPersistence.
-
-The application owns authorization and terminal settlement. This adapter only
-stores process evidence and the original messages before any history rewrite.
-Use an explicit isolated SQLite file until the app table namespace is migrated.
-"""
+"""Thin process-history adapter for the official Harness StepPersistence."""
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
 import sqlite3
+from collections.abc import Sequence
+from contextlib import closing
+from dataclasses import replace
+from itertools import groupby
 from pathlib import Path
 
-from pydantic_ai import RunContext
-from pydantic_ai.messages import ModelMessage, ToolReturnPart
+from pydantic_ai.messages import (
+    CompactionPart, ModelMessage, ModelRequest, ModelResponse, RetryPromptPart, ToolCallPart,
+    ToolReturnPart, UserPromptPart,
+)
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistence
 from pydantic_ai_harness.step_persistence.recovery import inspect_recovery
 
-from ktg_agent.context.native_context import deserialize_messages, serialize_messages
 from ktg_agent.sessions.native_planning import planning_task_id
 from ktg_agent.tools.native import MesToolDeps
 
@@ -26,20 +23,134 @@ class RecoveryRequired(RuntimeError):
     """A prior run has incomplete evidence; do not silently replay it."""
 
 
-class NativeStepHistory:
-    """Official process store + append-only, deduplicated raw-history journal.
+def _original(message: ModelMessage) -> ModelMessage | None:
+    if message.run_id is None:
+        return None
+    if isinstance(message, ModelRequest) and any(isinstance(part, CompactionPart) for part in message.parts):
+        # Native compaction can put its derived marker and an original prompt in
+        # the same request. Retain only the native non-compaction parts here.
+        parts = [part for part in message.parts if not isinstance(part, CompactionPart)]
+        return replace(message, parts=parts) if parts else None
+    return message
 
-    The SQLite path must be the application's single isolated database, not a
-    separate fallback database. Reject its legacy incompatible schema rather
-    than letting upstream CREATE IF NOT EXISTS interact with it.
+
+def _same_boundary(before: ModelMessage, after: ModelMessage) -> bool:
+    if before == after:
+        return True
+    if (before.kind != after.kind or before.run_id != after.run_id or before.timestamp is None
+            or before.timestamp != after.timestamp):
+        return False
+    if isinstance(before, ModelRequest) and isinstance(after, ModelRequest):
+        remaining = list(after.parts)
+        for part in before.parts:
+            if part not in remaining:
+                return False
+            remaining.remove(part)
+        return True
+    return before.parts == after.parts
+
+
+def recovery_delta(snapshot: Sequence[ModelMessage], archived: Sequence[ModelMessage],
+                   run_id: str) -> tuple[ModelMessage, ...]:
+    """Select only original prior-run tail after the canonical archive boundary.
+
+    A compacted snapshot can omit an archived prefix. Never concatenate its
+    entire history or promote its synthesized compaction messages to raw history.
     """
+    candidates = [original for message in snapshot if message.run_id == run_id
+                  and (original := _original(message)) is not None]
+    if not candidates:
+        return ()
+    if not archived:
+        if any(isinstance(p, CompactionPart) for m in snapshot for p in m.parts):
+            raise RecoveryRequired('compacted snapshot has no corresponding original archive')
+        return tuple(candidates)
+    anchor = archived[-1]
+    for index in range(len(candidates) - 1, -1, -1):
+        match = candidates[index]
+        if not _same_boundary(anchor, match):
+            continue
+        extras: tuple[ModelMessage, ...] = ()
+        if isinstance(anchor, ModelRequest) and isinstance(match, ModelRequest):
+            # An ASAP input may have been spliced into the request after the
+            # first archive. Several canonical entries can share its boundary.
+            remaining = list(match.parts)
+            for recorded in archived:
+                if (isinstance(recorded, ModelRequest) and recorded.run_id == match.run_id
+                        and recorded.timestamp == match.timestamp):
+                    for part in recorded.parts:
+                        if part not in remaining:
+                            raise RecoveryRequired('snapshot no longer contains archived request evidence')
+                        remaining.remove(part)
+            if remaining:
+                if not all(isinstance(part, UserPromptPart) for part in remaining):
+                    raise RecoveryRequired('snapshot changed non-prompt request evidence')
+                extras = (replace(match, parts=remaining),)
+        return (*extras, *candidates[index + 1:])
+    # The last committed original may be a newer pending model request than
+    # the last settled process checkpoint. Do not append stale messages.
+    latest = candidates[-1]
+    if (anchor.timestamp is not None and latest.timestamp is not None
+            and anchor.timestamp > latest.timestamp):
+        return ()
+    raise RecoveryRequired('cannot align recovered native messages with the formal conversation')
+
+
+def working_history(canonical: Sequence[ModelMessage], *contexts: Sequence[ModelMessage] | None) -> tuple[ModelMessage, ...]:
+    """Reuse the newest aligned derived context while keeping canonical history authoritative."""
+    best: Sequence[ModelMessage] = canonical
+    best_index = -1
+    for context in contexts:
+        if not context:
+            continue
+        anchor = next((original for message in reversed(context) if (original := _original(message)) is not None), None)
+        if anchor is None:
+            continue
+        for index in range(len(canonical) - 1, -1, -1):
+            if index > best_index and _same_boundary(canonical[index], anchor):
+                best = (*context, *canonical[index + 1:])
+                best_index = index
+                break
+    # Provider histories containing a dangling tool invocation could implicitly
+    # repeat it. Keep only a complete prefix for a fresh, unrelated Run. Explicit
+    # continuation already rejects unresolved or interrupted native frontiers.
+    safe: list[ModelMessage] = []
+    for _, grouped in groupby(best, key=lambda message: message.run_id):
+        group = tuple(grouped)
+        open_calls: set[str] = set()
+        settled_through = 0
+        for index, message in enumerate(group):
+            if isinstance(message, ModelResponse):
+                open_calls.update(part.tool_call_id for part in message.parts if isinstance(part, ToolCallPart))
+            elif isinstance(message, ModelRequest):
+                if message.state != 'complete':
+                    break
+                valid = True
+                for part in message.parts:
+                    if isinstance(part, (ToolReturnPart, RetryPromptPart)) and part.tool_call_id:
+                        if part.tool_call_id not in open_calls:
+                            valid = False
+                            break
+                        open_calls.remove(part.tool_call_id)
+                if not valid:
+                    break
+            if not open_calls:
+                settled_through = index + 1
+        # Discard only this interrupted Run's unsettled tail; later Runs have
+        # their own independently valid message and tool pairing boundaries.
+        safe.extend(group[:settled_through])
+    return tuple(safe)
+
+
+class NativeStepHistory:
+    """Official process store; only the ConversationStore owns raw history."""
 
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database)
         if not self.database.is_absolute():
             raise ValueError('an explicit absolute SQLite path is required')
         if self.database.exists():
-            with sqlite3.connect(self.database) as db:
+            with closing(sqlite3.connect(self.database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
                 for name, required in (('runs', {'run_id', 'metadata'}),
                                        ('events', {'run_id', 'kind'})):
                     columns = {row[1] for row in db.execute(f'PRAGMA table_info({name})')}
@@ -67,7 +178,7 @@ class NativeStepHistory:
         record = await self.store.get_run(run_id=prior_run_id)
         if (record is None or record.metadata.get('owner') != deps.owner
                 or record.metadata.get('session') != deps.session_id
-                or (deps.task_id is not None and record.metadata.get('task') != deps.task_id)):
+                or record.metadata.get('task') != planning_task_id(deps)):
             raise KeyError('prior authorized run not found')
         facts = await inspect_recovery(store=self.store, run_id=prior_run_id)
         if facts.unresolved or (facts.latest is not None and facts.latest.state != 'complete'):
@@ -79,57 +190,3 @@ class NativeStepHistory:
                for message in facts.settled.messages for part in message.parts):
             raise RecoveryRequired('unknown business tool receipt requires reconciliation')
         return list(facts.settled.messages)
-
-    async def archive(self, ctx: RunContext[MesToolDeps], raw_json: bytes) -> None:
-        await self.archive_messages(ctx.deps, raw_json)
-
-    async def archive_messages(self, deps: MesToolDeps, raw_json: bytes) -> None:
-        await asyncio.to_thread(self._archive, deps, raw_json)
-
-    def _schema(self, db: sqlite3.Connection) -> None:
-        db.execute('''CREATE TABLE IF NOT EXISTS native_raw_messages (
-            owner TEXT NOT NULL, session_id TEXT NOT NULL,
-            digest TEXT NOT NULL, data BLOB NOT NULL,
-            PRIMARY KEY(owner, session_id, digest))''')
-        db.execute('''CREATE TABLE IF NOT EXISTS native_raw_snapshots (
-            seq INTEGER PRIMARY KEY, owner TEXT NOT NULL, session_id TEXT NOT NULL,
-            run_id TEXT NOT NULL, digest TEXT NOT NULL, refs TEXT NOT NULL,
-            UNIQUE(owner, session_id, run_id, digest))''')
-
-    def _archive(self, deps: MesToolDeps, raw_json: bytes) -> None:
-        messages = deserialize_messages(raw_json)
-        # Hash exact native message representations once per authorized session;
-        # preserve repeated occurrences and order in each snapshot's references.
-        encoded = [serialize_messages([message]) for message in messages]
-        hashes = [hashlib.sha256(item).hexdigest() for item in encoded]
-        refs = json.dumps(hashes, separators=(',', ':'))
-        digest = hashlib.sha256(refs.encode()).hexdigest()
-        self.database.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.database, timeout=30) as db:
-            self._schema(db)
-            db.executemany('INSERT OR IGNORE INTO native_raw_messages VALUES(?,?,?,?)',
-                           ((deps.owner, deps.session_id, key, data) for key, data in zip(hashes, encoded, strict=True)))
-            db.execute('''INSERT OR IGNORE INTO native_raw_snapshots(owner,session_id,run_id,digest,refs)
-                VALUES(?,?,?,?,?)''', (deps.owner, deps.session_id, deps.run_id, digest, refs))
-
-    async def raw_snapshots(self, deps: MesToolDeps) -> tuple[bytes, ...]:
-        return await asyncio.to_thread(self._raw_snapshots, deps)
-
-    def _raw_snapshots(self, deps: MesToolDeps) -> tuple[bytes, ...]:
-        if not self.database.exists():
-            return ()
-        with sqlite3.connect(self.database, timeout=30) as db:
-            self._schema(db)
-            snapshots = db.execute('SELECT refs FROM native_raw_snapshots WHERE owner=? AND session_id=? AND run_id=? ORDER BY seq',
-                                   (deps.owner, deps.session_id, deps.run_id)).fetchall()
-            result: list[bytes] = []
-            for (refs,) in snapshots:
-                messages: list[ModelMessage] = []
-                for digest in json.loads(refs):
-                    row = db.execute('SELECT data FROM native_raw_messages WHERE owner=? AND session_id=? AND digest=?',
-                                     (deps.owner, deps.session_id, digest)).fetchone()
-                    if row is None:
-                        raise ValueError('missing original native message')
-                    messages.extend(deserialize_messages(row[0]))
-                result.append(serialize_messages(messages))
-            return tuple(result)

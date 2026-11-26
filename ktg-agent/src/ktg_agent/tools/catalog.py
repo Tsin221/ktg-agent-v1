@@ -1,13 +1,11 @@
-"""Lightweight tool catalog with explicit factory allow-list and lazy resolution."""
+"""Static metadata and access rules for the reviewed MES tools."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TypeAlias
 
 from ktg_agent.tools.permissions import (
     PermissionAll,
@@ -21,13 +19,9 @@ from ktg_agent.tools.registry import (
     DuplicateToolError,
     ExecutionMode,
     RetryPolicy,
-    ToolDefinition,
     ToolDefinitionError,
     ToolEffect,
 )
-
-
-ToolFactory: TypeAlias = Callable[[], ToolDefinition]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,23 +76,6 @@ class ToolManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class CatalogIdentity:
-    """Permissions returned by a trusted identity service; None means unavailable."""
-
-    permissions: frozenset[str] | None
-    run_id: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.run_id, str) or not self.run_id.strip():
-            raise ToolDefinitionError("catalog identity requires a run id")
-        if self.permissions is not None and (
-            not isinstance(self.permissions, frozenset)
-            or any(not isinstance(item, str) for item in self.permissions)
-        ):
-            raise ToolDefinitionError("catalog permissions must be a frozenset or unavailable")
-
-
-@dataclass(frozen=True, slots=True)
 class CatalogSwitches:
     modules: Mapping[str, bool]
     tools: Mapping[str, bool]
@@ -112,53 +89,18 @@ class CatalogSwitches:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class CandidateSnapshot:
-    run_id: str
-    catalog_version: str
-    candidates: Mapping[str, str]
-    permission_status: PermissionDecision
-
-
 class ToolCatalog:
-    """Factories are supplied by trusted code and selected by static reference keys."""
+    """Static metadata for the native toolset and authorized HTTP directory."""
 
-    def __init__(self, factory_allowlist: Mapping[str, ToolFactory]) -> None:
-        if any(
-            not isinstance(key, str) or not key.strip() or not callable(factory)
-            for key, factory in factory_allowlist.items()
-        ):
-            raise ToolDefinitionError("factory allow-list requires named callable factories")
-        self._allowed = dict(factory_allowlist)
+    def __init__(self, manifests: Iterable[ToolManifest]) -> None:
         self._manifests: dict[str, ToolManifest] = {}
+        for manifest in manifests:
+            if manifest.name in self._manifests:
+                raise DuplicateToolError(f"tool is already registered: {manifest.name}")
+            self._manifests[manifest.name] = manifest
 
-    def register_factory(self, manifest: ToolManifest, factory: ToolFactory) -> None:
-        if manifest.name in self._manifests:
-            raise DuplicateToolError(f"tool is already registered: {manifest.name}")
-        if self._allowed.get(manifest.handler_ref) is not factory:
-            raise ToolDefinitionError("handler_ref is not bound to this allow-listed factory")
-        self._manifests[manifest.name] = manifest
-
-    def resolve_definition(self, name: str, version: str) -> ToolDefinition:
-        manifest = self._manifests[name]
-        if manifest.version != version:
-            raise ToolDefinitionError("tool version does not match catalog")
-        definition = self._allowed[manifest.handler_ref]()
-        for field in (
-            "name", "version", "label", "description", "effect", "execution_mode",
-            "retry_policy", "timeout_seconds", "expose_to_model",
-        ):
-            if getattr(definition, field) != getattr(manifest, field):
-                raise ToolDefinitionError(f"manifest/definition mismatch: {field}")
-        return definition
-
-    def candidate_snapshot(self, identity: object, switches: object) -> CandidateSnapshot:
-        """Return only currently discoverable, enabled, authorized definitions."""
-        permissions = identity.permissions if isinstance(identity, CatalogIdentity) else None
-        if not isinstance(switches, CatalogSwitches):
-            switches = CatalogSwitches({}, {})
-        status = PermissionDecision.UNAVAILABLE if permissions is None else PermissionDecision.ALLOWED
-        candidates = {
+    def available(self, permissions: frozenset[str] | None, switches: CatalogSwitches) -> dict[str, str]:
+        return {
             name: manifest.version
             for name, manifest in sorted(self._manifests.items())
             if manifest.expose_to_model
@@ -166,12 +108,6 @@ class ToolCatalog:
             and evaluate_permission_policy(manifest.permission_policy, permissions)
             is PermissionDecision.ALLOWED
         }
-        return CandidateSnapshot(
-            run_id=identity.run_id if isinstance(identity, CatalogIdentity) else "",
-            catalog_version=self.catalog_version,
-            candidates=MappingProxyType(candidates),
-            permission_status=status,
-        )
 
     @property
     def catalog_version(self) -> str:

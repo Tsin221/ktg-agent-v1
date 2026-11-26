@@ -1,6 +1,7 @@
 """Candidate FastAPI foundation. Importing or constructing an app acquires no resources."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -10,16 +11,20 @@ from typing import Literal, cast
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
+from pydantic_ai import Agent
+from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send, Message
 
 from ktg_agent.http_runs import Core, Events, RunRuntime
 from ktg_agent.ktg.client import KTGError
-from ktg_agent.providers.base import ProviderError
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 from ktg_agent.server import Settings, create_session_repository
 from ktg_agent.sessions.repository import SessionRepository
 from ktg_agent.operations.store import OperationPlanStore
+from ktg_agent.tools.native import MesToolDeps
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -109,6 +114,53 @@ def open_resources(settings: Settings, stack: AsyncExitStack) -> Resources:
     return Resources(repository, operations)
 
 
+def usage_limits(settings: Settings) -> UsageLimits:
+    return UsageLimits(request_limit=settings.max_model_turns, tool_calls_limit=settings.max_tool_calls,
+                       total_tokens_limit=settings.max_total_tokens)
+
+
+def native_agent(settings: Settings, resources: Resources, *, read_only: bool = False,
+                 model: Model | None = None) -> Agent[MesToolDeps, str]:
+    from ktg_agent.core.native_core import build_deepseek_agent
+    from ktg_agent.sessions.task_tools import TASK_EVIDENCE_PROMPT
+    from ktg_agent.tools.mes_catalog import build_system_prompt, default_switches
+    from ktg_agent.tools.native import build_mes_toolset
+    selected = default_switches(operation_enabled=not read_only)
+    prompt = build_system_prompt(operation_enabled=not read_only) + '\n' + TASK_EVIDENCE_PROMPT
+    switches = lambda: selected
+
+    if model is not None:
+        return Agent(model, deps_type=MesToolDeps, instructions=prompt,
+                     toolsets=[build_mes_toolset(resources.operations, switches_provider=switches)])
+    return build_deepseek_agent(settings, resources.operations, instructions=prompt, switches_provider=switches)
+
+
+def build_core(settings: Settings, resources: Resources, events: Events, model: Model | None) -> Core:
+    from ktg_agent.core.native_core import NativeCore
+    from ktg_agent.core.native_persistence import NativeStepHistory
+    from ktg_agent.http_rest import Authentication
+    from ktg_agent.sessions.repository import RunRecord
+
+    repo = resources.repository
+
+    def deps(run: RunRecord, credential: object) -> MesToolDeps:
+        if not isinstance(credential, Authentication) or credential.owner != run.owner_user_id:
+            raise ValueError('authenticated Run owner mismatch')
+        task = run.request_summary.get('task_id')
+        return MesToolDeps(run.id, run.session_id, credential.owner, credential.identity, credential.client,
+                           task if isinstance(task, str) else None)
+
+    async def consumed(owner: str, run_id: str, request_id: str) -> None:
+        await asyncio.to_thread(repo.mark_input_consumed, owner, run_id, request_id)
+
+    return NativeCore(native_agent(settings, resources, model=model), NativeStepHistory(repo.path),
+                      repository=repo, deps_factory=deps, mark_consumed=consumed,
+                      publish=events.publish, usage_limits=usage_limits(settings), operations=resources.operations,
+                      context_window=settings.context_window, max_fraction=settings.context_threshold_ratio,
+                      keep_tokens=max(1, int(settings.context_window * settings.context_retain_ratio))
+                      if settings.context_window is not None else 20_000)
+
+
 def get_resources(request: Request) -> object:
     if not request.app.state.ready:
         raise PublicError(503, "NOT_READY", "Service is not ready.")
@@ -121,7 +173,8 @@ class Health(BaseModel):
 
 def create_app(settings: Settings | None = None, *,
                resource_factory: ResourceFactory = open_resources,
-               run_core: Core | None = None, run_events: Events | None = None) -> FastAPI:
+               run_core: Core | None = None, run_events: Events | None = None,
+               enable_native: bool = True, native_model: Model | None = None) -> FastAPI:
     from ktg_agent.http_sse import RunEvents
     event_sink = run_events if run_events is not None else RunEvents()
 
@@ -137,8 +190,16 @@ def create_app(settings: Settings | None = None, *,
                 app.state.resources = resource_factory(configuration, stack)
                 if isinstance(event_sink, RunEvents):
                     stack.callback(event_sink.close)
-                if run_core is not None:
-                    app.state.runs = RunRuntime(app.state.resources.repository, run_core, event_sink)
+                resources = app.state.resources
+                core = run_core
+                if isinstance(resources, Resources):
+                    await resources.repository.initialize_framework_stores()
+                    if core is None and enable_native:
+                        core = build_core(configuration, resources, event_sink, native_model)
+                    if enable_native:
+                        app.state.query_agent = native_agent(configuration, resources, read_only=True, model=native_model)
+                if core is not None:
+                    app.state.runs = RunRuntime(app.state.resources.repository, core, event_sink)
                     stack.push_async_callback(app.state.runs.close)
                 app.state.ready = True
                 try:
@@ -173,8 +234,9 @@ def create_app(settings: Settings | None = None, *,
         code = exc.code if exc.code in known else "MES_ERROR"
         return error_response(status, code, message)
 
-    @app.exception_handler(ProviderError)
-    async def provider_error(request: Request, exc: ProviderError) -> JSONResponse:
+    @app.exception_handler(ModelAPIError)
+    @app.exception_handler(UnexpectedModelBehavior)
+    async def provider_error(request: Request, exc: Exception) -> JSONResponse:
         return error_response(502, "PROVIDER_ERROR", "Model service failed.")
 
     @app.exception_handler(RequestValidationError)

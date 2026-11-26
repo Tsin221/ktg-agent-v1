@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ktg_agent.http_app import MAX_BODY_BYTES, PublicError, create_app, get_resources
 from ktg_agent.http_candidate import run
-from ktg_agent.server import Settings
+from ktg_agent.server import Settings, main
 
 
 def config(tmp_path: Path) -> Settings:
@@ -132,6 +132,12 @@ def test_uvicorn_parameters(tmp_path: Path) -> None:
     assert not Path(settings.session_db_path).exists()
 
 
+def test_canonical_server_delegates_to_single_uvicorn_entry() -> None:
+    with patch("ktg_agent.http_candidate.run") as start:
+        main()
+    start.assert_called_once_with()
+
+
 def test_invalid_config_and_not_ready(tmp_path: Path) -> None:
     app = create_app(replace(config(tmp_path), session_db_path=""))
     with pytest.raises(RuntimeError, match="absolute isolated"), TestClient(app):
@@ -143,7 +149,7 @@ def test_invalid_config_and_not_ready(tmp_path: Path) -> None:
 
 def test_safe_upstream_errors_and_chunked_limit(tmp_path: Path) -> None:
     from ktg_agent.ktg.client import KTGError
-    from ktg_agent.providers.base import ProviderError
+    from pydantic_ai.exceptions import ModelAPIError
     app = create_app(config(tmp_path))
 
     @app.get("/mes")
@@ -152,7 +158,7 @@ def test_safe_upstream_errors_and_chunked_limit(tmp_path: Path) -> None:
 
     @app.get("/model")
     def model() -> None:
-        raise ProviderError("FAILED", "SECRET")
+        raise ModelAPIError("fake", "SECRET")
 
     @app.post("/body")
     def body(value: Input) -> Input:

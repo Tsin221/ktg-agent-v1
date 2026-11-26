@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field, field_validator
 from ktg_agent.http_app import PublicError, Resources, get_resources
 from ktg_agent.http_rest import Body, Authentication, authenticate, pagination
-from ktg_agent.http_runs import RunRuntime
+from ktg_agent.http_runs import RunRuntime, public_run_summary
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.sessions.service import SessionService
 from ktg_agent.sessions.repository import (RunConflictError, RunBusyError,
@@ -67,8 +67,9 @@ async def create(sid: str, body: CreateRun, request: Request, auth: Auth, resour
         context = SessionService._page_context(body.page_context)
     except ValueError:
         raise PublicError(400,'VALIDATION_ERROR','Invalid page context.') from None
-    if body.task_id is not None:
-        # The existing store remains authoritative; no new resume planner.
+    existing = await asyncio.to_thread(repo.find_run_by_request, auth.owner, sid, body.request_id)
+    if body.task_id is not None and existing is None:
+        # Validate against the current native plan only for a new admission.
         task = await invoke(asyncio.to_thread(repo.get_task,auth.owner,sid,body.task_id))
         versions = task.get('versions', [])
         steps = versions[0].get('steps', []) if versions else []
@@ -77,18 +78,19 @@ async def create(sid: str, body: CreateRun, request: Request, auth: Auth, resour
     payload: JsonObject = {'message':body.message,'page_context':context}
     if body.task_id is not None:
         payload['task_id'] = body.task_id
-    run = await invoke(runtime(request).create(auth.owner,sid,body.request_id,payload,auth.client))
+    run = await invoke(runtime(request).create(auth.owner,sid,body.request_id,payload,auth))
     return {'run_id':run.id,'status':run.status}
 
 @router.get('/runs/{rid}')
 async def get(rid: str, request: Request, auth: Auth, resources: Res) -> Any:
     pagination(request, allowed=False)
-    run = await asyncio.to_thread(cast(Resources,resources).repository.get_run,auth.owner,rid)
+    repo = cast(Resources, resources).repository
+    run = await asyncio.to_thread(repo.get_run,auth.owner,rid)
     if run is None:
         raise PublicError(404,'RUN_NOT_FOUND','Resource not found.')
     rt = getattr(request.app.state,'runs',None)
     return {'run_id':rid,'session_id':run.session_id,'status':run.status,
-        'stop_reason':run.stop_reason,'result_summary':run.result_summary,'usage':run.usage,
+        'stop_reason':run.stop_reason,'result_summary':await public_run_summary(repo, auth.owner, run),'usage':run.usage,
         'last_seq':rt.events.last_seq(rid) if rt and rt.events else 0}
 
 @router.post('/runs/{rid}/cancel',status_code=202)

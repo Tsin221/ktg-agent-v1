@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from ktg_agent.server import Settings, create_service, create_session_repository
+from ktg_agent.server import Settings, create_session_repository
+from ktg_agent.http_app import usage_limits
 
 
 def _set_valid_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,8 +17,8 @@ def _set_valid_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_execution_budget_configuration(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     _set_valid_environment(monkeypatch)
     monkeypatch.setenv(name, "17")
-    limits = create_service(Settings.from_env())._limits
-    assert getattr(limits, "max_tool_calls" if name.endswith("CALLS") else "max_model_turns") == 17
+    limits = usage_limits(Settings.from_env())
+    assert getattr(limits, "tool_calls_limit" if name.endswith("CALLS") else "request_limit") == 17
     for invalid in ("0", "-1", "abc"):
         monkeypatch.setenv(name, invalid)
         with pytest.raises(RuntimeError, match=name):
@@ -47,13 +48,14 @@ def test_settings_rejects_blank_service_addresses(
 
 
 def test_service_does_not_force_optional_temperature(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     _set_valid_environment(monkeypatch)
-
-    service = create_service(Settings.from_env())
-
-    assert service._model_config.temperature is None
+    from ktg_agent.core.native_core import build_deepseek_agent
+    from ktg_agent.operations.store import OperationPlanStore
+    from ktg_agent.sessions.repository import SessionRepository
+    agent = build_deepseek_agent(Settings.from_env(), OperationPlanStore(SessionRepository(tmp_path / "settings.sqlite")), instructions="test")
+    assert isinstance(agent.model_settings, dict) and agent.model_settings.get("temperature") is None
 
 
 def test_token_limit_configuration_reaches_both_service_paths(
@@ -61,10 +63,9 @@ def test_token_limit_configuration_reaches_both_service_paths(
 ) -> None:
     _set_valid_environment(monkeypatch)
     monkeypatch.delenv("AGENT_MAX_TOTAL_TOKENS", raising=False)
-    assert create_service(Settings.from_env())._limits.max_total_tokens is None
+    assert usage_limits(Settings.from_env()).total_tokens_limit is None
     monkeypatch.setenv("AGENT_MAX_TOTAL_TOKENS", "123")
-    service = create_service(Settings.from_env())
-    assert service._limits.max_total_tokens == 123
+    assert usage_limits(Settings.from_env()).total_tokens_limit == 123
 
 
 @pytest.mark.parametrize("raw", ("", "0", "-1", "1.5", "invalid"))
@@ -91,7 +92,6 @@ def test_session_database_uses_absolute_path(
 
 
 def test_retired_configuration_cannot_restore_business_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ktg_agent.tools.catalog import CatalogIdentity
 
     _set_valid_environment(monkeypatch)
     monkeypatch.setenv("AGENT_ENABLE_EXPLORATION", "true")
@@ -100,10 +100,10 @@ def test_retired_configuration_cannot_restore_business_tools(monkeypatch: pytest
     settings = Settings.from_env()
     assert not hasattr(settings, "enable_exploration")
     assert not hasattr(settings, "enable_item_receipt")
-    service = create_service(settings)
-    candidate = service._catalog.candidate_snapshot(
-        CatalogIdentity(frozenset({"*:*:*"}), "run"), service._switches_provider())
-    assert set(candidate.candidates) == {
+    from ktg_agent.tools.mes_catalog import build_mes_catalog, default_switches, mes_definitions
+    available = build_mes_catalog(mes_definitions()).available(
+        frozenset({"*:*:*"}), default_switches(operation_enabled=False))
+    assert set(available) == {
         "ktg_count_products", "ktg_query_stock_summary", "ktg_query_workorder_overview",
         "ktg_query_workorder_materials", "ktg_query_workorder_quality", "ktg_query_production_trace", "ktg_resolve_business_reference",
     }

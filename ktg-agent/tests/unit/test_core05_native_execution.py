@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from pydantic_ai import Agent, ToolReturn
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import CompactionPart, ModelMessage, ModelRequest, ModelResponse, TextPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
-from pydantic_ai.usage import UsageLimits
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage, UsageLimits
 
+from ktg_agent.context.native_context import build_compaction_capability
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.core.native_execution import NativeExecution
 from ktg_agent.ktg.client import KTGClient
@@ -30,6 +32,10 @@ def test_native_execution_delivers_inputs_and_streams_tools() -> None:
         events: list[tuple[str, JsonObject]] = []
         receipts: list[str] = []
         prompts: list[list[str]] = []
+        archived: list[ModelMessage] = []
+
+        async def archive(messages: tuple[ModelMessage, ...]) -> None:
+            archived.extend(messages)
 
         async def model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
             prompts.append([p.content for m in messages if isinstance(m, ModelRequest) for p in m.parts
@@ -53,7 +59,7 @@ def test_native_execution_delivers_inputs_and_streams_tools() -> None:
 
         agent = Agent(FunctionModel(stream_function=model), deps_type=MesToolDeps, tools=[lookup])
         execution = NativeExecution(agent, deps(), 'start', publish=lambda _, kind, payload: events.append((kind, payload)),
-                                    delivered=delivered)
+                                    delivered=delivered, archive_messages=archive)
         assert not execution.input('early', 'steer', 'not ready')
         task = asyncio.create_task(execution.run())
         await started.wait()
@@ -63,6 +69,8 @@ def test_native_execution_delivers_inputs_and_streams_tools() -> None:
         proceed.set()
         outcome = await task
         assert outcome.status == 'completed'
+        assert [p.content for m in (*archived, *outcome.terminal_messages) for p in m.parts
+                if isinstance(p, UserPromptPart)] == ['start', 'steer now', 'then follow']
         assert receipts == ['first', 'second']
         assert prompts == [['start'], ['start', 'steer now'], ['start', 'steer now', 'then follow']]
         assert any(kind == 'message_update' and p['text'] == 'checking ' for kind, p in events)
@@ -70,6 +78,101 @@ def test_native_execution_delivers_inputs_and_streams_tools() -> None:
         assert 'private-offline-token' not in str(events)
         assert not execution.input('late', 'steer', 'too late')
         assert all(kind != 'run_settled' for kind, _ in events)
+
+    asyncio.run(case())
+
+
+def test_agent_start_precedes_history_load_but_does_not_claim_input_admission() -> None:
+    async def case() -> None:
+        loading = asyncio.Event()
+        loaded = asyncio.Event()
+        events: list[tuple[str, JsonObject]] = []
+
+        async def history() -> tuple[ModelMessage, ...]:
+            loading.set()
+            await loaded.wait()
+            return ()
+
+        execution = NativeExecution(Agent(TestModel(custom_output_text='answer'), deps_type=MesToolDeps),
+            deps(), 'prompt', load_history=history,
+            publish=lambda _, kind, payload: events.append((kind, payload)))
+        task = asyncio.create_task(execution.run())
+        await asyncio.wait_for(loading.wait(), timeout=5)
+        assert events == [('agent_start', {})]
+        # A published lifecycle event is not a live native queue handle.
+        assert not execution.input('too-soon', 'steer', 'not yet accepted')
+        loaded.set()
+        outcome = await asyncio.wait_for(task, timeout=5)
+        assert outcome.status == 'completed'
+        assert [kind for kind, _ in events].count('agent_start') == 1
+
+    asyncio.run(case())
+
+
+def test_native_archive_cursor_preserves_original_tool_exchanges_through_compaction() -> None:
+    async def case() -> None:
+        archived: list[ModelMessage] = []
+        usage: list[RunUsage] = []
+        summaries: list[str] = []
+        steps = 0
+
+        async def archive(delta: tuple[ModelMessage, ...]) -> None:
+            archived.extend(delta)
+
+        async def checkpoint(value: RunUsage) -> None:
+            usage.append(value)
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+            nonlocal steps
+            steps += 1
+            if steps <= 3:
+                yield {0: DeltaToolCall(name='lookup', json_args='{}', tool_call_id=f'lookup-{steps}')}
+            else:
+                yield 'final answer'
+
+        def summarize(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            summaries.append(f'## Intent\nCurrent task summary {len(summaries) + 1}')
+            return ModelResponse([TextPart(summaries[-1])])
+
+        async def lookup() -> str:
+            return 'same long original evidence ' * 300
+
+        previous: list[ModelMessage] = [ModelRequest([UserPromptPart('older prompt')], run_id='older'),
+            ModelResponse([TextPart('old evidence ' * 500)], run_id='older')]
+        agent = Agent(FunctionModel(stream_function=model), deps_type=MesToolDeps, tools=[lookup])
+        execution = NativeExecution(agent, deps(), 'next prompt', message_history=previous,
+            archive_messages=archive, checkpoint_usage=checkpoint, capabilities=[build_compaction_capability(
+                context_window=400, keep_tokens=60, summary_model=FunctionModel(summarize))])
+        outcome = await execution.run()
+        assert outcome.status == 'completed', outcome.reason
+        assert len(summaries) >= 2
+        raw = [part for message in (*archived, *outcome.terminal_messages) for part in message.parts]
+        assert [part.content for part in raw if isinstance(part, UserPromptPart)] == ['next prompt']
+        assert [part.tool_call_id for part in raw if isinstance(part, ToolReturnPart)] == ['lookup-1', 'lookup-2', 'lookup-3']
+        assert not any(isinstance(part, CompactionPart) for part in raw)
+        assert any(isinstance(part, CompactionPart) for message in outcome.working_messages for part in message.parts)
+        assert all(message.conversation_id == 's' for message in (*archived, *outcome.terminal_messages))
+        assert usage and usage[-1].requests <= outcome.usage.requests
+        assert outcome.usage.requests >= 4 and outcome.usage.tool_calls == 3
+
+    asyncio.run(case())
+
+
+def test_archive_failure_stops_before_model_and_retains_uncommitted_terminal_delta() -> None:
+    async def case() -> None:
+        async def unavailable(delta: tuple[ModelMessage, ...]) -> None:
+            raise OSError('local archival unavailable')
+
+        def unexpected(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            pytest.fail('the archive must commit before any model request')
+
+        agent = Agent(FunctionModel(unexpected), deps_type=MesToolDeps)
+        outcome = await NativeExecution(agent, deps(), 'no model', archive_messages=unavailable,
+            capabilities=[build_compaction_capability()]).run()
+        assert outcome.status == 'failed'
+        assert [part.content for message in outcome.terminal_messages for part in message.parts
+                if isinstance(part, UserPromptPart)] == ['no model']
+        assert outcome.usage.requests == 0
 
     asyncio.run(case())
 

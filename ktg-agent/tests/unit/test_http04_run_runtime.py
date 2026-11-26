@@ -98,7 +98,7 @@ def test_failure_and_publish_order(tmp_path: Path) -> None:
         # A failed SQLite commit never publishes a terminal success.
         def fail(*args: Any, **kwargs: Any) -> Any:
             raise OSError('commit failed')
-        repo.settle_run = fail  # type: ignore[method-assign]
+        repo.settle_native_run = fail  # type: ignore[method-assign]
         run = await rt.create('u',sid,'b',{'message':'hi'},None)
         task = rt.tasks[run.id]
         core.items[1].finish.set()
@@ -137,8 +137,8 @@ def test_shutdown_bound_and_prestart_cancel(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_default_core_unavailable(tmp_path: Path) -> None:
-    app = create_app(config(tmp_path))
+def test_explicit_disabled_core_unavailable(tmp_path: Path) -> None:
+    app = create_app(config(tmp_path), enable_native=False)
     app.dependency_overrides[authenticate] = lambda: Authentication(KTGClient(base_url='http://mes.invalid',authorization='Bearer test'),{},'u')
     with TestClient(app) as c:
         sid = app.state.resources.repository.create_session('u').id

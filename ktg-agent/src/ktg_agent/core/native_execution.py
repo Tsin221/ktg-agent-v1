@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 
-from pydantic_ai import Agent, CancellationToken, RunContext, capture_run_messages
+from pydantic_ai import Agent, AgentInstructions, CancellationToken, ModelRequestContext, RunContext, capture_run_messages
 from pydantic_ai.capabilities import AgentCapability, Hooks
 from pydantic_ai.exceptions import OutputTokenLimitExceeded, RunCancelled, RunTimedOut, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     AgentStreamEvent, EnqueuedMessagesEvent, FunctionToolCallEvent, FunctionToolResultEvent,
-    ModelMessage, PartDeltaEvent, PartEndEvent, PartStartEvent, TextPart, TextPartDelta, ToolReturnPart,
+    ModelMessage, ModelRequest, PartDeltaEvent, PartEndEvent, PartStartEvent, TextPart, TextPartDelta, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.run import AgentRun
 from pydantic_ai.settings import ModelSettings
@@ -25,12 +26,15 @@ from pydantic_ai_harness.planning import (
 )
 
 from ktg_agent.core.messages import JsonObject
+from ktg_agent.core.native_persistence import RecoveryRequired
 from ktg_agent.sessions.native_planning import planning_task_id
 from ktg_agent.tools.native import MesToolDeps
 
 Publish = Callable[[str, str, JsonObject], None]
 Delivered = Callable[[str, str, str], Awaitable[None]]
 LoadHistory = Callable[[], Awaitable[Sequence[ModelMessage]]]
+ArchiveMessages = Callable[[tuple[ModelMessage, ...]], Awaitable[None]]
+CheckpointUsage = Callable[[RunUsage], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +44,77 @@ class NativeOutcome:
     summary: JsonObject
     messages: tuple[ModelMessage, ...]
     new_messages: tuple[ModelMessage, ...]
+    usage: RunUsage
+    terminal_messages: tuple[ModelMessage, ...]
+    working_messages: tuple[ModelMessage, ...]
+
+
+class HistoryAlignmentError(RuntimeError):
+    """The working history no longer follows an observed archive boundary."""
+
+
+class _ArchiveCursor:
+    """Per-run ordered boundary; identical messages at different positions survive.
+
+    The first hook commits new original messages. A second hook after native
+    compaction captures its rewritten working view, which is not archived.
+    Between those hooks and the next model request, the graph appends new work.
+    """
+
+    def __init__(self, run_id: str, archive: ArchiveMessages) -> None:
+        self.run_id, self.archive = run_id, archive
+        self._prefix: tuple[ModelMessage, ...] | None = None
+
+    def delta(self, current: Sequence[ModelMessage]) -> tuple[ModelMessage, ...]:
+        if self._prefix is None:
+            index = next((i for i, msg in enumerate(current) if msg.run_id == self.run_id), len(current))
+            return tuple(current[index:])
+        prefix = self._prefix
+        if len(current) < len(prefix):
+            raise HistoryAlignmentError('working history became shorter outside the compaction boundary')
+
+        additions: list[ModelMessage] = []
+        for index, before in enumerate(prefix):
+            after = current[index]
+            if before == after:
+                continue
+            # Native dispatch may stamp additional request metadata or splice
+            # an ASAP input after the before_model_request chain has finished.
+            # The already-archived request remains authoritative; if a user
+            # prompt was spliced into it, preserve that newly delivered part
+            # once, without storing the earlier request twice.
+            if (index != len(prefix) - 1 or not isinstance(before, ModelRequest)
+                    or not isinstance(after, ModelRequest) or before.timestamp != after.timestamp):
+                raise HistoryAlignmentError('unexpected rewrite outside the compaction boundary')
+            remaining = list(after.parts)
+            for existing in before.parts:
+                if existing not in remaining:
+                    raise HistoryAlignmentError('an archived request part was removed')
+                remaining.remove(existing)
+            extra_prompts = [part for part in remaining if isinstance(part, UserPromptPart)]
+            if extra_prompts:
+                additions.append(replace(after, parts=extra_prompts))
+        additions.extend(current[len(prefix):])
+        return tuple(additions)
+
+    async def before(self, ctx: RunContext[MesToolDeps], request: ModelRequestContext) -> ModelRequestContext:
+        delta = self.delta(ctx.messages)
+        if delta:
+            # A worker's SQLite write must finish before cancellation decides
+            # whether these messages belong in the terminal batch.
+            task = asyncio.ensure_future(self.archive(deepcopy(delta)))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                self._prefix = deepcopy(tuple(ctx.messages))
+                raise
+        self._prefix = deepcopy(tuple(ctx.messages))
+        return request
+
+    async def after(self, ctx: RunContext[MesToolDeps], request: ModelRequestContext) -> ModelRequestContext:
+        self._prefix = deepcopy(tuple(ctx.messages))
+        return request
 
 
 class NativeExecution:
@@ -49,7 +124,10 @@ class NativeExecution:
                  message_history: Sequence[ModelMessage] = (), load_history: LoadHistory | None = None,
                  model_settings: ModelSettings | None = None, usage_limits: UsageLimits | None = None,
                  timeout: float | None = 90, publish: Publish | None = None, delivered: Delivered | None = None,
-                 capabilities: Sequence[AgentCapability[MesToolDeps]] = ()) -> None:
+                 capabilities: Sequence[AgentCapability[MesToolDeps]] = (),
+                 archive_messages: ArchiveMessages | None = None,
+                 checkpoint_usage: CheckpointUsage | None = None,
+                 instructions: AgentInstructions[MesToolDeps] = None) -> None:
         self._agent = agent
         self._deps = deps
         self._prompt = user_prompt
@@ -61,6 +139,10 @@ class NativeExecution:
         self._publish = publish
         self._delivered = delivered
         self._capabilities = tuple(capabilities)
+        self._archive_cursor = None if archive_messages is None else _ArchiveCursor(deps.run_id, archive_messages)
+        self._checkpoint_usage = checkpoint_usage
+        self._instructions = instructions
+        self._last_usage = RunUsage()
         self._token = CancellationToken()
         self._run: AgentRun[MesToolDeps, str] | None = None
         self._started = False
@@ -100,6 +182,15 @@ class NativeExecution:
         if self._publish is not None:
             self._publish(self._deps.run_id, kind, payload)
 
+    async def _checkpoint(self, usage: RunUsage) -> None:
+        if self._checkpoint_usage is not None and usage != self._last_usage:
+            snapshot = deepcopy(usage)
+            await self._checkpoint_usage(snapshot)
+            self._last_usage = snapshot
+            self._emit('model_usage_reported', {'requests': snapshot.requests, 'tool_calls': snapshot.tool_calls,
+                                               'input_tokens': snapshot.input_tokens, 'output_tokens': snapshot.output_tokens,
+                                               'complete': snapshot.unmeasured_requests == 0})
+
     async def _event(self, ctx: RunContext[MesToolDeps], event: AgentStreamEvent) -> None:
         # Never forward whole raw native events, reasoning, raw tool args, metadata,
         # or exception messages: these are not display DTOs.
@@ -138,6 +229,7 @@ class NativeExecution:
             if isinstance(metadata.get('error_code'), str):
                 payload['error_code'] = metadata['error_code']
             self._emit('tool_execution_end', payload)
+            await self._checkpoint(ctx.usage)
         elif isinstance(event, (PlanCreatedEvent, PlanUpdatedEvent, PlanStatusChangedEvent, PlanCompletedEvent, PlanDeletedEvent)):
             self._emit('plan_changed', {'task_id': planning_task_id(ctx.deps), 'step_id': event.item.id,
                                         'status': event.item.status.value, 'deleted': isinstance(event, PlanDeletedEvent)})
@@ -150,9 +242,16 @@ class NativeExecution:
             for message in new for part in message.parts
         ):
             status, reason = 'needs_reconciliation', 'tool_result_unknown'
+        try:
+            terminal = tuple(new) if self._archive_cursor is None else self._archive_cursor.delta(history)
+        except HistoryAlignmentError:
+            # Do not silently publish success or append a guessed overlap.
+            status, reason = 'needs_reconciliation', 'history_alignment_failed'
+            terminal = ()
         summary: JsonObject = {'usage': {
             'requests': usage.requests, 'tool_calls': usage.tool_calls,
             'input_tokens': usage.input_tokens, 'output_tokens': usage.output_tokens,
+            'cache_read_tokens': usage.cache_read_tokens, 'cache_write_tokens': usage.cache_write_tokens,
             'known_total_tokens': usage.total_tokens if usage.total_tokens or (usage.requests and not usage.unmeasured_requests) else None,
             'unmeasured_requests': usage.unmeasured_requests,
             'complete': usage.unmeasured_requests == 0 and status == 'completed',
@@ -163,7 +262,8 @@ class NativeExecution:
             summary['error_code'] = 'MODEL_OUTPUT_LIMIT'
         if status == 'completed' and answer is not None:
             summary['answer'] = answer
-        return NativeOutcome(status, reason, summary, tuple(history), tuple(new))
+        working = tuple(history)
+        return NativeOutcome(status, reason, summary, working, tuple(new), deepcopy(usage), terminal, working)
 
     async def run(self) -> NativeOutcome:
         if self._started:
@@ -175,12 +275,18 @@ class NativeExecution:
         try:
             if self._token.cancelled:
                 return self._outcome('cancelled', 'cancelled', history, (), usage)
+            # Runtime has already committed the application running state.
+            # Announce execution before potentially slow history recovery;
+            # input() still requires the actual native run handle below.
+            self._emit('agent_start', {})
             if self._load_history is not None:
                 try:
                     history = tuple(await self._load_history())
                 except asyncio.CancelledError:
                     self.interrupted_outcome = self._outcome('cancelled', 'execution_interrupted', history, (), usage)
                     raise
+                except RecoveryRequired:
+                    return self._outcome('needs_reconciliation', 'recovery_required', history, (), usage)
                 except Exception:
                     return self._outcome('failed', 'history_load_failed', history, (), usage)
             if self._token.cancelled:
@@ -191,13 +297,18 @@ class NativeExecution:
             # https://pydantic.dev/docs/ai/core-concepts/message-history/#injecting-messages-mid-run
             with capture_run_messages() as captured:
                 try:
+                    capabilities = [*self._capabilities, Hooks(event=self._event)]
+                    if self._archive_cursor is not None:
+                        capabilities = [Hooks(before_model_request=self._archive_cursor.before), *capabilities,
+                                        Hooks(before_model_request=self._archive_cursor.after)]
                     async with self._agent.iter(self._prompt, deps=self._deps, message_history=history,
-                            run_id=self._deps.run_id, model_settings=self._model_settings, usage_limits=self._limits,
+                            run_id=self._deps.run_id, conversation_id=self._deps.session_id,
+                            model_settings=self._model_settings, usage_limits=self._limits, instructions=self._instructions,
                             usage=usage, cancellation_token=self._token, timeout=self._timeout,
-                            capabilities=[*self._capabilities, Hooks(event=self._event)]) as native:
+                            capabilities=capabilities) as native:
                         self._run = native
                         async for _ in native:
-                            pass
+                            await self._checkpoint(native.usage)
                         self._run = None  # no admission after graph end
                     result = native.result
                     if result is None:

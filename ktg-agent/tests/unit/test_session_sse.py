@@ -29,7 +29,7 @@ from ktg_agent.http_app import create_app
 from ktg_agent.http_rest import get_mes_client
 from ktg_agent.http_sse import RunEvents
 from ktg_agent.http_runs import Outcome
-from ktg_agent.core.messages import AssistantMessage, TextBlock
+from pydantic_ai.messages import ModelResponse, TextPart
 from test_fastapi_foundation import config
 
 
@@ -44,7 +44,7 @@ def test_real_network(tmp_path: Path) -> None:
                 started.set()
                 await finish.wait()
                 return Outcome('completed', 'done', {'answer': '完整答案'},
-                               (AssistantMessage(content=(TextBlock(text='完整答案'),)),))
+                               (ModelResponse(parts=[TextPart(content='完整答案')]),))
             def stop(self) -> None:
                 finish.set()
             async def input(self, request_id: str, mode: str, message: str) -> bool:
@@ -150,9 +150,11 @@ def test_real_network(tmp_path: Path) -> None:
                 import sqlite3
                 with sqlite3.connect(app.state.resources.repository.path) as db:
                     tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                    assert 'app_runs' in tables and 'events' in tables
                     # No display delta was written to any database table.
                     dump = '\n'.join(db.iterdump())
-                    assert '第二行' not in dump and '完整答案' in dump
+                    assert '第二行' not in dump
+                    assert any('完整答案' in str(item.message) for item in app.state.resources.repository.list_messages('id:7', sid).items)
         finally:
             finish.set()
             server.should_exit = True

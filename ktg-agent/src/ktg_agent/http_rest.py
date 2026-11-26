@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Annotated, Any, cast
 from collections.abc import Awaitable
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,9 +13,12 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from ktg_agent.core.messages import JsonObject
 from ktg_agent.http_app import PublicError, Resources, get_resources
 from ktg_agent.ktg.client import KTGClient
-from ktg_agent.server import create_service
+from ktg_agent.tools.mes_catalog import available_tools
 from ktg_agent.sessions.service import SessionService
 from ktg_agent.sessions.task_tools import owner_from_identity
+from ktg_agent.sessions.service import _safe_public
+from ktg_agent.tools.native import MesToolDeps
+from pydantic_ai.messages import ToolReturnPart, ModelRequest
 
 router = APIRouter(prefix="/agent-api/v1")
 bearer = HTTPBearer(auto_error=False)
@@ -111,11 +115,10 @@ class RequestServices:
 
         client = cast(KTGClient, IdentityClient())
         self.authorization = ""  # client already holds the credential privately
-        self.query = create_service(request.app.state.settings)
-        self.query._ktg_client_factory = lambda _: client
-        self.query.enable_operation_plans(resources.operations)
+        self.auth = auth
+        self.operations = resources.operations
         self.sessions = SessionService(resources.repository, lambda _: client,
-            operation_store=resources.operations, operation_enabled=self.query.operation_plans_enabled)
+            operation_store=resources.operations, operation_enabled=lambda: True)
 
 
 def services(request: Request, resources: Annotated[object, Depends(get_resources)],
@@ -151,7 +154,7 @@ async def invoke(call: Awaitable[JsonObject]) -> JsonObject:
 @router.get("/tools", response_model=dict[str, Any])
 async def tools(request: Request, svc: Service) -> JsonObject:
     pagination(request, allowed=False)
-    return await svc.query.available_tools(svc.authorization)
+    return await available_tools(svc.auth.client, svc.auth.identity, svc.operations)
 
 
 @router.post("/sessions", status_code=201, response_model=SessionResponse, response_model_exclude_unset=True)
@@ -209,6 +212,12 @@ async def operations(sid: str, request: Request, svc: Service, plan_id: str | No
     return await invoke(svc.sessions.operation_plans(svc.authorization, sid, plan_id))
 
 
+@router.get("/operations/history", response_model=ItemsResponse)
+async def historical_operations(request: Request, svc: Service) -> JsonObject:
+    pagination(request, allowed=False)
+    return await invoke(svc.sessions.historical_operations(svc.authorization))
+
+
 @router.post("/sessions/{sid}/operations/{plan_id}/confirm", response_model=dict[str, Any])
 async def confirm(sid: str, plan_id: str, body: Digest, request: Request, svc: Service) -> JsonObject:
     pagination(request, allowed=False)
@@ -238,8 +247,24 @@ class Query(Body):
 
 
 @router.post("/query", response_model=dict[str, Any])
-async def query(request: Request, body: Query, svc: Service) -> JsonObject:
+async def query(request: Request, body: Query, auth: Annotated[Authentication, Depends(authenticate)]) -> JsonObject:
     pagination(request, allowed=False)
-    return await svc.query.query(message=body.message, authorization=svc.authorization)
+    from ktg_agent.http_app import usage_limits
+    agent = getattr(request.app.state, 'query_agent', None)
+    if agent is None:
+        raise PublicError(503, 'RUN_UNAVAILABLE', 'Run core is unavailable.')
+    run_id = str(uuid4())
+    result = await agent.run(body.message, deps=MesToolDeps(run_id, run_id, auth.owner, auth.identity, auth.client),
+                             run_id=run_id, usage_limits=usage_limits(request.app.state.settings), timeout=90)
+    results = []
+    for message in result.all_messages():
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, ToolReturnPart) and isinstance(part.metadata, dict):
+                    details = _safe_public(part.metadata.get('details'))
+                    if isinstance(details, dict):
+                        results.append(details)
+    return {'run_id': run_id, 'answer': result.output, 'stop_reason': 'completed',
+            'current_user': str(auth.identity.get('userName', '')), 'results': results}
 
 

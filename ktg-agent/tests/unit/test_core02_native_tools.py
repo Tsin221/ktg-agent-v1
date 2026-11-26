@@ -16,6 +16,7 @@ from ktg_agent.ktg.queries import build_query_tools
 from ktg_agent.operations.store import OperationPlanStore
 from ktg_agent.operations.tool import build_workorder_operation_tool
 from ktg_agent.sessions.repository import SessionRepository
+from ktg_agent.sessions.native_planning import build_planning_capability, stock_step_evidence
 from ktg_agent.sessions.task_tools import owner_from_identity
 from ktg_agent.tools.catalog import CatalogSwitches
 from ktg_agent.tools import native
@@ -100,6 +101,37 @@ def test_registration_schemas_and_native_multiple_model_turns(tmp_path: Path) ->
     assert parts[-1].metadata['details']['no_records'] is True
     assert parts[0].metadata['status'] == 'succeeded'
     assert len(mes.business_reads) == 2
+
+
+def test_verified_stock_result_links_only_a_stable_active_plan_step(tmp_path: Path) -> None:
+    store, deps = setup(tmp_path, FakeMES())
+    actions = iter([
+        ToolCallPart('write_plan', {'items': [{'id': 'a', 'content': '核实台灯库存', 'status': 'in_progress'}]}, 'p1'),
+        ToolCallPart('ktg_query_stock_summary', {'item_code': 'LAMP'}, 'stock1'),
+        ToolCallPart('write_plan', {'items': [
+            {'id': 'a', 'content': '核实台灯库存', 'status': 'completed'},
+            {'id': 'b', 'content': '检查库存步骤二', 'status': 'in_progress'},
+            {'id': 'c', 'content': '检查库存步骤三', 'status': 'in_progress'}]}, 'p2'),
+        ToolCallPart('ktg_query_stock_summary', {'item_code': 'LAMP'}, 'stock2'),
+    ])
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        action = next(actions, None)
+        return ModelResponse(parts=[action if action is not None else TextPart('done')])
+
+    agent = Agent(FunctionModel(model), deps_type=MesToolDeps, toolsets=[build_mes_toolset(store)],
+                  capabilities=[build_planning_capability(str(store.path))])
+    result = asyncio.run(agent.run('query stock', deps=deps, run_id=deps.run_id, conversation_id=deps.session_id))
+    parts = [part for part in returns(result.all_messages()) if part.tool_name == 'ktg_query_stock_summary']
+    assert len(parts) == 2 and 'planning_evidence' in parts[0].metadata
+    assert 'planning_evidence' not in parts[1].metadata
+    evidence = stock_step_evidence(result.all_messages())
+    assert set(evidence) == {'a'} and evidence['a'][0]['tool_call_id'] == 'stock1'
+    assert evidence['a'][0]['no_records'] is True and evidence['a'][0]['queried_at'] == '2026-11-26T00:00:00+00:00'
+    repository = SessionRepository(store.path)
+    repository.settle_native_run(deps.owner, deps.run_id, 'completed', 'completed', {}, tuple(result.all_messages()))
+    task = repository.get_task(deps.owner, deps.session_id, deps.run_id)
+    assert 'stock1' in str(task) and 'stock2' not in str(task)
 
 
 def test_permission_visibility_then_revocation_before_actual_execution(tmp_path: Path) -> None:
@@ -283,8 +315,9 @@ def test_output_validation_and_finite_retry_respect_side_effect_policy(tmp_path:
     def proposal_tool(operation_store: OperationPlanStore) -> ToolDefinition:
         return replace(build_workorder_operation_tool(operation_store), execute=timed_out_proposal)
 
-    monkeypatch.setattr(native, 'build_query_tools', query_tools)
-    monkeypatch.setattr(native, 'build_workorder_operation_tool', proposal_tool)
+    from ktg_agent.tools import mes_catalog
+    monkeypatch.setattr(mes_catalog, 'build_query_tools', query_tools)
+    monkeypatch.setattr(mes_catalog, 'build_workorder_operation_tool', proposal_tool)
 
     def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if not returns(messages):

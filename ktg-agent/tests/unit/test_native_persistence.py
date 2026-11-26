@@ -12,11 +12,10 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
-from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
 
-from ktg_agent.context.native_context import serialize_messages
 from ktg_agent.core.native_execution import NativeExecution
-from ktg_agent.core.native_persistence import NativeStepHistory, RecoveryRequired
+from ktg_agent.core.native_persistence import NativeStepHistory, RecoveryRequired, recovery_delta, working_history
 from ktg_agent.ktg.client import KTGClient
 from ktg_agent.tools.native import MesToolDeps
 
@@ -57,24 +56,38 @@ def test_native_step_store_and_owner_scoped_continuation(tmp_path: Path) -> None
     asyncio.run(scenario())
 
 
-def test_precompaction_archive_is_append_only_and_deduplicates(tmp_path: Path) -> None:
+def test_step_store_is_not_a_parallel_conversation_and_recovery_selects_delta(tmp_path: Path) -> None:
     async def scenario() -> None:
         database = tmp_path / 'one.sqlite'
         history = NativeStepHistory(database)
         scope = deps('current')
-        original = ModelRequest(parts=[UserPromptPart('original')])
-        next_message = ModelRequest(parts=[UserPromptPart('later')])
-        one = serialize_messages([original])
-        two = serialize_messages([original, next_message])
-        await history.archive_messages(scope, one)
-        await history.archive_messages(scope, two)
-        await history.archive_messages(scope, two)
-        snapshots = await NativeStepHistory(database).raw_snapshots(scope)
-        assert snapshots == (one, two)
-        assert await history.raw_snapshots(deps('current', 'other')) == ()
+        agent = Agent(TestModel(custom_output_text='original answer'), deps_type=MesToolDeps)
+        result = await agent.run('original', deps=scope, run_id=scope.run_id, conversation_id=scope.session_id,
+                                 capabilities=[history.capability(scope)])
+        settled = await history.store.latest_snapshot(run_id=scope.run_id)
+        assert settled is not None
+        archive = result.all_messages()[:1]
+        recovered = recovery_delta(settled.messages, archive, scope.run_id)
+        assert len(recovered) == 1 and 'original answer' in str(recovered)
+        assert recovery_delta(settled.messages, result.all_messages(), scope.run_id) == ()
+        assert working_history(result.all_messages(), settled.messages) == tuple(settled.messages)
         with sqlite3.connect(database) as db:
-            assert db.execute('SELECT COUNT(*) FROM native_raw_messages').fetchone() == (2,)
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert {'runs', 'events', 'snapshots'} <= tables
+            assert not any(name.startswith('native_raw_') for name in tables)
     asyncio.run(scenario())
+
+
+def test_working_history_never_passes_unsettled_tool_calls_into_a_fresh_run() -> None:
+    user = ModelRequest(parts=[UserPromptPart('original')], run_id='old')
+    previous = ModelResponse(parts=[TextPart('known')], run_id='old')
+    following = ModelRequest(parts=[UserPromptPart('do more')], run_id='old')
+    unresolved = ModelResponse(parts=[ToolCallPart('write', '{}', 'not-settled')], run_id='old')
+    assert working_history([user, previous, following, unresolved]) == (user, previous, following)
+    later_user = ModelRequest(parts=[UserPromptPart('new Run')], run_id='new')
+    later_answer = ModelResponse(parts=[TextPart('later complete answer')], run_id='new')
+    assert working_history([user, previous, following, unresolved, later_user, later_answer]) == (
+        user, previous, following, later_user, later_answer)
 
 
 def test_unknown_tool_effect_prevents_resume(tmp_path: Path) -> None:

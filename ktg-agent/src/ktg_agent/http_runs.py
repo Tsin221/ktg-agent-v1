@@ -9,11 +9,12 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.usage import RunUsage
 
-from ktg_agent.core.messages import JsonObject, Message
+from ktg_agent.core.messages import JsonObject
 from ktg_agent.sessions.repository import SessionRepository, RunRecord
 
 log = logging.getLogger(__name__)
@@ -24,21 +25,18 @@ class Outcome:
     status: str
     reason: str
     summary: JsonObject = field(default_factory=dict)
-    messages: tuple[Message, ...] = ()
-    native_messages: tuple[ModelMessage, ...] | None = None
+    native_messages: tuple[ModelMessage, ...] = ()
+    native_usage: RunUsage | None = None
+    native_context: tuple[ModelMessage, ...] | None = None
 
 
 @runtime_checkable
 class NativeSettlementRepository(Protocol):
-    """Application transaction boundary for native history plus terminal state.
-
-    The legacy repository deliberately does not implement this until the
-    unified SQLite schema is designed. Never project native history to legacy
-    Message just to allow settlement.
-    """
+    """Application transaction boundary for native history plus terminal state."""
     def settle_native_run(self, owner_user_id: str, run_id: str, status: str,
                           stop_reason: str, result_summary: JsonObject,
-                          messages: tuple[ModelMessage, ...]) -> RunRecord: ...
+                          messages: tuple[ModelMessage, ...], *, usage: RunUsage | None = None,
+                          context: tuple[ModelMessage, ...] | None = None) -> RunRecord: ...
 
 
 class Execution(Protocol):
@@ -46,8 +44,8 @@ class Execution(Protocol):
     def stop(self) -> None:
         """Nonblocking cooperative stop; prevent new work, preserve unknown receipts."""
         ...
-    async def input(self, request_id: str, mode: str, message: str) -> bool:
-        """True only when consumption is confirmed; False leaves input queued."""
+    async def input(self, request_id: str, mode: str, message: str) -> bool | Literal['queued', 'rejected']:
+        """Native admission is separate from eventual delivery."""
         ...
 
 
@@ -60,6 +58,23 @@ class Events(Protocol):
     def last_seq(self, run_id: str) -> int: ...
 
 
+async def public_run_summary(repository: SessionRepository, owner: str, run: RunRecord) -> JsonObject | None:
+    """Review the persisted native response instead of saving a second text copy."""
+    if run.result_summary is None:
+        return None
+    summary = dict(run.result_summary)
+    if run.status == 'completed':
+        from ktg_agent.sessions.service import _safe_public
+        messages = await asyncio.to_thread(repository.load_run_messages, owner, run.id)
+        for message in reversed(messages):
+            if isinstance(message, ModelResponse):
+                answer = ''.join(part.content for part in message.parts if isinstance(part, TextPart)).strip()
+                if answer:
+                    summary['answer'] = _safe_public(answer)
+                    break
+    return summary
+
+
 class RunRuntime:
     def __init__(self, repository: SessionRepository, core: Core,
                  events: Events | None = None, *, shutdown_timeout: float = 2) -> None:
@@ -70,6 +85,7 @@ class RunRuntime:
         self.lock = asyncio.Lock()
         self.closing = False
         self.admissions: set[asyncio.Task[RunRecord]] = set()
+        self.controls: set[asyncio.Task[JsonObject]] = set()
         self.unresolved: set[str] = set()
 
     async def create(self, owner: str, session_id: str, request_id: str,
@@ -121,14 +137,9 @@ class RunRuntime:
 
     async def _settle(self, owner: str, run_id: str, outcome: Outcome) -> None:
         try:
-            if outcome.native_messages is not None:
-                if not isinstance(self.repository, NativeSettlementRepository):
-                    raise RuntimeError('native SQLite terminal settlement is not connected')
-                record = await asyncio.to_thread(self.repository.settle_native_run, owner, run_id,
-                    outcome.status, outcome.reason, outcome.summary, outcome.native_messages)
-            else:
-                record = await asyncio.to_thread(self.repository.settle_run, owner, run_id,
-                    outcome.status, outcome.reason, outcome.summary, outcome.messages)
+            record = await asyncio.to_thread(self.repository.settle_native_run, owner, run_id,
+                outcome.status, outcome.reason, outcome.summary, outcome.native_messages,
+                usage=outcome.native_usage, context=outcome.native_context)
         except Exception:
             self.unresolved.add(run_id)
             log.error('Run settlement failed; recovery required: %s', run_id)
@@ -136,7 +147,8 @@ class RunRuntime:
         if self.events is not None:
             try:
                 self.events.publish(run_id, 'run_settled', {'status': record.status,
-                    'stop_reason': record.stop_reason, 'result_summary': record.result_summary})
+                    'stop_reason': record.stop_reason,
+                    'result_summary': await public_run_summary(self.repository, owner, record)})
             except Exception:
                 log.error('Run notification failed: %s', run_id)
 
@@ -160,6 +172,19 @@ class RunRuntime:
 
     async def control(self, owner: str, run_id: str, request_id: str,
                       kind: str, payload: JsonObject) -> JsonObject:
+        # A cancelled HTTP request must not leave an admitted command stranded
+        # between SQLite commit and delivery to the live native execution.
+        task = asyncio.create_task(self._control(owner, run_id, request_id, kind, payload))
+        self.controls.add(task)
+        def observed(done: asyncio.Task[JsonObject]) -> None:
+            if not done.cancelled():
+                done.exception()
+            self.controls.discard(done)
+        task.add_done_callback(observed)
+        return await asyncio.shield(task)
+
+    async def _control(self, owner: str, run_id: str, request_id: str,
+                       kind: str, payload: JsonObject) -> JsonObject:
         async with self.lock:
             execution = self.executions.get(run_id)
             record, created = await asyncio.to_thread(self.repository.admit_control,
@@ -168,11 +193,16 @@ class RunRuntime:
             if created and record.reason is None and execution is not None:
                 if kind == 'cancel':
                     execution.stop()
-                elif await self._deliver(execution, request_id, kind, str(payload['message'])):
-                    await asyncio.to_thread(self.repository.mark_input_consumed,
-                        owner, run_id, request_id)
-                    return {'run_id': run_id, 'request_id': request_id, 'mode': kind,
-                            'input_status': 'consumed'}
+                else:
+                    delivery = await self._deliver(execution, request_id, kind, str(payload['message']))
+                    if delivery is True:
+                        await asyncio.to_thread(self.repository.mark_input_consumed, owner, run_id, request_id)
+                        return {'run_id': run_id, 'request_id': request_id, 'mode': kind,
+                                'input_status': 'consumed'}
+                    if delivery == 'rejected':
+                        await asyncio.to_thread(self.repository.mark_input_rejected, owner, run_id, request_id)
+                        return {'run_id': run_id, 'request_id': request_id, 'mode': kind,
+                                'input_status': 'not_consumed'}
             current = await asyncio.to_thread(self.repository.get_run, owner, run_id)
             assert current is not None
             if kind == 'cancel':
@@ -182,7 +212,7 @@ class RunRuntime:
                     'input_status': record.status}
 
     async def _deliver(self, execution: Execution, request_id: str,
-                       kind: str, message: str) -> bool:
+                       kind: str, message: str) -> bool | Literal['queued', 'rejected']:
         try:
             async with asyncio.timeout(1):
                 return await execution.input(request_id, kind, message)
@@ -210,8 +240,9 @@ class RunRuntime:
                     execution.stop()
                 except Exception:
                     self.unresolved.add(run_id)
-        if self.tasks:
-            _, pending = await asyncio.wait(tuple(self.tasks.values()), timeout=self.shutdown_timeout)
+        outstanding = (*self.tasks.values(), *self.admissions, *self.controls)
+        if outstanding:
+            _, pending = await asyncio.wait(outstanding, timeout=self.shutdown_timeout)
             if pending:
                 self.unresolved.update(k for k, v in self.tasks.items() if v in pending)
                 log.error('Shutdown incomplete; active records retained for recovery')

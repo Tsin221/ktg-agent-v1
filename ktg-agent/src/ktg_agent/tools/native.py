@@ -11,18 +11,12 @@ from pydantic_ai import RunContext, Tool, ToolReturn
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset, FunctionToolset
 
 from ktg_agent.core.messages import JsonObject, MessageValidationError, ToolCall
-from ktg_agent.ktg.business_reference import build_business_reference_tool
 from ktg_agent.ktg.client import KTGClient
-from ktg_agent.ktg.production_trace import build_production_trace_tool
-from ktg_agent.ktg.queries import build_query_tools
-from ktg_agent.ktg.workorder_materials import build_workorder_materials_tool
-from ktg_agent.ktg.workorder_overview import build_workorder_overview_tool
-from ktg_agent.ktg.workorder_quality import build_workorder_quality_tool
+from ktg_agent.ktg.queries import STOCK_SUMMARY_TOOL
 from ktg_agent.operations.store import OperationPlanStore
-from ktg_agent.operations.tool import build_workorder_operation_tool
 from ktg_agent.sessions.task_tools import owner_from_identity
 from ktg_agent.tools.catalog import CatalogSwitches, ToolManifest
-from ktg_agent.tools.legacy_catalog import build_legacy_catalog
+from ktg_agent.tools.mes_catalog import build_mes_catalog, mes_definitions
 from ktg_agent.tools.permissions import PermissionDecision, evaluate_permission_policy
 from ktg_agent.tools.registry import ExecutionMode, ToolContext, ToolDefinition, ToolEffect, ToolRegistry, ToolResult, ToolStatus
 from ktg_agent.tools.runner import ToolRunner
@@ -86,7 +80,7 @@ def _denied(error_code: str) -> ToolResult:
     return ToolResult(message, status=ToolStatus.FAILED, error_code=error_code)
 
 
-def _native_result(result: ToolResult) -> ToolReturn:
+def _native_result(result: ToolResult, planning_evidence: JsonObject | None = None) -> ToolReturn:
     # ToolReturn.metadata stays in native history/events, not the provider's prompt.
     # https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns
     return ToolReturn(
@@ -99,6 +93,7 @@ def _native_result(result: ToolResult) -> ToolReturn:
             'details': result.details if result.status is ToolStatus.SUCCEEDED else None,
             'operation_id': result.operation_id,
             'verification': result.verification if result.status is ToolStatus.SUCCEEDED else None,
+            **({'planning_evidence': planning_evidence} if planning_evidence is not None else {}),
         },
     )
 
@@ -112,12 +107,8 @@ def build_mes_toolset(
 
     No model-controlled search/load, activation snapshot, or confirmation tool.
     """
-    definitions = (
-        *build_query_tools(), build_workorder_overview_tool(), build_workorder_materials_tool(),
-        build_workorder_quality_tool(), build_production_trace_tool(), build_business_reference_tool(),
-        build_workorder_operation_tool(operation_store),
-    )
-    catalog = build_legacy_catalog(definitions)
+    definitions = mes_definitions(operation_store)
+    catalog = build_mes_catalog(definitions)
     manifests = {definition.name: catalog.manifest(definition.name) for definition in definitions}
     defaults = CatalogSwitches({item.module: True for item in manifests.values()}, {name: True for name in manifests})
     provider = switches_provider or (lambda: defaults)
@@ -149,10 +140,29 @@ def build_mes_toolset(
             except MessageValidationError:
                 return _native_result(ToolResult('工具参数必须符合 JSON，请修正后调用。',
                     status=ToolStatus.FAILED, error_code='VALIDATION_ERROR'))
+            # Capture a stable, unique active Planning step across an actual
+            # authorized stock query. Planning metadata is not model-supplied.
+            # An absent or changing plan does not invalidate the business read.
+            from ktg_agent.sessions.native_planning import active_stock_step, planning_task_id
+            before = None
+            if definition.name == STOCK_SUMMARY_TOOL:
+                try:
+                    before = await active_stock_step(str(operation_store.path), deps)
+                except Exception:
+                    pass
             result = await runner.run(call, ToolContext(
                 run_id=deps.run_id, tool_call_id=ctx.tool_call_id, identity=identity, ktg_client=deps.client,
             ))
-            return _native_result(result)
+            evidence: JsonObject | None = None
+            if before is not None and result.status is ToolStatus.SUCCEEDED and result.details is not None:
+                try:
+                    after = await active_stock_step(str(operation_store.path), deps)
+                    if after == before and result.details.get('kind') == 'stock_summary':
+                        evidence = {'task_id': planning_task_id(deps), 'step_id': before.id,
+                                    'step_description': before.content}
+                except Exception:
+                    pass
+            return _native_result(result, evidence)
 
         # from_schema intentionally bypasses native argument validation; runner
         # preserves the existing schema and repair feedback without duplicate types.

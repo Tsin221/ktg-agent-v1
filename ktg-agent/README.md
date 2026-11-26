@@ -1,83 +1,44 @@
-# KTG Agent
+# KTG Agent 候选工程
 
-KTG Agent 的 Python 核心包，是面向 MES 生产主管场景的面试展示 Demo。现有实现提供模型事件流、工具发现及受控执行、会话与任务持久化、上下文管理、运行限额和 HTTP/SSE 服务。后续优先评估成熟框架简化通用基础设施，不以生产级 Agent 平台为目标。
+Pydantic AI / FastAPI 框架化重构候选，面向 MES 生产主管演示。当前八项业务工具及业务权限、确认、回执、幂等规则保持原口径。正式工程与数据库仍独立运行。
 
-截至 2026-11-25（`26e93f5`）：旧业务工具已从源代码移除（预删除 Git 检查点 `80122c5`），现有六个业务只读工具、一个业务编码识别辅助工具及一个受控工单操作方案工具。旧业务写入、探索、设备、维修、点检、工装等已退役工具不能通过环境开关重新启用。历史部署和业务证据以对应 Git 版本与项目文档为准；MES 原生页面与后端不受这次 Agent 源码清理影响。
+## 候选配置及启动
 
-## 环境和开发验证
-
-- Python 3.12、uv 0.11.21。
-- 锁文件管理运行时 `httpx`、`jsonschema` 及开发依赖；FakeProvider 离线测试不调用真实模型或 MES。
+只使用独立目录和经确认的隔离 MES。Windows PowerShell 示例：
 
 ```powershell
+$env:MODEL_API_KEY = '<隔离模型凭据>'
+$env:MODEL_ID = 'deepseek-flash'
+$env:MODEL_BASE_URL = '<DeepSeek API 地址>'
+$env:KTG_BASE_URL = '<明确隔离 MES 地址>'
+$env:AGENT_HOST = '127.0.0.1'
+$env:AGENT_PORT = '18991'
+$env:AGENT_SESSION_DB = 'E:/ktg_agent/ktg-agent-refactor/.runtime/agent-sqlite-candidate.sqlite3'
 uv sync --locked
-uv run --locked python -c "import ktg_agent; print(ktg_agent.__version__)"
-uv run --locked python examples/fake_agent.py
-uv run --locked pytest -q
-uv run --locked mypy
+uv run --locked python -m ktg_agent.server
 ```
 
-核心事件协议和接口见 [`docs/core-contracts.md`](docs/core-contracts.md)。历史阶段的验收记录不代表现行新工具范围。
+候选启动在 readiness 前完成独立 SQLite、官方 StepStore 和 Planning 初始化及中断状态恢复。正常运行使用原生核心。候选已由 `ktg_agent.server` 统一启动 FastAPI/Uvicorn，单 Worker，禁用 reload；`http_candidate` 仅保留启动实现，不再作为独立命令。候选不得指向 ktg_agent_v1 的演示库。本次候选入口接管不改变正在运行的正式本地或云端演示，实际服务切换需要另行批准。
 
-## 启动与隔离
+## 开发验证
 
-在 `ktg_agent_v1/.env` 中配置服务端变量（真实密钥不进入 Git）：
-
-```dotenv
-MODEL_API_KEY=...
-MODEL_BASE_URL=https://api.openai.com/v1
-MODEL_ID=...
-KTG_BASE_URL=http://127.0.0.1:8080
-AGENT_HOST=127.0.0.1
-AGENT_PORT=8001
-AGENT_SESSION_DB=E:/ktg_agent/ktg_agent_v1/.runtime/agent-readonly-sessions.sqlite3
+```powershell
+.venv/Scripts/python.exe -m pytest tests -q
+.venv/Scripts/python.exe -m mypy src tests
+uv lock --check --offline --python .venv/Scripts/python.exe
 ```
 
-从项目根目录启动 `scripts/start-agent.ps1`，或在本目录加载环境变量后运行 `uv run --locked python -m ktg_agent.server`。Agent 的 `KTG_BASE_URL` 必须明确对应希望访问的 MES 后端，正式演示环境另需独立状态文件和同源代理；不要将旧演示环境会话文件与新环境混用。模型凭据始终由 Python 服务持有，不进入浏览器。
+离线测试使用真实安装的 Pydantic AI TestModel/FunctionModel、临时 SQLite 与 MES 替身。真实 MES 写入只能在明确授权、隔离的验收环境进行。新会话库不迁移旧聊天；必要历史业务记录由显式只读导入旧库副本保留，不能重放未知操作。
 
-正式演示（`ktg_mes_demo`）使用项目根目录的 `scripts/start-mes-demo-agent.ps1`：MES `18090`、Agent `18091`、演示 UI `18854`，会话与日志独立存放在 `.runtime/mes-demo/agent/`。该命令仅在正式演示后端已运行时启动 Agent；验证工具目录和实际业务数据可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-agent.py`，不调用真实模型。
+## 结构
 
-可选运行总 token、模型轮次、工具数和上下文窗口配置遵循 `server.py` 的 Settings；未启用窗口时不作上下文裁切和压缩。所有口径必须按当前授权重新读事实，历史摘要或旧工具结果不能视作实时业务状态。
+- sessions：统一 SQLite、正式原生会话历史、Run 状态和官方 Planning。
+- core：Pydantic AI 原生执行、控制、StepPersistence 和恢复。
+- context：Pydantic AI 原生自动摘要与原始消息归档。
+- tools：八项 MES 业务工具的静态目录、权限过滤和业务参数校验；原生工具集负责模型工具选择及调度。
+- operations：确定性业务方案、确认、执行与回执核实。
+- http_app / http_runs / http_rest / http_sse：FastAPI 装配、Run 受理、会话 DTO 和实时传输。
 
-## 当前业务工具
+旧的自研 Agent 循环、消息协议、模型适配器、工具搜索与加载、独立摘要、结果落盘、任务专属预算和输入队列已从候选运行源码移除。旧环境里的结果落盘、工具激活上限、独立摘要输出上限与预留上下文 Token 配置不再被候选服务消费。
 
-| 工具 | 权威来源 | 权限 |
-| --- | --- | --- |
-| `ktg_count_products` | `GET /mes/md/mditem/list`，仅 PRODUCT 的真实总数 | `mes:md:mditem:list` |
-| `ktg_query_stock_summary` | `GET /mes/wm/wmstock/summary`，按物料和仓库/单位的现存数量 | `mes:wm:wmstock:list` |
-| `ktg_query_workorder_overview` | `GET /mes/pro/workorder/list` 和 `GET /mes/pro/execution/workorders/{id}`；筛选工单及按需读取单件执行摘要 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
-| `ktg_query_workorder_materials` | 工单列表、草稿工单 BOM 和库存明细；已下达工单冻结 BOM、执行摘要和本工单装配任务可耗料 | `mes:pro:workorder:list`、`mes:pro:workorderbom:list`、`mes:pro:execution:query`、`mes:wm:wmstock:list` 同时具备 |
-| `ktg_query_workorder_quality` | 工单列表、全单执行摘要、检验任务当前及历史可访问 SN、单件各轮检验记录 | `mes:pro:workorder:list` 与 `mes:pro:execution:query` 同时具备 |
-| `ktg_query_production_trace` | `GET /mes/pro/execution/units/trace`、`GET /mes/pro/execution/materials/trace`、物料列表精确定位；实际投入与批次关联 SN | `mes:pro:execution:trace`、`mes:pro:execution:query`、`mes:md:mditem:list` 同时具备 |
-
-此外，`ktg_resolve_business_reference` 用于核实含义不明的业务编码，保留歧义、权限范围和未核实状态；`ktg_prepare_workorder_operations` 用于准备创建、编辑草稿、备料判断和下达方案，实际执行须由用户确认并核实回执。模型不能直接执行 MES 写入。
-
-分仓**现存量**不是本工单可消耗量、预留量或齐套结论。没有匹配的库存记录时明确说明，不编造零数量。工单概览支持名称片段、多编号、多状态、需求日期和分页；执行进度按需读取，未获取的进度不能视为零，部分覆盖不能视为全量。其他生产事实尚未提供 Agent 工具，不得用历史输出推断。
-
-工单用料查询接收 1–5 个准确工单编号，可选批次详情；名称片段先由工单概览定位。草稿比较工单 BOM 总需求与未绑定工单的非虚拟仓账面现存量，仅作原仓备料参考；已下达则使用冻结 BOM 与待装配件数计算剩余需求，对比本工单真实可耗线边库存。不跨工单分配库存，不执行领料或采购。正式数据只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-materials.py`。
-
-工单质量查询接收 1–5 个准确工单编号，可选 1–10 个准确 SN 编码；默认展示当前或历史异常单件及对应检验历史。`summary.firstInspectionCompleted` 与 `firstInspectionAccepted` 分别为全单实际首检完成件数及首检合格件数；历史核实件数 `scanned_units` 包含尚待检但已核实空历史的单件，绝不等于已检数量。首检不合格不等于最终不合格，未检不等于失败；未匹配或不完整的历史不得作为全部无异常的依据。只读取真实检验项、实测、阈值及缺陷记录，不推定根因；MES 不合格处置仅支持返工和报废，但 Agent 不执行处置。默认每单核实至多 50 个检验成员，明细超限、版本变化等情况显式标明部分覆盖或待核实。正式库只读验证可运行 `ktg-agent/.venv/Scripts/python.exe scripts/verify-mes-demo-quality.py`。
-
-生产追溯查询支持 `unit_to_material`（1–5 个精确 SN）和 `material_to_unit`（1–3 个精确原料物料编码+批次，可分页）。只投影实际投入记录，不能用计划、领料或库存替代实耗；反查总数为当前账号范围内去重 SN，状态统计限本页，全部覆盖时才代表整批。跨批次重复 SN 不可累加，关联不等于缺陷或根因；可按实际 SN 自主组合质量工具，质量全工单统计不等于批次统计。
-
-`search_tools`/`load_tools` 为目录发现与运行级加载；`create_task`/`update_task` 为 Agent 会话内部任务清单协议，不是 MES 工单写入。业务目录包含上述八项；当前权限及运行时校验仍适用。配置旧业务工具开关不会恢复已删除的代码。已存在的历史退役操作不能作为新的确认操作执行。
-
-## HTTP 与会话
-
-服务提供 `GET /health`、`GET /agent-api/v1/tools` 和 `POST /agent-api/v1/query`。业务请求必须使用当前 MES 用户的 `Authorization: Bearer <KTG token>`；用户身份与权限由真实 `/getInfo` 核对。模型不能指定 KTG 地址或任意接口。
-
-会话入口包括 `POST/GET /agent-api/v1/sessions`、会话详情/消息/统计/压缩、`POST /agent-api/v1/sessions/{sid}/runs`、run 状态/事件/取消/输入及任务接口。SSE `after_seq` 为已收事件序号，断线续接不重放用户请求；事件历史不可用时读 run 快照和会话消息。持久化会话保持用户隔离和请求幂等，进程重启不自动重放不确定业务操作。D1 通过 `/agent-api/v1/sessions/{sid}/operations` 查询方案，使用 `/{plan_id}/confirm`、`/{plan_id}/cancel`、`/{plan_id}/reconcile` 处理确认、取消和核实；旧业务专用确认和探索 HTTP 路由不再开放。
-
-## 项目结构
-
-```text
-src/ktg_agent/
-  core/       通用消息、生命周期、AgentLoop 和运行预算
-  providers/  假模型与 OpenAI 兼容适配器
-  context/    上下文窗口、摘要、计量和结果收纳
-  tools/      定义、目录、运行时发现和权限执行
-  ktg/        MES 客户端及当前业务查询
-  sessions/   会话/任务仓储，运行调度及恢复
-  service.py  组件装配与授权查询
-  server.py   HTTP/SSE 服务和启动配置
-```
+详细设计与验收记录见 `docs/Agent建设工程/框架化重构详细设计/SQLite持久化层实施/`（工作区根目录）。
