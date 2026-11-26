@@ -492,6 +492,30 @@ async function main() {
   assert.strictEqual(view.operationPlans[0].status, 'succeeded')
   view.resetOperations()
   assert.deepStrictEqual(view.operationPlans, [])
+  // The model-usage status request can beat the final stream frame. Do not
+  // display "completed" or enable the next submission before loading the answer.
+  const settlingRunId = view.activeRunId
+  view.activeRun = { run_id: settlingRunId, status: 'running', last_seq: 10 }
+  view.progress = { messages: [{ id: 'pending-answer', text: '部分答案', status: 'streaming' }], tools: {} }
+  const terminalRun = { run_id: settlingRunId, status: 'completed', last_seq: 20 }
+  const oldStatusRead = api.getAgentRun
+  api.getAgentRun = async () => terminalRun
+  let releaseSettlement
+  client.reconcileRun = () => new Promise(resolve => { releaseSettlement = resolve })
+  handlers.onEvent({ type: 'model_request_settled', run_id: settlingRunId, payload: { status: 'completed' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.activeRun.status, 'running', 'terminal badge must wait for persisted answer')
+  assert.strictEqual(view.composerBusy, true, 'next question must wait for settlement')
+  assert.strictEqual(view.canInput, false)
+  releaseSettlement({ run: terminalRun, messages: { items: [
+    { message_id: 99, run_id: settlingRunId, role: 'assistant', content: [{ type: 'text', text: '完整答案' }] }
+  ] }, inputs: [] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.strictEqual(view.activeRun.status, 'completed')
+  assert.strictEqual(view.progress.messages.length, 0)
+  assert.ok(view.displayedMessages.some(message => message.text === '完整答案'))
+  assert.strictEqual(view.composerBusy, false)
+  api.getAgentRun = oldStatusRead
   const operationCard = compiler.parseComponent(fs.readFileSync(path.resolve(__dirname, '../src/components/AgentAssistant/OperationPlanCard.vue'), 'utf8'))
   assert.deepStrictEqual(compiler.compile(operationCard.template.content).errors, [])
   console.log('agent assistant component state tests passed')

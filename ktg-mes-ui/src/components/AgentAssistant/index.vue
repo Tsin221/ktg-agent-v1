@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-assistant">
+  <div class="agent-assistant" :class="{ 'agent-assistant--embedded': embedded }">
     <button
       v-if="!open"
       ref="launcher"
@@ -13,7 +13,7 @@
     </button>
 
     <section v-else class="agent-panel" :style="panelStyle" role="dialog" aria-label="KTG 智能助手">
-      <button class="agent-panel__resize" type="button" aria-label="调整助手窗口大小：方向键调整宽高" title="拖动调整宽高；方向键每次调整20像素" @pointerdown.prevent="startResize" @keydown="resizeKey">⤢</button>
+      <button v-if="!embedded" class="agent-panel__resize" type="button" aria-label="调整助手窗口大小：方向键调整宽高" title="拖动调整宽高；方向键每次调整20像素" @pointerdown.prevent="startResize" @keydown="resizeKey">⤢</button>
       <div class="agent-panel__top">
         <header class="agent-panel__header">
           <div class="agent-panel__identity">
@@ -31,7 +31,7 @@
             >
               会话 <i :class="sessionsOpen ? 'el-icon-arrow-up' : 'el-icon-arrow-down'" aria-hidden="true" />
             </button>
-            <button class="agent-panel__minimize" type="button" aria-label="收起智能查询助手" @click="closePanel">
+            <button v-if="!embedded" class="agent-panel__minimize" type="button" aria-label="收起智能查询助手" @click="closePanel">
               <i class="el-icon-minus" aria-hidden="true" />
             </button>
           </div>
@@ -239,7 +239,7 @@
         <div v-if="liveMessage" class="agent-progress" aria-label="本轮临时进度">
           <div v-if="liveMessage">
             <div class="agent-message">{{ liveMessage.text.length > 120 ? liveMessage.text.slice(0, 120) + '…' : liveMessage.text }}</div>
-            <div class="agent-progress__status">{{ liveMessage.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && liveMessage.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
+            <div class="agent-progress__status">{{ settlingRunId && settlingRunId === activeRunId ? '正在同步完整结果' : liveMessage.status === 'incomplete' || streamError || (activeRun && isTerminalRun(activeRun.status) && liveMessage.status === 'streaming') ? '部分文本 · 未完成' : '临时文本 · 尚未结算' }}</div>
           </div>
         </div>
       </div>
@@ -249,7 +249,7 @@
         class="agent-panel__status"
       >
         <div v-if="activeRun || loading" class="agent-message agent-message--assistant agent-message--loading" role="status">
-          {{ loading ? '正在提交问题…' : toolActivity || runStatusText(activeRun) }}
+          {{ loading ? '正在提交问题…' : settlingRunId && settlingRunId === activeRunId ? '正在同步完整结果…' : toolActivity || runStatusText(activeRun) }}
           <button v-if="streamError && activeRun && !isTerminalRun(activeRun.status)" type="button" @click="followRun">重新连接</button>
           <button v-if="canCancel" type="button" :disabled="cancelLoading" @click="stopRun">
             {{ cancelLoading ? '停止请求中…' : '停止后续执行' }}
@@ -340,9 +340,10 @@ export function clampPanelSize(size, viewport) {
 export default {
   name: 'AgentAssistant',
   components: { AgentResultCard, AgentAnswerContent, AgentOperationPlanCard },
+  props: { embedded: { type: Boolean, default: false } },
   data() {
     return {
-      open: false,
+      open: this.embedded,
       sessionsOpen: false,
       panelSize: { width: 390, height: 620 },
       viewport: { width: 1024, height: 768 },
@@ -368,6 +369,8 @@ export default {
       taskStatusText: { pending: '待开始', in_progress: '进行中', completed: '已完成' },
       activeRunId: '',
       activeRun: null,
+      settlingRunId: '',
+      settlementInFlightRunId: '',
       sessionStats: null,
       pendingQuestion: '',
       pendingSubmission: null,
@@ -424,7 +427,7 @@ export default {
       return version.steps.find(step => step.status === 'in_progress')
     },
     panelStyle() {
-      if (this.viewport.width <= 600) return {}
+      if (this.embedded || this.viewport.width <= 600) return {}
       const size = clampPanelSize(this.panelSize, this.viewport)
       return { width: `${size.width}px`, height: `${size.height}px` }
     },
@@ -449,10 +452,10 @@ export default {
       }
       return visibleInputs(inputs, this.messages, this.activeRunId)
     },
-    canInput() { return this.activeRun && this.activeRun.status === 'running' },
-    canCancel() { return this.activeRun && ['queued', 'running'].includes(this.activeRun.status) },
+    canInput() { return this.activeRun && this.activeRun.status === 'running' && (!this.settlingRunId || this.settlingRunId !== this.activeRunId) },
+    canCancel() { return this.activeRun && ['queued', 'running'].includes(this.activeRun.status) && (!this.settlingRunId || this.settlingRunId !== this.activeRunId) },
     composerBusy() {
-      return this.loading || this.sessionLoading || this.cancelLoading ||
+      return this.loading || this.sessionLoading || this.cancelLoading || (!!this.settlingRunId && this.settlingRunId === this.activeRunId) ||
         (this.activeRun && ['queued', 'cancelling'].includes(this.activeRun.status))
     },
     busy() {
@@ -608,6 +611,8 @@ export default {
       this.resetTasks()
       this.activeRunId = ''
       this.activeRun = null
+      this.settlingRunId = ''
+      this.settlementInFlightRunId = ''
       this.pendingQuestion = ''
       this.pendingSubmission = null
       this.runInputs = []
@@ -665,6 +670,8 @@ export default {
       this.activeRun = null
       this.sessionStats = null
       this.activeRunId = ''
+      this.settlingRunId = ''
+      this.settlementInFlightRunId = ''
       this.messages = []
       try {
         const session = await getAgentSession(sessionId)
@@ -683,7 +690,7 @@ export default {
         const pointer = agentSession.getState()
         const runId = session.active_run_id || pointer && pointer.runId
         if (runId) {
-          agentSession.setRun(runId)
+          agentSession.setRun(runId, { replay: true })
           this.activeRunId = runId
           const run = await getAgentRun(runId)
           if (epoch !== this.epoch) return
@@ -845,6 +852,59 @@ export default {
         if (epoch === this.epoch) this.sessionLoading = false
       }
     },
+    applyRunSnapshot(snapshot, epoch) {
+      if (epoch !== this.epoch || snapshot.run.run_id !== this.activeRunId) return
+      if (this.activeRun && isTerminalRun(this.activeRun.status) && !isTerminalRun(snapshot.run.status)) return
+      if (snapshot.historyIncomplete) {
+        this.progress = { messages: [], tools: {}}
+        this.panelError = '部分实时进度已过期，已恢复保存的状态；完整结果将在结束后同步。'
+      }
+      this.activeRun = snapshot.run
+      this.refreshStats(epoch)
+      this.messages = presentMessages(snapshot.messages.items)
+      this.runInputs = snapshot.inputs
+      this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
+      if (isTerminalRun(snapshot.run.status)) {
+        if (this.streamError || this.settlingRunId === snapshot.run.run_id) this.panelError = ''
+        this.streamError = false
+        if (this.settlingRunId === snapshot.run.run_id) this.settlingRunId = ''
+        this.refreshTasks(epoch)
+        this.refreshOperationPlans(epoch)
+        this.pendingQuestion = ''
+        if (snapshot.run.status === 'completed' || snapshot.run.status === 'needs_input') {
+          this.progress = { messages: [], tools: {}}
+        } else {
+          const savedTexts = new Set(this.messages.filter(message => message.role === 'assistant').map(message => message.text))
+          this.progress = { ...this.progress, messages: this.progress.messages
+            .filter(message => message.text && !savedTexts.has(message.text))
+            .map(message => ({ ...message, status: 'incomplete' })) }
+        }
+        this.scrollToLatestAnswer()
+      } else this.scrollToBottom()
+    },
+    async settleFromStatus(run, epoch) {
+      const runId = run.run_id
+      const current = () => epoch === this.epoch && runId === this.activeRunId && this.activeRun && !isTerminalRun(this.activeRun.status)
+      if (!current() || this.settlementInFlightRunId === runId) return
+      this.settlingRunId = runId
+      this.settlementInFlightRunId = runId
+      let retry = false
+      try {
+        const snapshot = await agentSession.reconcileRun(run)
+        if (current()) {
+          if (snapshot) this.applyRunSnapshot(snapshot, epoch)
+          else retry = true
+        }
+      } catch (error) {
+        if (current()) {
+          this.panelError = this.errorText(error, '完整结果读取失败，正在重试。')
+          retry = true
+        }
+      } finally {
+        if (this.settlementInFlightRunId === runId) this.settlementInFlightRunId = ''
+        if (retry && current()) window.setTimeout(() => this.settleFromStatus(run, epoch), 1000)
+      }
+    },
     async followRun(epoch = this.epoch) {
       if (!this.activeRunId) return
       this.streamError = false
@@ -874,40 +934,22 @@ export default {
               this.refreshTasks(epoch)
             }
             if (event.type === 'cancel_requested') this.activeRun = { ...this.activeRun, status: 'cancelling' }
+            if (event.type === 'run_settled' && !isTerminalRun(this.activeRun.status)) this.settlingRunId = event.run_id
             if (['model_request_started', 'model_usage_reported', 'model_request_settled'].includes(event.type)) {
               const runId = this.activeRunId
               getAgentRun(runId).then(run => {
-                if (epoch === this.epoch && runId === this.activeRunId &&
-                    (!this.activeRun.last_seq || run.last_seq >= this.activeRun.last_seq)) this.activeRun = run
+                if (epoch !== this.epoch || runId !== this.activeRunId || !this.activeRun || isTerminalRun(this.activeRun.status)) return
+                if (!this.activeRun.last_seq || run.last_seq >= this.activeRun.last_seq) {
+                  if (isTerminalRun(run.status)) this.settleFromStatus(run, epoch)
+                  else if (this.settlingRunId !== runId) this.activeRun = run
+                }
               }).catch(error => {
                 if (epoch === this.epoch) this.panelError = this.errorText(error, '用量状态读取失败。')
               })
             }
             if (event.type !== 'run_settled') this.progress = progressFromEvent(this.progress, event)
           },
-          onSnapshot: snapshot => {
-            if (epoch !== this.epoch || snapshot.run.run_id !== this.activeRunId) return
-            this.activeRun = snapshot.run
-            this.refreshStats(epoch)
-            this.messages = presentMessages(snapshot.messages.items)
-            this.runInputs = snapshot.inputs
-            this.reconcileInputAttempt(snapshot.run.run_id, this.runInputs)
-            if (isTerminalRun(snapshot.run.status)) {
-              this.refreshTasks(epoch)
-              this.refreshOperationPlans(epoch)
-              this.pendingQuestion = ''
-              if (snapshot.run.status === 'completed' || snapshot.run.status === 'needs_input') {
-                this.progress = { messages: [], tools: {}}
-              } else {
-                const savedTexts = new Set(this.messages.filter(message => message.role === 'assistant').map(message => message.text))
-                this.progress = { ...this.progress, messages: this.progress.messages
-                  .filter(message => message.text && !savedTexts.has(message.text))
-                  .map(message => ({ ...message, status: 'incomplete' })) }
-              }
-            }
-            if (isTerminalRun(snapshot.run.status)) this.scrollToLatestAnswer()
-            else this.scrollToBottom()
-          }
+          onSnapshot: snapshot => this.applyRunSnapshot(snapshot, epoch)
         })
         if (epoch === this.epoch && this.activeRun && !isTerminalRun(this.activeRun.status)) {
           window.setTimeout(() => {
@@ -1246,6 +1288,17 @@ export default {
   background: #fff;
   color: var(--assistant-text);
   box-shadow: 0 16px 48px rgba(24, 39, 60, 0.16), 0 2px 8px rgba(24, 39, 60, 0.05);
+}
+
+.agent-assistant--embedded { width: 100%; height: 100%; }
+.agent-assistant--embedded .agent-panel {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .agent-panel__resize { position: absolute; z-index: 2; top: 3px; left: 3px; width: 24px; height: 24px; border: 0; background: transparent; color: #606266; cursor: nwse-resize; touch-action: none; }

@@ -188,7 +188,7 @@ class SessionService:
         owner = await self._owner(authorization)
         if task_id is None:
             return {"items": self._repository.list_tasks(owner, session_id)}
-        return self._repository.get_task(owner, session_id, task_id, history=True)
+        return self._repository.get_task(owner, session_id, task_id, history=False)
 
     async def create_run(self, authorization: str, session_id: str,
                          request_id: object, message: object,
@@ -381,3 +381,4 @@ class SessionService:
         if len(json.dumps(context, ensure_ascii=False).encode("utf-8")) > 2048:
             raise ValueError("page_context 不能超过 2048 字节。")
         return context
+
